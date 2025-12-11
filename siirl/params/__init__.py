@@ -1,7 +1,7 @@
 from .data_args import DataArguments
 from .model_args import (
     ModelArguments,
-    ActorRolloutRefArguments,
+    ActorRefArguments,
     CriticArguments,
     RewardModelArguments,
     AlgorithmArguments,
@@ -15,7 +15,7 @@ from .display_dict import log_dict_formatted
 from .profiler_args import ProfilerArguments
 
 __all__ = [
-    "ActorRolloutRefArguments",
+    "ActorRefArguments",
     "CriticArguments",
     "RewardModelArguments",
     "AlgorithmArguments",

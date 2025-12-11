@@ -22,6 +22,7 @@ from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.worker.resouce_pool import create_placement_groups
+from siirl.worker.rollout.rollout_worker import RolloutWorker
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
     "TOKENIZERS_PARALLELISM": "true",
@@ -67,9 +68,9 @@ class MainRunner:
 
         # 2. initialize pg
         pgs = create_placement_groups(siirl_args)
-
+        rollout_pgs = pgs[4:]
         # 3. Initialize rollout worker
-        
+        rollout_worker = RolloutWorker(siirl_args, rollout_pgs)
         # 4. Initialize Actor worker
         
         # 5. start rollout and actor worker

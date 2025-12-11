@@ -16,10 +16,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional, Dict, List, Any
 from .data_args import DataArguments
 from .model_args import (
-    ActorRolloutRefArguments,
+    ActorRefArguments,
     CriticArguments,
     RewardModelArguments,
     AlgorithmArguments,
+    RolloutArguments
 )
 from .dag_args import DagArguments
 from .profiler_args import ProfilerArguments
@@ -89,7 +90,8 @@ class CustomRewardArguments:
 @dataclass
 class SiiRLArguments:
     data: DataArguments = field(default_factory=DataArguments)
-    actor_rollout_ref: ActorRolloutRefArguments = field(default_factory=ActorRolloutRefArguments)
+    actor_rollout_ref: ActorRefArguments = field(default_factory=ActorRefArguments)
+    rollout: RolloutArguments = field(default_factory=RolloutArguments)
     critic: CriticArguments = field(default_factory=CriticArguments)
     reward_model: RewardModelArguments = field(default_factory=RewardModelArguments)
     algorithm: AlgorithmArguments = field(default_factory=AlgorithmArguments)

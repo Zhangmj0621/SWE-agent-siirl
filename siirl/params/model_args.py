@@ -349,19 +349,18 @@ class RolloutArguments:
     log_prob_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
     log_prob_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
     log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
-    log_prob_use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic log prob batch size"})
     disable_log_stats: bool = field(default=True, metadata={"help": "Whether or not disable log stats"})
     enable_chunked_prefill: bool = field(default=True, metadata={"help": "Whether or not enable chunked prefill"})
     trust_remote_code: bool = field(default=False, metadata={"help": "trust the code or not."})
     val_kwargs: EvalSamplingArguments = field(default_factory=EvalSamplingArguments)
     layer_name_map: LayerNameMapArguments = field(default_factory=LayerNameMapArguments)
     seed: int = field(default=0, metadata={"help": "The random seed"})
-    mode: str = field(default="sync", metadata={"help": "sync: LLM, async: AsyncLLM"})
     multi_turn: MultiTurnArguments = field(default_factory=MultiTurnArguments)
-    micro_batch_size: Optional[int] = field(default=None, metadata={"help": "Inference micro-batch size"})
     engine_kwargs: EngineArguments = field(default_factory=EngineArguments)
     multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
-
+    router_ip: str = field(default="None", metadata={"help": "Rollout Router IP"})
+    router_port: str = field(default="None", metadata={"help": "Rollout Router Port"})
+    
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -395,13 +394,11 @@ class RefArguments:
 
 
 @dataclass
-class ActorRolloutRefArguments:
+class ActorRefArguments:
     hybrid_engine: bool = field(default=True, metadata={"help": "Hybrid engine mode"})
     model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Base model settings"})
     actor: ActorArguments = field(default_factory=ActorArguments, metadata={"help": "Actor configuration"})
     ref: RefArguments = field(default_factory=RefArguments, metadata={"help": "Reference model settings"})
-    rollout: RolloutArguments = field(default_factory=RolloutArguments, metadata={"help": "Rollout parameters"})
-
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
