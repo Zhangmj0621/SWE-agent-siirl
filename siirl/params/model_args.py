@@ -34,10 +34,7 @@ class MegatronArguments:
     param_offload: bool = field(default=True, metadata={"help": "Offload parameters to CPU"})
     grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
-    extra: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Extra settings"})
     override_transformer_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override transformer config"})
-    use_dist_checkpointing: bool = field(default=False, metadata={"help": "Whether to use distributed checkpointing"})
-    dist_checkpointing_path: str = field(default="", metadata={"help": "Path to save distributed checkpointing"})
     override_ddp_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override ddp config"})
     use_mbridge: bool = field(default=False, metadata={"help": "Whether to use mbridge"})
 
@@ -50,8 +47,6 @@ class OptimizerArguments:
     lr: float = field(default=1e-6, metadata={"help": "Learning rate"})
     lr_warmup_steps_ratio: float = field(default=0.0, metadata={"help": "Warmup steps ratio"})
     min_lr: float = field(default=0.0, metadata={"help": "Min learning rate"})
-    min_lr_ratio: Optional[float] = field(default=0.0, metadata={"help": "Min learning rate ratio"})
-    warmup_style: str = field(default="constant", metadata={"help": "Warmup strategy"})
     lr_warmup_init: float = field(default=0.0, metadata={"help": "Learning rate warmup init"})
     lr_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate decay steps"})
     lr_decay_style: str = field(default="linear", metadata={"help": "Learning rate decay style"})
@@ -60,14 +55,12 @@ class OptimizerArguments:
     lr_wsd_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate warmup decay steps"})
     use_checkpoint_opt_param_scheduler: bool = field(default=False, metadata={"help": "Whether to use checkpoint opt param scheduler"})
     total_training_steps: int = field(default=-1, metadata={"help": "Total training steps"})
-    betas: tuple[float, float] = field(default=(0.9, 0.999), metadata={"help": "Beta params Of Optimizer"})
     weight_decay: float = field(default=1e-2, metadata={"help": "Weight decay params of Optimizer"})
     lr_warmup_steps: int = field(
         default=-1,
         metadata={"help": "Prioritized. Negative values mean delegating to lr_warmup_steps_ratio."},
     )
     clip_grad: float = field(default=1.0, metadata={"help": "gradient clip"})
-    num_cycles: float = field(default=0.5, metadata={"help": "num cycles"})
     override_optimizer_config: Optional[dict] = field(default=None, metadata={"help": "Override optimizer config"})
 
     def to_dict(self) -> Dict[str, Any]:
@@ -80,65 +73,16 @@ class ModelArguments():
         default="~/models/deepseek-llm-7b-chat",
         metadata={"help": "Model path or identifier"},
     )
-    external_lib: Optional[str] = field(default=None, metadata={"help": "External model library"})
     override_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Model config overrides"})
-    enable_gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing"})
-    gradient_checkpointing_kwargs: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Gradient checkpointing kwargs"})
-    use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
-    cache_dir: Optional[str] = field(
-        default=None,
-        metadata={"help": "Download from hugging face, modelscope, openmind local cache dir"},
-    )
-    model_revision: str = field(
-        default="main",
-        metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
-    )
     trust_remote_code: bool = field(
         default=False,
         metadata={"help": "Whether to trust the execution of code from datasets/models defined on the Hub or not."},
     )
-    hf_hub_token: Optional[str] = field(
-        default=None,
-        metadata={"help": "Auth token to log in with Hugging Face Hub."},
-    )
-    use_fast_tokenizer: bool = field(
-        default=True,
-        metadata={"help": "Whether or not to use one of the fast tokenizer (backed by the tokenizers library)."},
-    )
-    split_special_tokens: bool = field(
-        default=False,
-        metadata={"help": "Whether or not the special tokens should be split during the tokenization process."},
-    )
-    model_max_length: Optional[int] = field(
-        default=None,
-        metadata={"help": "The maximum input length for model, derived from `cutoff_len`. Do not specify it."},
-    )
-    new_special_tokens: Optional[str] = field(
-        default=None,
-        metadata={"help": "Special tokens to be added into the tokenizer. Use commas to separate multiple tokens."},
-    )
-    resize_vocab: bool = field(
-        default=False,
-        metadata={"help": "Whether or not to resize the tokenizer vocab and the embedding layers."},
-    )
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
-    input_tokenizer: Optional[str] = field(default=None, metadata={"help": "input tokenizer path"})
-    rm_tokenizer: Optional[str] = field(default=None, metadata={"help": "rmokenizer path"})
-    lora_rank: int = field(default=0, metadata={"help": "set to positive value to enable LoRA (e.g., 32)"})
-    lora_alpha: float = field(default=16, metadata={"help": "LoRA scaling factor"})
-    target_modules: str = field(default="all-linear", metadata={"help": "all-linear or [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]"})
-    use_shm: bool = field(default=False)
-    enable_activation_offload: bool = field(default=False, metadata={"help": "enable activation offload"})
 
     def __post_init__(self):
         if self.path is None:
             raise ValueError("Please provide `path`.")
-
-        if self.split_special_tokens and self.use_fast_tokenizer:
-            raise ValueError("`split_special_tokens` is only supported for slow tokenizers.")
-
-        if self.new_special_tokens is not None:  # support multiple special tokens
-            self.new_special_tokens = [token.strip() for token in self.new_special_tokens.split(",")]
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -174,10 +118,7 @@ class PolicyLossArguments:
 @dataclass
 class ActorArguments:
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
-    ppo_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Micro-batch size"})
     ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
-    ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
-    grad_clip: float = field(default=1.0, metadata={"help": "Gradient clipping"})
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
     clip_ratio_high: float = field(default=0.2, metadata={"help": "Max value for clip ratio"})
@@ -189,22 +130,12 @@ class ActorArguments:
     ppo_epochs: int = field(default=1, metadata={"help": "PPO epochs"})
     shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     policy_loss: PolicyLossArguments = field(default_factory=PolicyLossArguments, metadata={"help": "Policy loss settings"})
-    tis_imp_ratio_cap: float = field(default=-1, metadata={"help": "Truncated importance sampling ratio cap"})
     optim: OptimizerArguments = field(default_factory=OptimizerArguments, metadata={"help": "Optimizer settings"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
-    use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
-    use_torch_compile: bool = field(default=True, metadata={"help": "Whether or not use torch compile"})
-    checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
-    param_offload: bool = field(default=False, metadata={"help": "Enable param offload or not"})
-    grad_offload: bool = field(default=False, metadata={"help": "Enable grad offload or not"})
-    optimizer_offload: bool = field(default=False, metadata={"help": "Enable optimizer offload or not"})
     load_weight: bool = field(default=True)
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "seq-mean-token-sum, seq-mean-token-mean"})
-    recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
     n: int = field(default=1, metadata={"help": "Number of responses per prompt"})
-    log_prob_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU log prob micro-batch size"})
-    log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU for log prob"})
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
 
     def to_dict(self) -> Dict[str, Any]:
@@ -317,7 +248,7 @@ class CriticArguments:
         metadata={"help": "Optimizer settings"},
     )
     model: ModelArguments = field(
-        default_factory=lambda: ModelArguments(path="~/models/deepseek-llm-7b-chat", enable_gradient_checkpointing=True),
+        default_factory=lambda: ModelArguments(path="~/models/deepseek-llm-7b-chat"),
         metadata={"help": "Critic model"},
     )
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})

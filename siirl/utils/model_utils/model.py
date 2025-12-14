@@ -29,6 +29,7 @@ from transformers import (
     GenerationConfig,
     MistralForSequenceClassification,
     PreTrainedModel,
+    AutoConfig,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -58,6 +59,16 @@ def update_model_config(module_config, override_config_kwargs):
         else:
             setattr(module_config, key, val)
 
+def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, trust_remote_code=False) -> Dict:
+    if override_config_kwargs is None:
+        override_config_kwargs = {}
+    assert isinstance(override_config_kwargs, Dict), (
+        f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
+    )
+    module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    update_model_config(module_config, override_config_kwargs)
+
+    return module_config
 
 def get_generation_config(
     model: str,
@@ -108,9 +119,6 @@ def print_model_size(model: nn.Module, name: str = None):
     if name is None:
         name = model.__class__.__name__
     logger.info(f"{name} contains {n_params:.2f}{scale} parameters")
-
-
-    return torch.clip(torch.cumsum(mask, dim=-1) - 1, min=0, max=None)
 
 
 def normalize_model_name(name, pp_rank, vpp_rank, transformer_config, layer_name="layers"):
@@ -204,31 +212,6 @@ def get_hf_model_path(config, local_cache_path="~/.cache/siirl/rlhf"):
     return local_model_path
 
 
-def load_megatron_model_weights(
-    config, model_config, parallel_model, params_dtype, is_value_model=False, local_cache_path="~/.cache/siirl/rlhf"
-):
-    """Load weights for siirl customized model."""
-    architectures, model, state_dict, is_value_model = _load_hf_model(
-        config, model_config, is_value_model, local_cache_path
-    )
-
-    from siirl.models.weight_loader_registry import get_weight_loader
-
-    logger.info(f"before weight loader: architectures = {architectures}...")
-    for arch in architectures:
-        logger.info(f"call weight loader arch = {arch}, model config = {model.config}")
-        weight_loader = get_weight_loader(arch)
-        weight_loader(
-            state_dict=state_dict,
-            wrapped_models=parallel_model,
-            config=model.config,
-            params_dtype=params_dtype,
-            is_value_model=is_value_model,
-            tie_word_embeddings=model_config.tie_word_embeddings,
-        )
-    return model.config
-
-
 def load_megatron_gptmodel_weights(
     config, model_config, parallel_model, params_dtype, is_value_model=False, local_cache_path="~/.cache/siirl/rlhf"
 ):
@@ -245,28 +228,6 @@ def load_megatron_gptmodel_weights(
         is_value_model=is_value_model,
     )
     del state_dict, model
-
-
-# pad input_ids_rmpad, cu_seqlens and max_seqlen_in_batch to be divisible by tp
-def load_mcore_dist_weights(parallel_model, dist_weight_path, is_value_model=False):
-    from megatron.core import dist_checkpointing
-    from megatron.core.dist_checkpointing.serialization import StrictHandling
-    from megatron.core.models.gpt.gpt_model import GPTModel
-
-    # strict = StrictHandling.IGNORE_ALL if is_value_model else StrictHandling.ASSUME_OK_UNEXPECTED
-    strict = StrictHandling.ASSUME_OK_UNEXPECTED
-    for model in parallel_model:
-        if isinstance(model.module, GPTModel):
-            ssd = model.module.sharded_state_dict()
-        else:
-            ssd = model.module.module.sharded_state_dict()
-        if is_value_model:
-            for k in list(ssd.keys()):
-                if "output_layer" in k:
-                    ssd.pop(k)
-        dist_checkpointing.load(ssd, dist_weight_path, strict=strict)
-
-    return
 
 
 def convert_weight_keys(state_dict: Dict[str, torch.Tensor], model: PreTrainedModel):
@@ -288,47 +249,6 @@ def convert_weight_keys(state_dict: Dict[str, torch.Tensor], model: PreTrainedMo
         original_weights[key] = value
 
     return original_weights
-
-
-def extract_multi_modal_inputs(
-    batch_data: list[dict[str, torch.Tensor]],
-    indices: Optional[list[int]] = None,
-) -> dict[str, torch.Tensor | list[torch.Tensor]]:
-    """
-    Extract and process multi-modal inputs from a batch.
-
-    Args:
-        batch_data (list[dict[str, torch.Tensor]]): The batch containing potential multi-modal inputs
-        indices (Optional[list[int]]): If provided, only extract inputs at these indices
-
-    Returns:
-        dict[str, torch.Tensor | list[torch.Tensor]]: Processed multi-modal inputs ready for model consumption
-
-    """
-    multi_modal_inputs = {}
-    multi_modal_inputs_collected = {}
-    has_image_bound = False
-
-    selected_batch_data = batch_data
-    if indices is not None:
-        selected_batch_data = [batch_data[i] for i in indices if i < len(batch_data)]
-
-    for inputs in selected_batch_data:
-        if "image_bound" in inputs:
-            has_image_bound = True
-        for key, value in inputs.items():
-            if value is not None:
-                if key not in multi_modal_inputs_collected:
-                    multi_modal_inputs_collected[key] = []
-                multi_modal_inputs_collected[key].append(value)
-
-    for key, values in multi_modal_inputs_collected.items():
-        if has_image_bound:  # minicpm-o logic
-            multi_modal_inputs[key] = values
-        else:
-            multi_modal_inputs[key] = torch.cat(values, dim=0)
-
-    return multi_modal_inputs
 
 
 @dataclass

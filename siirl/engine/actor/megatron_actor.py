@@ -1,19 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright (c) 2025, Infrawaves. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """Simplified Megatron PPO Actor/Critic implementation"""
-
 import os
 import datetime
 from functools import partial
@@ -33,11 +18,11 @@ from siirl.engine.actor.utils import (
     agg_loss, get_policy_loss_fn, kl_penalty, compute_value_loss,
     append_to_dict, set_random_seed,
 )
-from siirl.params.model_args import ActorRolloutRefArguments
+from siirl.params.model_args import ActorRefArguments
 
 # Utilities
 from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
-from siirl.utils.model_utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
+from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean
 from siirl.utils.megatron.megatron_utils import (
@@ -51,7 +36,7 @@ from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_p
 
 
 
-def global_initialize_model_parallel(config: ActorRolloutRefArguments):
+def global_initialize_model_parallel(config: ActorRefArguments):
     """Initialize Megatron model parallel groups"""
     megatron_config = config.actor.megatron
 
@@ -85,7 +70,7 @@ class ActorWorker:
     """Dedicated worker for actor training"""
 
     def __init__(self, config: DictConfig):
-        assert isinstance(config, ActorRolloutRefArguments)
+        assert isinstance(config, ActorRefArguments)
         # Initialize attributes from MegatronWorker
         self.rank = 0
         self.hf_config = None
@@ -100,11 +85,8 @@ class ActorWorker:
         global_initialize_model_parallel(self.config)
 
         # Normalize config
-        self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
+        self.config.actor.ppo_mini_batch_size *= self.config.actor.n
         self.config.actor.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
-        if self.config.actor.ppo_micro_batch_size:
-            self.config.actor.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
-            self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
 
         self._is_offload_param = self.config.actor.megatron.param_offload
         self._is_offload_grad = self.config.actor.megatron.grad_offload
@@ -130,16 +112,11 @@ class ActorWorker:
         # Initialize tokenizer
         self.local_path = copy_to_local(model_path)
         if tokenizer_or_path is None:
-            tokenizer_processor = load_tokenizer(path=self.local_path)
-            self.tokenizer = tokenizer_processor["tokenizer"]
-            self.processor = tokenizer_processor["processor"]
+            self.tokenizer = load_tokenizer(path=self.local_path)
         elif isinstance(tokenizer_or_path, str):
-            tokenizer_processor = load_tokenizer(path=copy_to_local(tokenizer_or_path))
-            self.tokenizer = tokenizer_processor["tokenizer"]
-            self.processor = tokenizer_processor["processor"]
+            self.tokenizer = load_tokenizer(path=copy_to_local(tokenizer_or_path))
         else:
             self.tokenizer = tokenizer_or_path
-            self.processor = tokenizer_or_path
 
         # Get HuggingFace config
         hf_config = AutoConfig.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
@@ -160,7 +137,10 @@ class ActorWorker:
 
         # Handle mbridge if needed
         if use_mbridge:
-            from siirl.models.mcore.mbridge import AutoBridge
+            try:
+                from mbridge import AutoBridge
+            except ImportError:
+                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
             bridge.set_extra_args(**override_transformer_config)
@@ -198,14 +178,11 @@ class ActorWorker:
         )
 
         if self.config.actor.load_weight:
-            if self.config.actor.megatron.use_dist_checkpointing:
-                load_mcore_dist_weights(actor_module, self.config.actor.megatron.dist_checkpointing_path, is_value_model=False)
+            if self.bridge is not None:
+                local_model_path = get_hf_model_path(self.config)
+                self.bridge.load_weights(actor_module, local_model_path)
             else:
-                if self.bridge is not None:
-                    local_model_path = get_hf_model_path(self.config)
-                    self.bridge.load_weights(actor_module, local_model_path)
-                else:
-                    load_megatron_gptmodel_weights(self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False)
+                load_megatron_gptmodel_weights(self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False)
 
         optim_megatron_config = init_megatron_optim_config(optim_config)
         actor_optimizer = get_megatron_optimizer(model=actor_module, config=optim_megatron_config)
@@ -256,6 +233,7 @@ class ActorWorker:
         data = data.to(get_device_name())
         micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
+        data["temperature"] = NonTensorData(self.config.actor.temperature)
 
         metrics = self.actor.update_policy(data=data)
         data["metrics"] = NonTensorData(metrics)
@@ -272,9 +250,9 @@ class ActorWorker:
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
 
-        data["micro_batch_size"] = NonTensorData(self.config.rollout.log_prob_micro_batch_size_per_gpu)
-        data["max_token_len"] = NonTensorData(self.config.rollout.log_prob_max_token_len_per_gpu)
-        data["temperature"] = NonTensorData(self.config.rollout.temperature)
+        data["micro_batch_size"] = NonTensorData(self.config.actor.log_prob_micro_batch_size_per_gpu)
+        data["max_token_len"] = NonTensorData(self.config.actor.log_prob_max_token_len_per_gpu)
+        data["temperature"] = NonTensorData(self.config.actor.temperature)
         data = data.to(get_device_id())
 
         output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
@@ -291,8 +269,8 @@ class ActorWorker:
 class ReferenceWorker:
     """Dedicated worker for reference policy"""
 
-    def __init__(self, config: DictConfig, process_group=None):
-        assert isinstance(config, ActorRolloutRefArguments)
+    def __init__(self, config: DictConfig):
+        assert isinstance(config, ActorRefArguments)
         # Initialize attributes from MegatronWorker
         self.rank = 0
         self.hf_config = None
@@ -335,16 +313,11 @@ class ReferenceWorker:
         # Initialize tokenizer
         self.local_path = copy_to_local(model_path)
         if tokenizer_or_path is None:
-            tokenizer_processor = load_tokenizer(path=self.local_path)
-            self.tokenizer = tokenizer_processor["tokenizer"]
-            self.processor = tokenizer_processor["processor"]
+            self.tokenizer = load_tokenizer(path=self.local_path)
         elif isinstance(tokenizer_or_path, str):
-            tokenizer_processor = load_tokenizer(path=copy_to_local(tokenizer_or_path))
-            self.tokenizer = tokenizer_processor["tokenizer"]
-            self.processor = tokenizer_processor["processor"]
+            self.tokenizer = load_tokenizer(path=copy_to_local(tokenizer_or_path))
         else:
             self.tokenizer = tokenizer_or_path
-            self.processor = tokenizer_or_path
 
         # Get HuggingFace config
         hf_config = AutoConfig.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
@@ -365,10 +338,11 @@ class ReferenceWorker:
 
         # Handle mbridge if needed
         if use_mbridge:
-            from siirl.utils.backend.device import is_npu_available
-            if is_npu_available:
-                from siirl.engine.base_worker.megatron import npu_mbridge_patch
-            from siirl.models.mcore.mbridge import AutoBridge
+            try:
+                from mbridge import AutoBridge
+            except ImportError:
+                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
+
 
             bridge = AutoBridge.from_config(hf_config)
             bridge.set_extra_args(**override_transformer_config)
@@ -403,14 +377,11 @@ class ReferenceWorker:
 
         if self.config.ref.load_weight:
             assert self.config.actor.load_weight == self.config.ref.load_weight
-            if self.config.ref.megatron.use_dist_checkpointing:
-                load_mcore_dist_weights(ref_module, self.config.ref.megatron.dist_checkpointing_path, is_value_model=False)
+            if self.bridge is not None:
+                local_model_path = get_hf_model_path(self.config)
+                self.bridge.load_weights(ref_module, local_model_path)
             else:
-                if self.bridge is not None:
-                    local_model_path = get_hf_model_path(self.config)
-                    self.bridge.load_weights(ref_module, local_model_path)
-                else:
-                    load_megatron_gptmodel_weights(self.config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False)
+                load_megatron_gptmodel_weights(self.config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False)
 
         return ref_module, self.hf_config
 
@@ -449,7 +420,7 @@ class ReferenceWorker:
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
         data["max_token_len"] = NonTensorData(self.config.ref.log_prob_max_token_len_per_gpu)
-        data["temperature"] = NonTensorData(self.config.rollout.temperature)
+        data["temperature"] = NonTensorData(self.config.ref.temperature)
         data = data.to(get_device_id())
 
         output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
@@ -507,9 +478,6 @@ class CriticWorker:
         # Normalize config
         self.config.ppo_mini_batch_size *= self.config.rollout_n
         self.config.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
-        if self.config.ppo_micro_batch_size:
-            self.config.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
-            self.config.ppo_micro_batch_size_per_gpu = self.config.ppo_micro_batch_size
 
     def _init_hf_config_and_tf_config(
         self,
@@ -531,16 +499,11 @@ class CriticWorker:
         # Initialize tokenizer
         self.local_path = copy_to_local(model_path)
         if tokenizer_or_path is None:
-            tokenizer_processor = load_tokenizer(path=self.local_path)
-            self.tokenizer = tokenizer_processor["tokenizer"]
-            self.processor = tokenizer_processor["processor"]
+            self.tokenizer = load_tokenizer(path=self.local_path)
         elif isinstance(tokenizer_or_path, str):
-            tokenizer_processor = load_tokenizer(path=copy_to_local(tokenizer_or_path))
-            self.tokenizer = tokenizer_processor["tokenizer"]
-            self.processor = tokenizer_processor["processor"]
+            self.tokenizer = load_tokenizer(path=copy_to_local(tokenizer_or_path))
         else:
             self.tokenizer = tokenizer_or_path
-            self.processor = tokenizer_or_path
 
         # Get HuggingFace config
         hf_config = AutoConfig.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
@@ -561,10 +524,11 @@ class CriticWorker:
 
         # Handle mbridge if needed
         if use_mbridge:
-            from siirl.utils.backend.device import is_npu_available
-            if is_npu_available:
-                from siirl.engine.base_worker.megatron import npu_mbridge_patch
-            from siirl.models.mcore.mbridge import AutoBridge
+            try:
+                from mbridge import AutoBridge
+            except ImportError:
+                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
+
 
             bridge = AutoBridge.from_config(hf_config)
             bridge.set_extra_args(**override_transformer_config)
@@ -601,14 +565,11 @@ class CriticWorker:
         )
 
         if self.config.load_weight:
-            if self.config.megatron.use_dist_checkpointing:
-                load_mcore_dist_weights(critic_module, self.config.megatron.dist_checkpointing_path, is_value_model=True)
+            if self.bridge is not None:
+                local_model_path = get_hf_model_path(self.config)
+                self.bridge.load_weights(critic_module, local_model_path)
             else:
-                if self.bridge is not None:
-                    local_model_path = get_hf_model_path(self.config)
-                    self.bridge.load_weights(critic_module, local_model_path)
-                else:
-                    load_megatron_gptmodel_weights(self.config, self.hf_config, critic_module, params_dtype=self.dtype, is_value_model=True)
+                load_megatron_gptmodel_weights(self.config, self.hf_config, critic_module, params_dtype=self.dtype, is_value_model=True)
 
         optim_config_megatron = init_megatron_optim_config(optim_config)
         critic_optimizer = get_megatron_optimizer(model=critic_module, config=optim_config_megatron)
@@ -693,7 +654,6 @@ class MegatronPPOActor():
 
     def __init__(self, config, model_config, hf_config, tf_config,
                  actor_module: nn.ModuleList, actor_optimizer: DistributedOptimizer):
-        super().__init__(config)
         self._validate_config(config)
         self.model_config = model_config
         self.hf_config = hf_config
@@ -941,11 +901,10 @@ class MegatronPPOActor():
 
             calculate_entropy = self.config.entropy_coeff != 0
             micro_batch_size = data.get("micro_batch_size") or self.config.ppo_micro_batch_size_per_gpu
-            max_token_len = None
 
             metric_micro_batch = self.forward_backward_batch(
                 data, temperature=temperature, calculate_entropy=calculate_entropy,
-                micro_batch_size=micro_batch_size, max_token_len=max_token_len,
+                micro_batch_size=micro_batch_size,
             )
 
             metric_micro_batch = metric_micro_batch["output"]
@@ -969,7 +928,6 @@ class MegatronPPOCritic():
     def __init__(self, config, model_config, hf_config, tf_config,
                  critic_module: nn.ModuleList, critic_optimizer: DistributedOptimizer,
                  critic_optimizer_config):
-        super().__init__(config=config)
         self._validate_config(config)
         self.model_config = model_config
         self.hf_config = hf_config

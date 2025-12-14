@@ -3,7 +3,6 @@ from .model_args import (
     ModelArguments,
     ActorRefArguments,
     CriticArguments,
-    RewardModelArguments,
     AlgorithmArguments,
     ActorArguments,
     RolloutArguments,
@@ -16,7 +15,6 @@ from .display_dict import log_dict_formatted
 __all__ = [
     "ActorRefArguments",
     "CriticArguments",
-    "RewardModelArguments",
     "AlgorithmArguments",
     "DataArguments",
     "ModelArguments",

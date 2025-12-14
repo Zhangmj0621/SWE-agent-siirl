@@ -16,8 +16,6 @@
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
-from .model_args import ProcessorArguments
-
 
 @dataclass
 class DataArguments:
@@ -97,10 +95,6 @@ class DataArguments:
     auto_repeat: bool = field(default=False, metadata={"help": "Automatically repeats the training dataset. Recommended when the number of samples is smaller than the total training steps to prevent premature termination."})
     num_loader_workers: int = field(default=8, metadata={"help": "DataLoader worker number"})
     force_on_the_fly: bool = field(default=False, metadata={"help": "If True, the data will be loaded on-the-fly, which is useful for large datasets that cannot fit into memory."})
-    processor: ProcessorArguments = field(
-        default_factory=ProcessorArguments,
-        metadata={"help": "Arguments for the processor."},
-    )
 
     def __post_init__(self):
         def split_arg(arg):
