@@ -18,13 +18,9 @@ from .data_args import DataArguments
 from .model_args import (
     ActorRefArguments,
     CriticArguments,
-    RewardModelArguments,
     AlgorithmArguments,
     RolloutArguments
 )
-from .dag_args import DagArguments
-from .profiler_args import ProfilerArguments
-
 
 @dataclass
 class TrainingArguments:
@@ -55,23 +51,13 @@ class TrainingArguments:
         metadata={"help": "Should save tokenized dataset to local disk and exit"},
     )
     val_before_train: bool = field(default=True, metadata={"help": "Whether or not to validate before train"})
-    default_hdfs_dir: str = field(default=None, metadata={"help": "Default hdfs dir path for checkpoints"})
-    del_local_ckpt_after_load: bool = field(
-        default=False,
-        metadata={"help": "Whether or not to delete local checkpoints after load"},
-    )
     val_only: bool = field(default=False, metadata={"help": "Whether or not just eval only"})
     balance_batch: bool = field(
         default=False,
         metadata={"help": "Whether or not to balance the number of valid tokens on each dp rank."},
     )
-    remove_previous_ckpt_in_save: bool = field(
-        default=False,
-        metadata={"help": "Whether or not to remove previous ckpt in save path."},
-    )
     max_actor_ckpt_to_keep: int = field(default=100, metadata={"help": "Maximum number of actor ckpts."})
     max_critic_ckpt_to_keep: int = field(default=100, metadata={"help": "Maximum number of critic ckpts."})
-    ray_wait_register_center_timeout: int = field(default=300, metadata={"help": "The timeout for ray worker group to wait for the register center to be ready"})
     validation_data_dir: Optional[str] = field(default=None, metadata={"help": "Validation data directory."})
     rollout_data_dir: Optional[str] = field(default=None, metadata={"help": "Rollout data directory."})
     device: Optional[str] = field(default="cuda", metadata={"help": "Training device."})
@@ -93,12 +79,9 @@ class SiiRLArguments:
     actor_rollout_ref: ActorRefArguments = field(default_factory=ActorRefArguments)
     rollout: RolloutArguments = field(default_factory=RolloutArguments)
     critic: CriticArguments = field(default_factory=CriticArguments)
-    reward_model: RewardModelArguments = field(default_factory=RewardModelArguments)
     algorithm: AlgorithmArguments = field(default_factory=AlgorithmArguments)
     trainer: TrainingArguments = field(default_factory=TrainingArguments)
     custom_reward_function: CustomRewardArguments = field(default_factory=CustomRewardArguments)
-    dag: DagArguments = field(default_factory=DagArguments)
-    profiler: ProfilerArguments = field(default_factory=ProfilerArguments)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -14,11 +14,9 @@
 
 import argparse
 import os
-import hydra
-from pathlib import Path
 from typing import Any
 import transformers
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import OmegaConf
 
 from siirl.params.training_args import SiiRLArguments
 

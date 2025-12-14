@@ -40,8 +40,6 @@ class DataArguments:
     return_full_prompt: bool = field(default=False, metadata={"help": "Whether to return the full prompt with chat template"})
     filter_overlong_prompts: bool = field(default=False, metadata={"help": "For large-scale dataset, filtering overlong prompts could be timeconsuming."})
     shuffle: bool = field(default=True, metadata={"help": "Shuffle training data"})
-    image_key: str = field(default="images", metadata={"help": "Dataset column name for images"})
-    video_key: str = field(default="videos", metadata={"help": "Dataset column name for videos"})
     truncation: str = field(
         default="error",
         metadata={"help": "Truncate the input_ids or prompt length if they exceed max_prompt_length. Default is 'error', not allow exceed the max_prompt_length. The users should increase the max_prompt_length if throwing the error. You can also set ``left`` ``middle`` and ``right``"},
@@ -54,25 +52,13 @@ class DataArguments:
         default=False,
         metadata={"help": "Whether or not to mask the history and train on the last turn only."},
     )
-    tool_format: Optional[str] = field(
-        default=None,
-        metadata={"help": "Tool format to use for constructing function calling examples."},
-    )
     tokenized_path: Optional[str] = field(
         default=None,
         metadata={"help": ("Path to save or load the tokenized datasets. If tokenized_path not exists, it will save the tokenized datasets. If tokenized_path exists, it will load the tokenized datasets.")},
     )
-    dataset_cache_dir: str = field(
-        default="/tmp/.cache/siirl/rlhf",
-        metadata={"help": "Local cache directory for rlhf dataset."},
-    )
     filter_overlong_prompt: bool = field(
         default=False,
         metadata={"help": "Whether or not to filter prompt which length > max_prompt_length for dataset."},
-    )
-    serialize_dataset: bool = field(
-        default=False,
-        metadata={"help": "Whether or not to store serialize dataset in state_dict."},
     )
     streaming: bool = field(
         default=False,

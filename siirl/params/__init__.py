@@ -12,7 +12,6 @@ from .model_args import (
 from .training_args import TrainingArguments, SiiRLArguments
 from .parser import parse_config
 from .display_dict import log_dict_formatted
-from .profiler_args import ProfilerArguments
 
 __all__ = [
     "ActorRefArguments",
@@ -26,7 +25,6 @@ __all__ = [
     "ActorArguments",
     "RefArguments",
     "RolloutArguments",
-    "ProfilerArguments",
     "parse_config",
     "log_dict_formatted",
 ]
