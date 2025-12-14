@@ -12,132 +12,116 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import asyncio
 import io
 import os
+import multiprocessing
+import time
 
-from PIL import Image
 import requests
-import sglang as sgl
+from loguru import logger
+from requests.exceptions import RequestException
 
-from sglang.srt.conversation import chat_templates
-from sglang.test.test_utils import is_in_ci
+
 from sglang.utils import async_stream_and_merge, stream_and_merge
 from sglang.srt.entrypoints.http_server import launch_server
+from sglang.srt.server_args import ServerArgs
+
 
 
 from siirl.params.training_args import SiiRLArguments
+from siirl.utils.backend.net import get_net_interface_ip
+
+
+def wait_until_ok(
+    url: str,
+    *,
+    process: "multiprocessing.Process" = None,
+    max_wait: int = 3000,
+    interval: int = 2,
+    timeout: int = 3000,
+    extra_headers: dict | None = None,
+) -> None:
+    """Block until `url` returns 200 or time-out."""
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        if process and not process.is_alive():
+            raise RuntimeError(f"Server process terminated unexpectedly. {process} {process.is_alive()}")
+        try:
+            if requests.get(url, timeout=timeout, headers=extra_headers or {}).status_code == 200:
+                return
+        except RequestException as exc:
+            logger.debug("Request failed: %s", exc)
+        time.sleep(interval)
+
+    raise RuntimeError(f"Health check failed after {max_wait} seconds.")
+
+
 class SglangEngine:
-    def __init__(self, rank: int, config: SiiRLArguments):
+    def __init__(self, rank: int, config: SiiRLArguments, dist_init_addr: str, ip: str, port: int , nccl_port: int):
         self.rank = rank
         self.config = config
-    
-    
-    
-    def get_sglang_params(self, rank: int):
+        self.dist_init_addr = dist_init_addr
+        self.port = port
+        self.nccl_port = nccl_port
+        self.ip = ip
+        self.launch_server()
         
-        
+    def get_sglang_params(self, base_gpu_id, node_rank, nnodes):
         config = self.config.rollout
-        model_path=self.config.actor_rollout_ref.model.path,
-        dtype=config.dtype,
-        mem_fraction_static=config.gpu_memory_utilization,
-        enable_memory_saver=True,
-        base_gpu_id=0,
-        gpu_id_step=1,
-        tp_size=self._tp_size,
-        node_rank=node_rank,
-        load_format=load_format,
-        dist_init_addr=dist_init_addr,
-        nnodes=nnodes,
-        trust_remote_code=trust_remote_code,
-        # NOTE(linjunrong): add rank to prevent SGLang generate same port inside PortArgs.init_new
-        # when random.seed is being set during training
-        port=30000 + rank,
-        # NOTE(Chenyang): if you want to debug the SGLang engine output
-        # please set the following parameters
-        # Otherwise, it will make the engine run too slow
-        # log_level="INFO",
-        # log_requests=True,
-        # log_requests_level=2,
-        # max_running_requests=1,
-        mm_attention_backend="fa3",
-        attention_backend="fa3",
-        # In async mode, we want token in token out.
-        skip_tokenizer_init=self.config.mode == "async",
-        
-        
-        nnodes = -(config.tensor_model_parallel_size // len(self.visible_devices_set))
-        if nnodes > 1:
-            ip = get_ip()
-            port = get_open_port() if port is None else port
-            [ip, port] = broadcast_pyobj(
-                [ip, port],
-                rank=self._rank,
-                dist_group=self._device_mesh_cpu.get_group("tp"),
-                src=self._device_mesh_cpu["tp"].mesh[0].item(),
-                force_cpu_device=False,
-            )
-            dist_init_addr = f"[{ip}]:{port}" if is_ipv6(ip) else f"{ip}:{port}"
-        else:
-            dist_init_addr = None
-        
+        print(f"model_path ", self.config.actor_rollout_ref.model.path)
         
         args = {
             "model_path": self.config.actor_rollout_ref.model.path,
             "dtype": config.dtype,
+            "random_seed": self.config.rollout.seed + self.rank,
             "mem_fraction_static": config.gpu_memory_utilization,
             "enable_memory_saver": True,
-            "base_gpu_id": 0,
+            "base_gpu_id": base_gpu_id,
             "gpu_id_step": 1,
             "tp_size": config.tensor_model_parallel_size,
-            "node_rank": -1,
-            "load_format": config.load_format,
-            "dist_init_addr": -1,
-            "nnodes": -1,
+            "node_rank": node_rank,
+            "load_format": "auto",
+            "dist_init_addr": self.dist_init_addr,
+            "nnodes": nnodes,
             "trust_remote_code": config.trust_remote_code,
-            "max_running_requests": c,
-            # NOTE(linjunrong): add rank to prevent SGLang generate same port inside PortArgs.init_new
-            # when random.seed is being set during training
-            "port": sglang_port,
-            "nccl_port": sglang_port + 1,
-            # NOTE(Chenyang): if you want to debug the SGLang engine output
-            # please set the following parameters
-            # Otherwise, it will make the engine run too slow
+            "max_running_requests": config.max_num_seqs,
+            "host": self.ip,
+            "port": self.port,
+            "nccl_port": self.nccl_port,
             "log_level": "info",
-            # "log_level": "error",
-            # log_requests=True,
-            # log_requests_level=2,
-            # NOTE(Chenyang): turn on max_running_requests to set the max concurrent running requests
-            # max_running_requests=1,
-            "mm_attention_backend": backend,
-            "attention_backend": backend,
+            "mm_attention_backend": "fa3",
+            "attention_backend": "fa3",
             # In async mode, we want token in token out.
-            "skip_tokenizer_init": self.config.skip_tokenizer_init,
+            "skip_tokenizer_init": False,
             "dist_timeout": 1800,
+            "skip_server_warmup": True,
         }
-
-        if is_server_mode:
-            # add server specific args
-            args["first_rank_in_node"] = first_rank_in_node
-            args["timeout"] = self.config.server["timeout"]
-            args["max_attempts"] = self.config.server["max_attempts"]
-            args["retry_delay"] = self.config.server["retry_delay"]
-            args["max_connections"] = self.config.server["max_connections"]
-            args["max_start_wait_time"] = self.config.server["max_start_wait_time"]
-            self._engine = AsyncHttpServerAdapter(**args)
-        else:
-            self._engine = AsyncEngine(**args)
-            
-            launch_server()
+        return args
+        
+    def launch_server(self):   
+        base_gpu_id = self.rank % self.config.trainer.n_gpus_per_node
+        node_rank = self.rank // self.config.trainer.n_gpus_per_node
+        nnodes = max(1, self.config.rollout.tensor_model_parallel_size // self.config.trainer.n_gpus_per_node)
         
         
-        
-    def launch_server(self, rank:int):
-        
-        
-        
-        
-        
+        args = self.get_sglang_params(base_gpu_id, node_rank, nnodes)
+        sgl_args = ServerArgs(**args)
+        print(f"Launch SglangHttpServer at: {get_net_interface_ip()}:{self.port}")
+        multiprocessing.set_start_method("spawn", force=True)
+        self.process = multiprocessing.Process(target=launch_server, args=(sgl_args,))
+        self.process.start()
+        base_url = sgl_args.url()
+        wait_until_ok(
+            f"{base_url}/health_generate" if sgl_args.is_embedding else f"{base_url}/health",
+            process=self.process,
+            extra_headers={"Authorization": f"Bearer {sgl_args.api_key}"},
+        )
+        # Ensure cache is ready
+        wait_until_ok(
+            f"{base_url}/flush_cache",
+            process=self.process,
+            extra_headers={"Authorization": f"Bearer {sgl_args.api_key}"},
+        )
 
         

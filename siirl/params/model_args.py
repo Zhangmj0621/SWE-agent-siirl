@@ -167,7 +167,7 @@ class EngineArguments:
 
 @dataclass
 class RolloutArguments:
-    name: str = field(default="vllm", metadata={"help": "Rollout engine"})
+    name: str = field(default="sglang", metadata={"help": "Rollout engine"})
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
     top_k: int = field(default=-1, metadata={"help": "Top-k sampling"})
     top_p: float = field(default=1.0, metadata={"help": "Top-p sampling"})
@@ -198,8 +198,8 @@ class RolloutArguments:
     seed: int = field(default=0, metadata={"help": "The random seed"})
     engine_kwargs: EngineArguments = field(default_factory=EngineArguments)
     multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
-    router_ip: str = field(default="None", metadata={"help": "Rollout Router IP"})
-    router_port: str = field(default="None", metadata={"help": "Rollout Router Port"})
+    router_ip: str = field(default=None, metadata={"help": "Rollout Router IP"})
+    router_port: str = field(default=None, metadata={"help": "Rollout Router Port"})
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

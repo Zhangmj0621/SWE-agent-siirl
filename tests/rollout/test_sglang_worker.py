@@ -103,6 +103,9 @@ def main() -> None:
 
     # Parse the complete configuration into a structured object
     siirl_args = parse_config()
+    siirl_args.actor_rollout_ref.model.path = '/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-1.7B'
+    siirl_args.rollout.tensor_model_parallel_size = 2
+    
     log_dict_formatted(siirl_args.to_dict(), "SiiRLArguments")
 
     # Launch the main orchestration actor and wait for it to complete.

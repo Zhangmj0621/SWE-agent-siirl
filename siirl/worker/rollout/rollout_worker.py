@@ -12,19 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import torch
 import torch.distributed as dist
 
 from loguru import logger
 
-from siirl.params.training_args import TrainingArguments
+from siirl.engine.rollout.sglang_engine import SglangEngine
+from siirl.params.training_args import SiiRLArguments
 from siirl.utils.backend.device import get_nccl_backend,get_device_name
- 
+from siirl.utils.backend.net import get_free_port, get_net_interface_ip
 
 class RolloutWorker:
     """RolloutWorker class"""
-    def __init__(self, config:TrainingArguments) -> None:
+    def __init__(self, config:SiiRLArguments) -> None:
         self.config = config
         # Initial worker
     
-        
+    def init_engine(self, rank: int, dist_init_addr:str, ip = None, port = None, nccl_port = None):
+        # todo: support vllm
+        if self.config.rollout.name == 'sglang':
+            self.engine = SglangEngine(rank, self.config, dist_init_addr, ip, port, nccl_port)
+    
+    def get_ip(self):
+        return get_net_interface_ip()
+    
+    def get_ip_port(self):
+        host = get_net_interface_ip()
+        return f"{host}:{get_free_port(host)}"
+    
+    def get_free_port(self):
+        host = get_net_interface_ip()
+        return get_free_port(host)
