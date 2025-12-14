@@ -1,8 +1,5 @@
 """Simplified utility functions for actor training"""
 
-import os
-import hashlib
-import tempfile
 from typing import Dict, Optional
 
 import torch
@@ -33,73 +30,6 @@ def append_to_dict(data: Dict, new_data: Dict):
         if key not in data:
             data[key] = []
         data[key].append(val)
-
-
-
-def copy_to_local(
-    src: str,
-    cache_dir: Optional[str] = None,
-    filelock: str = ".file.lock",
-    verbose: bool = False,
-    always_recopy: bool = False,
-    use_shm: bool = False
-) -> str:
-    """Copy files/directories from remote to local cache (simplified version).
-
-    This is a simplified version that primarily handles local paths and basic HDFS support.
-    For full HDFS functionality, consider using the original implementation.
-
-    Args:
-        src: Source path - can be HDFS (hdfs://...) or local filesystem path
-        cache_dir: Local directory for cached files. Uses system tempdir if None
-        filelock: Base name for file lock (unused in simplified version)
-        verbose: Enable copy operation logging
-        always_recopy: Force fresh copy ignoring cache
-        use_shm: Enable shared memory copy (unused in simplified version)
-
-    Returns:
-        Local filesystem path to the resource
-
-    Example:
-        >>> path = copy_to_local("/path/to/model")
-        >>> path
-        '/path/to/model'
-    """
-    # Check if it's a remote HDFS path
-    if src.startswith("hdfs://"):
-        # For HDFS paths, download to local cache
-        if cache_dir is None:
-            cache_dir = tempfile.gettempdir()
-        os.makedirs(cache_dir, exist_ok=True)
-
-        # Create unique local path based on HDFS path hash
-        src_hash = hashlib.md5(src.encode()).hexdigest()
-        temp_dir = os.path.join(cache_dir, src_hash)
-        os.makedirs(temp_dir, exist_ok=True)
-        local_path = os.path.join(temp_dir, os.path.basename(src))
-
-        # Check if already cached
-        if not always_recopy and os.path.exists(local_path):
-            if verbose:
-                print(f"Using cached copy at {local_path}")
-            return local_path
-
-        # For actual HDFS copy, you need hdfs_io module
-        try:
-            from hdfs_io import copy
-            if verbose:
-                print(f"Copying from {src} to {local_path}")
-            copy(src, local_path)
-        except ImportError:
-            raise ImportError(
-                "hdfs_io module not available. "
-                "For HDFS support, install hdfs_io or use local paths only."
-            )
-
-        return local_path
-    else:
-        # For local paths, return as-is
-        return src
 
 
 def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str):

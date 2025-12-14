@@ -35,10 +35,7 @@ def get_megatron_optimizer(
     )
 
 
-def get_megatron_optimizer_param_scheduler(
-    optimizer,
-    config,
-):
+def get_megatron_optimizer_param_scheduler(optimizer, config):
     """
     Get the optimizer parameter scheduler for Megatron.
     """

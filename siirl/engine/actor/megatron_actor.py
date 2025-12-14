@@ -106,15 +106,14 @@ class ActorWorker:
         from transformers import AutoConfig
         from siirl.models.mcore import hf_to_mcore_config
         from siirl.models.loader import load_tokenizer
-        from siirl.engine.actor.utils import copy_to_local
         from siirl.utils.model_utils.model import update_model_config
 
         # Initialize tokenizer
-        self.local_path = copy_to_local(model_path)
+        self.local_path=model_path
         if tokenizer_or_path is None:
-            self.tokenizer = load_tokenizer(path=self.local_path)
+            self.tokenizer = load_tokenizer(path=model_path)
         elif isinstance(tokenizer_or_path, str):
-            self.tokenizer = load_tokenizer(path=copy_to_local(tokenizer_or_path))
+            self.tokenizer = load_tokenizer(path=tokenizer_or_path)
         else:
             self.tokenizer = tokenizer_or_path
 
@@ -307,15 +306,14 @@ class ReferenceWorker:
         from transformers import AutoConfig
         from siirl.models.mcore import hf_to_mcore_config
         from siirl.models.loader import load_tokenizer
-        from siirl.engine.actor.utils import copy_to_local
         from siirl.utils.model_utils.model import update_model_config
 
         # Initialize tokenizer
-        self.local_path = copy_to_local(model_path)
+        self.local_path=model_path
         if tokenizer_or_path is None:
-            self.tokenizer = load_tokenizer(path=self.local_path)
+            self.tokenizer = load_tokenizer(path=model_path)
         elif isinstance(tokenizer_or_path, str):
-            self.tokenizer = load_tokenizer(path=copy_to_local(tokenizer_or_path))
+            self.tokenizer = load_tokenizer(path=tokenizer_or_path)
         else:
             self.tokenizer = tokenizer_or_path
 
@@ -437,8 +435,7 @@ class ReferenceWorker:
 class CriticWorker:
     """Dedicated worker for critic training"""
 
-    def __init__(self, config, process_group=None):
-        # Initialize attributes from MegatronWorker
+    def __init__(self, config):
         self.rank = 0
         self.hf_config = None
         self.tf_config = None
@@ -493,15 +490,13 @@ class CriticWorker:
         from transformers import AutoConfig
         from siirl.models.mcore import hf_to_mcore_config
         from siirl.models.loader import load_tokenizer
-        from siirl.engine.actor.utils import copy_to_local
         from siirl.utils.model_utils.model import update_model_config
 
-        # Initialize tokenizer
-        self.local_path = copy_to_local(model_path)
+        self.local_path=model_path
         if tokenizer_or_path is None:
-            self.tokenizer = load_tokenizer(path=self.local_path)
+            self.tokenizer = load_tokenizer(path=model_path)
         elif isinstance(tokenizer_or_path, str):
-            self.tokenizer = load_tokenizer(path=copy_to_local(tokenizer_or_path))
+            self.tokenizer = load_tokenizer(path=tokenizer_or_path)
         else:
             self.tokenizer = tokenizer_or_path
 
