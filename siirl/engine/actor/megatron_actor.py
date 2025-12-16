@@ -1,4 +1,3 @@
-"""Simplified Megatron PPO Actor/Critic implementation"""
 import os
 import datetime
 from functools import partial
@@ -13,14 +12,12 @@ from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
 
-# Local simplified modules
 from siirl.engine.actor.utils import (
     agg_loss, get_policy_loss_fn, kl_penalty, compute_value_loss,
     append_to_dict, set_random_seed,
 )
 from siirl.params.model_args import ActorRefArguments
 
-# Utilities
 from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
 from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
@@ -67,11 +64,9 @@ def global_initialize_model_parallel(config: ActorRefArguments):
 
 
 class ActorWorker:
-    """Dedicated worker for actor training"""
 
     def __init__(self, config: DictConfig):
         assert isinstance(config, ActorRefArguments)
-        # Initialize attributes from MegatronWorker
         self.rank = 0
         self.hf_config = None
         self.tf_config = None
@@ -190,7 +185,6 @@ class ActorWorker:
         return actor_module, actor_optimizer, actor_optimizer_scheduler, self.hf_config, optim_config
 
     def init_model(self):
-
         override_model_config = self.config.model.override_config
         override_transformer_config = self.config.actor.megatron.override_transformer_config or OmegaConf.create()
         override_ddp_config = self.config.actor.megatron.override_ddp_config or OmegaConf.create()
@@ -270,7 +264,6 @@ class ReferenceWorker:
 
     def __init__(self, config: DictConfig):
         assert isinstance(config, ActorRefArguments)
-        # Initialize attributes from MegatronWorker
         self.rank = 0
         self.hf_config = None
         self.tf_config = None
@@ -813,15 +806,6 @@ class MegatronPPOActor():
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
-            multi_modal_inputs = {}
-            if "multi_modal_inputs" in batch:
-                for key in batch["multi_modal_inputs"][0].keys():
-                    idxs = batch["multi_modal_inputs_idx"]
-                    mmi = batch["multi_modal_inputs"]
-                    multi_modal_inputs[key] = torch.cat(
-                        [mmi[idx].get(key) for idx in idxs if mmi[idx].get(key) is not None], dim=0
-                    )
-
             responses = batch["responses"]
             response_length = responses.size(1)
             label = position_ids.clone()
@@ -852,7 +836,6 @@ class MegatronPPOActor():
             output = forward_fn(
                 model, input_ids, attention_mask, position_ids,
                 sequence_parallel=self.tf_config.sequence_parallel,
-                multi_modal_inputs=multi_modal_inputs,
                 logits_processor=logits_processor,
                 logits_processor_args=logits_processor_args,
             )

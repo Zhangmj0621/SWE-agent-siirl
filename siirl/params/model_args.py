@@ -31,7 +31,7 @@ class MegatronArguments:
     )
     param_dtype: str = field(default="bfloat16", metadata={"help": "parameter data dtype"})
     seed: int = field(default=1, metadata={"help": "The random seed"})
-    param_offload: bool = field(default=True, metadata={"help": "Offload parameters to CPU"})
+    param_offload: bool = field(default=False, metadata={"help": "Offload parameters to CPU"})
     grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
     override_transformer_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override transformer config"})
