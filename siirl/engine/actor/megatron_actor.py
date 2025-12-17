@@ -44,23 +44,23 @@ def global_initialize_model_parallel(config: ActorRefArguments):
             timeout=datetime.timedelta(seconds=600),
             init_method=os.environ.get("DIST_INIT_METHOD", None),
         )
-    get_torch_device().set_device(rank)
+        get_torch_device().set_device(rank)
 
-    if megatron_config.sequence_parallel:
-        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        if megatron_config.sequence_parallel:
+            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 
-    mpu.initialize_model_parallel(
-        tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
-        pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
-        virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
-        pipeline_model_parallel_split_rank=None,
-        use_sharp=False,
-        context_parallel_size=megatron_config.context_parallel_size,
-        expert_model_parallel_size=megatron_config.expert_model_parallel_size,
-        expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
-        nccl_communicator_config_path=None,
-    )
-    set_random_seed(seed=megatron_config.seed)
+        mpu.initialize_model_parallel(
+            tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
+            pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_split_rank=None,
+            use_sharp=False,
+            context_parallel_size=megatron_config.context_parallel_size,
+            expert_model_parallel_size=megatron_config.expert_model_parallel_size,
+            expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
+            nccl_communicator_config_path=None,
+        )
+        set_random_seed(seed=megatron_config.seed)
 
 
 class ActorWorker:
@@ -243,8 +243,7 @@ class ActorWorker:
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
 
-        data["micro_batch_size"] = NonTensorData(self.config.actor.log_prob_micro_batch_size_per_gpu)
-        data["max_token_len"] = NonTensorData(self.config.actor.log_prob_max_token_len_per_gpu)
+        data["micro_batch_size"] = NonTensorData(self.config.actor.ppo_micro_batch_size_per_gpu)
         data["temperature"] = NonTensorData(self.config.actor.temperature)
         data = data.to(get_device_id())
 
@@ -460,7 +459,7 @@ class CriticWorker:
                 nccl_communicator_config_path=None,
             )
 
-        set_random_seed(seed=self.config.megatron.seed)
+            set_random_seed(seed=self.config.megatron.seed)
 
         self._is_offload_param = self.config.megatron.param_offload
         self._is_offload_optimizer = self.config.megatron.optimizer_offload
@@ -602,7 +601,6 @@ class CriticWorker:
     def compute_values(self, data: TensorDict):
         micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
-        data["max_token_len"] = NonTensorData(self.config.forward_max_token_len_per_gpu)
         data = data.to(get_device_id())
 
         if self._is_offload_param:
@@ -659,7 +657,6 @@ class MegatronPPOActor():
     def compute_log_prob(self, data: TensorDict, calculate_entropy=False):
         """Compute log probability and optionally entropy"""
         micro_batch_size = data["micro_batch_size"]
-        max_token_len = data["max_token_len"]
 
         assert micro_batch_size is not None
 
@@ -676,7 +673,6 @@ class MegatronPPOActor():
             output = self.forward_backward_batch(
                 batch, temperature=temperature, forward_only=True,
                 calculate_entropy=calculate_entropy, micro_batch_size=micro_batch_size, 
-                max_token_len=max_token_len,
             )
 
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
@@ -926,7 +922,6 @@ class MegatronPPOCritic():
         data.to(get_device_id())
         responses = data["responses"]
         micro_batch_size = data["micro_batch_size"]
-        max_token_len = data["max_token_len"]
 
         assert micro_batch_size is not None
 
@@ -935,7 +930,7 @@ class MegatronPPOCritic():
         with torch.no_grad():
             output = self.forward_backward_batch(
                 data=data, forward_only=True,
-                micro_batch_size=micro_batch_size, max_token_len=max_token_len, mini_batch_size=None
+                micro_batch_size=micro_batch_size
             )
 
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
@@ -1022,7 +1017,7 @@ class MegatronPPOCritic():
                 value_model=True,
             )
 
-            return output, partial(loss_func, data=batch, meta_info={})
+            return output, partial(loss_func, data=batch)
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.critic_module))
 
@@ -1056,11 +1051,9 @@ class MegatronPPOCritic():
                     chunk.zero_grad_buffer()
 
                 micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
-                max_token_len = None
 
                 metric_micro_batch = self.forward_backward_batch(
                     data, forward_only=False, micro_batch_size=micro_batch_size, 
-                    max_token_len=max_token_len, mini_batch_size=self.config.ppo_mini_batch_size
                 )
 
                 metric_micro_batch = metric_micro_batch["output"]
