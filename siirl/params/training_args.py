@@ -61,7 +61,8 @@ class TrainingArguments:
     validation_data_dir: Optional[str] = field(default=None, metadata={"help": "Validation data directory."})
     rollout_data_dir: Optional[str] = field(default=None, metadata={"help": "Rollout data directory."})
     device: Optional[str] = field(default="cuda", metadata={"help": "Training device."})
-
+    async_factor: int = field(default=1, metadata={"help": "Control async speed"})
+    
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 

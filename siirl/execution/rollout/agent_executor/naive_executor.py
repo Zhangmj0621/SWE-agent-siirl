@@ -1,0 +1,308 @@
+# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import os
+import copy
+import asyncio
+import ray
+import torch
+import importlib
+
+from loguru import logger
+from typing import List, Set
+from loguru import logger
+from siirl.params.training_args import SiiRLArguments
+from siirl.data_coordinator.sample import Sample, SampleInfo, Samples2Dict
+
+class NaiveExecutor:
+    '''
+    NaiveExecutor used in synchronous training workflows.
+    Manages asynchronous sample generation, pre/post processing, and data coordination
+    for rollout processes in reinforcement learning with large language models.
+    '''
+    def __init__(self, config:SiiRLArguments, router_address, data_coordinator, engine, train_batch_size):
+        """
+        Initialize NaiveExecutor with core configuration and dependencies.
+        
+        Args:
+            config: SiiRLArguments containing all training/rollout hyperparameters
+            router_address: Address of SGLang router for model inference
+            data_coordinator: Ray handle to data coordinator for sample management
+            engine: Inference engine instance (e.g., SglangEngine) for text generation
+            train_batch_size: Batch size for rollout sample generation
+        """
+        self.config = config
+        self.router_address = router_address  # SGLang router address for engine communication
+        self.data_coordinator = data_coordinator  # Ray actor handle to data coordinator
+        self.running = False  # Flag to control executor main loop
+        self.engine = engine  # Inference engine for text generation
+        self.train_batch_size = train_batch_size  # Target batch size for rollout samples
+        self.tasks:Set[asyncio.Task] = set()  # Track active generation tasks for cleanup
+        
+        # Sampling parameters for text generation (LLM inference config)
+        self.sampling_params =  dict(
+            temperature=config.rollout.temperature,  # Randomness control for generation
+            top_p=config.rollout.top_p,  # Nucleus sampling threshold
+            repetition_penalty=1.0,  # Penalty for repetitive text generation
+            logprobs=config.rollout.calculate_log_probs,  # Whether to return log probabilities
+            max_new_tokens=config.data.max_response_length  # Maximum generated tokens
+        )
+        
+        # Semaphore to control concurrent generation tasks (limit to batch size)
+        self.semaphore = asyncio.Semaphore(train_batch_size) 
+        self.reward_fn = None  # Custom reward function (optional)
+        self.rollout_flow = None  # Rollout flow function for sample generation
+        
+        # Load custom reward function if configured
+        if config.custom_reward_function.path:
+            from siirl.utils.reward_score.custom_reward import load_custom_reward_function
+            self.reward_fn = load_custom_reward_function(config = config)
+        
+        # Load rollout flow function (naive or custom)
+        flow_path = config.rollout.flow_function
+        if flow_path == "naive":
+            from siirl.execution.rollout.agent_flow.naive_flow import naive_flow
+            self.rollout_flow = naive_flow
+        else:
+            # Dynamically import custom rollout flow function
+            module_path, name = flow_path.rsplit('.', 1)
+            mod = importlib.import_module(module_path)
+            self.rollout_flow = getattr(mod, name)
+        
+        
+    async def get_sample(self):
+        """
+        Get new samples from data coordinator to replenish the batch.
+        Calculates the number of missing samples and requests them from data coordinator.
+        
+        Returns:
+            List of new samples from data coordinator (empty if batch is full)
+        """
+        # Calculate number of samples needed to reach target batch size
+        need_replenish = self.train_batch_size - len(self.tasks)
+        if need_replenish == 0:
+            return []
+        # Request new samples from data coordinator (Ray remote call)
+        new_samples = await self.data_coordinator.get_dataloader.remote(need_replenish)
+        return new_samples
+    
+    
+    def _manual_pad(self, ids, max_length, padding_side="right"):
+        """
+        Manually pad token IDs and create corresponding attention mask.
+        Handles both left and right padding for sequence length standardization.
+        
+        Args:
+            ids: 2D list of token IDs (batch_size=1, [List[int]])
+            max_length: Target sequence length after padding
+            padding_side: Direction for padding ("left" or "right", default: "right")
+        
+        Returns:
+            Tuple of (padded_ids, attention_mask) as torch tensors (shape: [1, max_length])
+        """
+        # Convert list to tensor (batch_size=1, seq_len)
+        ids = torch.tensor(ids, dtype=torch.long)
+        pad_length = max_length - ids.shape[1]
+        
+        # No padding needed - truncate to max length and create all-ones attention mask
+        if pad_length <= 0:
+            padded_ids = ids[:, :max_length]
+            attention_mask = torch.ones_like(padded_ids, dtype=torch.long)
+            return padded_ids, attention_mask
+        
+        # Create padding tensor with pad token ID
+        pad_tensor = torch.full((ids.shape[0], pad_length), self.engine.tokenizer.pad_token_id, dtype=torch.long)
+        
+        # Left padding: pad first, then original sequence
+        if padding_side == "left":
+            padded_ids = torch.cat([pad_tensor, ids], dim=1)
+            attention_mask = torch.cat([torch.zeros_like(pad_tensor), torch.ones_like(ids)], dim=1)
+        # Right padding: original sequence first, then pad
+        else:  # right
+            padded_ids = torch.cat([ids, pad_tensor], dim=1)
+            attention_mask = torch.cat([torch.ones_like(ids), torch.zeros_like(pad_tensor)], dim=1)
+        
+        return padded_ids, attention_mask
+
+    def _pre_process(self, sample):
+        """
+        Preprocess single sample before generation.
+        Maps raw prompt IDs to prompts field for consistency.
+        
+        Args:
+            sample: Sample object to preprocess
+        
+        Returns:
+            Preprocessed sample with prompts field set
+        """
+        sample.prompts = sample.raw_prompt_ids
+        return sample
+    
+    def _post_process(self, sample):
+        """
+        Postprocess generated sample with padding, sequence concatenation, and reward formatting.
+        Standardizes prompt/response lengths, creates attention masks, and formats reward tensors.
+        
+        Args:
+            sample: Generated sample to postprocess
+        
+        Returns:
+            Postprocessed sample with standardized tensor fields
+        """
+        # Pad prompts to max prompt length (left padding for prompt sequences)
+        prompt_ids, prompt_attention_mask = self._manual_pad(
+            [sample.prompts],
+            max_length=self.config.data.max_prompt_length,
+            padding_side="left"
+        )
+
+        # Pad responses to max response length (right padding for generated text)
+        response_ids, response_attention_mask = self._manual_pad(
+            [sample.responses],
+            max_length=self.config.data.max_response_length,
+            padding_side="right"
+        )
+
+        # Pad and combine response mask with attention mask (filter padding tokens)
+        response_mask, _ = self._manual_pad(
+            [sample.response_mask],
+            max_length=self.config.data.max_response_length,
+            padding_side="right"
+        )
+        response_mask = response_mask * response_attention_mask
+        
+        # Validate tensor shape consistency
+        assert response_ids.shape == response_mask.shape, (
+            f"mismatch in response_ids and response_mask shape: {response_ids.shape} vs {response_mask.shape}"
+        )
+
+        # Concatenate prompt and response sequences for model input
+        input_ids = torch.cat([prompt_ids, response_ids], dim=1)
+        attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1)
+        
+        # Create position IDs (account for padding in attention mask)
+        position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
+        
+        # Format reward tensor (place reward value at last valid response token position)
+        reward_tensor = torch.zeros_like(response_ids[0], dtype=torch.float32)
+        prompt_length = prompt_ids[0].shape[-1]
+        valid_response_length = attention_mask[0][prompt_length:].sum()
+        reward_tensor[valid_response_length - 1] = sample.rewards
+        
+        # Clean up and set processed fields in sample
+        sample.rewards = None
+        sample.token_level_rewards = reward_tensor.numpy()
+        sample.token_level_scores = copy.deepcopy(reward_tensor.numpy())
+        sample.prompts = prompt_ids[0].numpy()
+        sample.responses = response_ids[0].numpy()
+        sample.response_mask = response_mask[0].numpy()
+        sample.input_ids = input_ids[0].numpy()
+        sample.attention_mask = attention_mask[0].numpy()
+        sample.position_ids = position_ids[0].numpy()
+        
+        return sample   
+    
+    async def generate(self, sample):
+        """
+        Asynchronous sample generation pipeline: preprocess → rollout → postprocess → data coordination.
+        Uses semaphore to control concurrency and offloads CPU-bound processing to executor.
+        
+        Args:
+            sample: Raw sample from data coordinator
+        
+        Returns:
+            Postprocessed sample with generated response and formatted tensors
+        """
+        async with self.semaphore:  # Limit concurrent generations to batch size
+            loop = asyncio.get_running_loop()
+            
+            # 1. Preprocess sample (CPU-bound, offload to executor)
+            sample = await loop.run_in_executor(
+                        None, 
+                        self._pre_process, 
+                        sample
+                    )
+            
+            # 2. Execute rollout flow (LLM generation with reward calculation)
+            sample = await self.rollout_flow(sample, copy.deepcopy(self.sampling_params), self.engine, self.reward_fn)
+            
+            # 3. Postprocess sample (CPU-bound padding and tensor formatting)
+            sample = await loop.run_in_executor(
+                        None, 
+                        self._post_process, 
+                        sample
+                    )
+            
+            # 4. Store processed sample in Ray object store and notify data coordinator
+            sample_ref = await loop.run_in_executor(
+                        None, 
+                        ray.put, 
+                        sample
+                    )
+            
+            # Create sample metadata for tracking
+            sample_info = SampleInfo(
+                sum_tokens=getattr(sample, 'sum_tokens', int(sample.attention_mask.sum())),
+                prompt_length=getattr(sample, 'prompt_length', 0),
+                response_length=getattr(sample, 'response_length', 0),
+                uid=str(sample.uid),
+                dict_info={
+                    'key': "Actor",
+                })
+            
+            # Send processed sample to data coordinator
+            await self.data_coordinator.put_batch.remote([sample_info], [sample_ref])
+            
+            return sample
+    
+    async def run(self):
+        """
+        Main execution loop for the executor.
+        Continuously replenishes samples, creates generation tasks, and maintains batch size.
+        Runs until self.running is set to False.
+        """
+        self.running = True
+        while self.running:
+            # Get new samples to replenish batch
+            samples = await self.get_sample()
+            
+            if not samples:
+                # No new samples - short sleep to avoid busy waiting
+                await asyncio.sleep(0.001)
+            else:
+                # Create generation tasks for new samples
+                tasks = []
+                for sample in samples:
+                    task = asyncio.create_task(self.generate(sample))
+                    tasks.append(task)
+                    self.tasks.add(task)
+                    # Remove task from tracking set when completed
+                    task.add_done_callback(self.tasks.discard)
+                
+                # Debug code (commented out) - save batch for inspection
+                # samples = await asyncio.gather(*tasks)
+                # batch = Samples2Dict(samples=samples)
+                # torch.save(batch, f"save_dict/{os.environ.get('RANK')}_batch.pt")
+                # break
+                
+                # Yield control to event loop (non-blocking sleep)
+                await asyncio.sleep(0)  
+                
+    async def stop(self):
+        """
+        Stop executor and clean up active tasks.
+        Sets running flag to False and waits for all active generation tasks to complete.
+        """
+        self.running = False
+        # Wait for all remaining tasks to finish before exiting
+        await asyncio.gather(*self.tasks)

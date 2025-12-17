@@ -250,6 +250,8 @@ def convert_weight_keys(state_dict: Dict[str, torch.Tensor], model: PreTrainedMo
 
     return original_weights
 
+def compute_position_id_with_mask(mask):
+    return torch.clip(torch.cumsum(mask, dim=-1) - 1, min=0, max=None)
 
 @dataclass
 class CausalLMOutputForPPO(CausalLMOutputWithPast):

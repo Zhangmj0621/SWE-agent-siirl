@@ -19,7 +19,6 @@ from loguru import logger
 from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from siirl.execution.dag import Node, NodeRole, NodeStatus, NodeType
 from siirl.models.loader import load_tokenizer
 from siirl.params import SiiRLArguments
 
@@ -63,38 +62,32 @@ class RepeatDataset(torch.utils.data.Dataset):
         return self.base_dataset[idx % len(self.base_dataset)]
 
 
-class DataLoaderNode(Node):
+class DataLoaderNode():
     """
     Represents a data loader node in the DAG.
     This version uses the PartitionedRLHFDataset for efficient, memory-safe
     distributed data loading. Each rank only loads and processes its own data slice.
     """
 
-    def __init__(self, node_id: str, global_config: SiiRLArguments, config: Optional[Dict[str, Any]] = None, retry_limit: int = 0):
+    def __init__(self, global_config: SiiRLArguments, config: Optional[Dict[str, Any]] = None, retry_limit: int = 0):
         """
         Initialize a data loader node.
 
         Args:
-            node_id (str): The unique identifier of the node.
             global_config(SiiRLArguments): The arguments from config file.
             config (Optional[Dict[str, Any]]): Specific configuration information for the node. Defaults to an empty dictionary.
             retry_limit (int): The maximum number of retries when the node execution fails. Defaults to 0 (no retries).
         """
-        super().__init__(node_id, NodeType.DATA_LOAD, NodeRole.DEFAULT, config=config, retry_limit=retry_limit)
         self.global_config = global_config
-
-        if "tokenizer" in self.config:
-            self.tokenizer = self.config["tokenizer"]
-            self.processor = self.config["processor"]
-        else:
-            # Load tokenizer and processor
-            tokenizer_module = load_tokenizer(model_args=global_config.actor_rollout_ref.model)
-            self.tokenizer = tokenizer_module["tokenizer"]
-            self.processor = tokenizer_module["processor"]
-            
+        self.config = config
+        # Load tokenizer and processor
+        # tokenizer_module = load_tokenizer(path=global_config.actor_rollout_ref.model.path, model_args=global_config.actor_rollout_ref.model)
+        # self.tokenizer = tokenizer_module["tokenizer"]
+        # self.processor = tokenizer_module["processor"]
+        self.tokenizer = load_tokenizer(path=global_config.actor_rollout_ref.model.path, model_args=global_config.actor_rollout_ref.model)
+        self.processor = None # todo: support multi-model
         # force load in main process for vision language model
-        self.num_loader_workers = 0 if global_config.actor_rollout_ref.rollout.name == "sglang" or self.processor is not None \
-            else config.get("num_loader_workers", 8)
+        self.num_loader_workers = config.get("num_loader_workers", 8)
         
         # Get group world size, rank, parallel size from config.
         #   Group world size means the rollout pytorch distributed group total gpus.
@@ -121,7 +114,7 @@ class DataLoaderNode(Node):
         self.num_train_batches = len(self.train_dataloader) if self.train_dataloader else 0
         self.num_val_batches = len(self.val_dataloader) if self.val_dataloader else 0
 
-        logger.info(f"DataLoaderNode '{self.node_id}' initialized:")
+        logger.info(f"DataLoaderNode initialized:")
         logger.info(f"  Group rank: {self.group_rank} / {self.group_world_size}")
         logger.info(f"  Rollout DDP rank: {self.rollout_ddp_rank} / {self.rollout_ddp_world_size}")
         logger.info(f"  Train batches per epoch for this rank: {self.num_train_batches}")
@@ -239,14 +232,11 @@ class DataLoaderNode(Node):
             StopIteration: If the dataloader is exhausted and cannot provide more data
                            (though this might be handled by the DAG scheduler).
         """
-        self.update_status(NodeStatus.RUNNING)
-        logger.debug(f"Node {self.node_id} execute: epoch={epoch}, is_validation_step={is_validation_step}")
 
         try:
             if is_validation_step:
                 if not self.val_dataloader:  # Handles empty validation dataset
                     logger.warning(f"Rank {self.group_rank}: Validation dataloader is not available or empty.")
-                    self.update_status(NodeStatus.COMPLETED)  # Or FAILED if this is an error condition
                     return None  # Or an empty batch marker
 
                 # Validation dataloader loads the entire validation set as one batch.
@@ -256,64 +246,57 @@ class DataLoaderNode(Node):
 
                 try:
                     batch = next(self._current_val_iter)
-                    logger.debug(f"Node {self.node_id}: Yielding validation batch.")
+                    logger.debug(f"Yielding validation batch.")
                     # Reset for next validation call, as it's one batch
                     self._current_val_iter = None
                 except StopIteration:
-                    logger.warning(f"Node {self.node_id}: Validation dataloader exhausted unexpectedly (should be one batch). Resetting.")
+                    logger.warning(f"Validation dataloader exhausted unexpectedly (should be one batch). Resetting.")
                     # This case should ideally not happen if batch_size = len(dataset) and it's not empty
                     self._current_val_iter = iter(self.val_dataloader)  # Get a fresh iterator
                     try:
                         batch = next(self._current_val_iter)
                     except StopIteration:
-                        logger.error(f"Node {self.node_id}: Validation dataloader is empty even after reset.")
-                        self.update_status(NodeStatus.FAILED, "Validation dataloader empty")
+                        logger.error(f"Validation dataloader is empty even after reset.")
                         return None
             else:  # Training step
                 if epoch is None:
                     error_msg = "Epoch must be provided for training steps."
-                    logger.error(f"Node {self.node_id}: {error_msg}")
-                    self.update_status(NodeStatus.FAILED, error_msg)
                     raise ValueError(error_msg)
 
                 if not self.train_dataloader:  # Handles empty training dataset
                     logger.warning(f"Rank {self.group_rank}: Training dataloader is not available or empty.")
-                    self.update_status(NodeStatus.COMPLETED)  # Or FAILED
                     return None  # Or an empty batch marker
 
                 if self._current_epoch != epoch or self._current_train_iter is None:
-                    logger.info(f"Node {self.node_id}: New epoch ({epoch}) or first step. Initializing train iterator.")
+                    logger.info(f" New epoch ({epoch}) or first step. Initializing train iterator.")
                     self._current_epoch = epoch
                     # Set epoch for DistributedSampler if applicable
                     if hasattr(self.train_dataloader.sampler, "set_epoch") and isinstance(self.train_dataloader.sampler, DistributedSampler):
-                        logger.debug(f"Node {self.node_id}: Setting epoch {epoch} for DistributedSampler.")
+                        logger.debug(f" Setting epoch {epoch} for DistributedSampler.")
                         self.train_dataloader.sampler.set_epoch(epoch)
 
                     self._current_train_iter = iter(self.train_dataloader)
 
                 try:
                     batch = next(self._current_train_iter)
-                    logger.debug(f"Node {self.node_id}: Yielding training batch for epoch {epoch}.")
+                    logger.debug(f"Yielding training batch for epoch {epoch}.")
                 except StopIteration:
                     # This means the current epoch's data is exhausted.
                     # The DAG scheduler should ideally handle this by moving to the next epoch
                     # or terminating if all epochs are done.
                     # For this node, it signals completion for this particular call if data is expected.
                     error_msg = f"Training dataloader exhausted for epoch {epoch}. This might be expected at epoch end."
-                    logger.info(f"Node {self.node_id}: {error_msg}")
+                    logger.info(f"{error_msg}")
                     # We might not want to mark FAILED here, as it's a natural end of an iterator.
                     # The caller (DAG executor) should decide if more data was expected.
                     # For now, let's re-raise StopIteration to signal the caller.
-                    self.update_status(NodeStatus.COMPLETED)  # Or a custom status like 'EPOCH_END'
                     raise  # Re-raise StopIteration
 
-            self.update_status(NodeStatus.COMPLETED)
             return batch
 
         except Exception as e:
-            error_msg = f"Error during data loading in node {self.node_id}: {e}"
+            error_msg = f"Error during data loading : {e}"
             logger.exception(error_msg)  # Log with stack trace
-            self.update_status(NodeStatus.FAILED, str(e))
             raise  # Re-raise the exception so the DAG executor can handle it
 
     def state_dict(self) -> Dict[str, Any]:

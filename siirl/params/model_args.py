@@ -79,7 +79,16 @@ class ModelArguments():
         metadata={"help": "Whether to trust the execution of code from datasets/models defined on the Hub or not."},
     )
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
-
+    
+    # used for dataloader
+    use_fast_tokenizer: bool = field(
+        default=True,
+        metadata={"help": "Whether or not to use one of the fast tokenizer (backed by the tokenizers library)."},
+    )
+    split_special_tokens: bool = field(
+        default=False,
+        metadata={"help": "Whether or not the special tokens should be split during the tokenization process."},
+    )
     def __post_init__(self):
         if self.path is None:
             raise ValueError("Please provide `path`.")
@@ -172,8 +181,6 @@ class RolloutArguments:
     top_k: int = field(default=-1, metadata={"help": "Top-k sampling"})
     top_p: float = field(default=1.0, metadata={"help": "Top-p sampling"})
     use_fire_sampling: bool = field(default=False, metadata={"help": "Fire sampling optimization"})
-    prompt_length: int = field(default=None, metadata={"help": "Prompt length"})
-    response_length: int = field(default=None, metadata={"help": "Response length"})
     dtype: str = field(default="bfloat16", metadata={"help": "Compute dtype"})
     gpu_memory_utilization: float = field(default=0.5, metadata={"help": "GPU memory usage"})
     ignore_eos: bool = field(default=False, metadata={"help": "Ignore EOS tokens"})
@@ -187,20 +194,18 @@ class RolloutArguments:
     limit_images: Optional[int] = field(default=None, metadata={"help": "support for multi-image data"})
     do_sample: bool = field(default=True, metadata={"help": "Enable sampling"})
     n: int = field(default=1, metadata={"help": "Number of responses"})
-    log_prob_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
-    log_prob_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
-    log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
-    disable_log_stats: bool = field(default=True, metadata={"help": "Whether or not disable log stats"})
     enable_chunked_prefill: bool = field(default=True, metadata={"help": "Whether or not enable chunked prefill"})
     trust_remote_code: bool = field(default=False, metadata={"help": "trust the code or not."})
     val_kwargs: EvalSamplingArguments = field(default_factory=EvalSamplingArguments)
     layer_name_map: LayerNameMapArguments = field(default_factory=LayerNameMapArguments)
     seed: int = field(default=0, metadata={"help": "The random seed"})
     engine_kwargs: EngineArguments = field(default_factory=EngineArguments)
+    calculate_log_probs: bool = field(default=True, metadata={"help": "Whether rollout calculate log probs"})
     multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
     router_ip: str = field(default=None, metadata={"help": "Rollout Router IP"})
     router_port: str = field(default=None, metadata={"help": "Rollout Router Port"})
-    
+    executor_module: str = field(default="naive", metadata={"help": "Batch rollout Generate Executor"})
+    flow_function: str = field(default="naive", metadata={"help": "Sample rollout Generate Executor"})
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 

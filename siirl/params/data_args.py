@@ -33,9 +33,7 @@ class DataArguments:
     train_batch_size: int = field(default=1024, metadata={"help": "Training batch size"})
     gen_batch_size: Optional[int] = field(default=None, metadata={"help": "Generation batch size for DAPO (typically 3x train_batch_size)"})
     val_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Validation batch handling"})
-    return_raw_input_ids: bool = field(default=False, metadata={"help": "Return raw token IDs"})
-    return_raw_chat: bool = field(default=False, metadata={"help": "Return unprocessed chat data"})
-    return_full_prompt: bool = field(default=False, metadata={"help": "Whether to return the full prompt with chat template"})
+    return_raw_chat: bool = field(default=True, metadata={"help": "Return unprocessed chat data"})
     filter_overlong_prompts: bool = field(default=False, metadata={"help": "For large-scale dataset, filtering overlong prompts could be timeconsuming."})
     shuffle: bool = field(default=True, metadata={"help": "Shuffle training data"})
     truncation: str = field(

@@ -65,16 +65,31 @@ class MainRunner:
             num_buffers=siirl_args.trainer.nnodes, ppo_mini_batch_size = siirl_args.actor_rollout_ref.actor.ppo_mini_batch_size,
             world_size=siirl_args.trainer.nnodes * siirl_args.trainer.n_gpus_per_node
         )
-
+        dataloader_fut = data_coordinator_handle.init_dataloader.remote(siirl_args)
         # 2. initialize pg
         pgs = create_placement_groups(siirl_args)
         print(f"[pgs] {pgs}")
         # 3. Initialize rollout worker
         rollout_pgs = pgs
-        rollout_worker = RolloutManager(siirl_args, rollout_pgs)
+        rollout_worker = RolloutManager(siirl_args, rollout_pgs, data_coordinator_handle)
+        ray.get(dataloader_fut)
+        total_training_steps, num_train_batches = ray.get(data_coordinator_handle.epoch_info.remote())
+        global_steps = 0
+        
+        if num_train_batches > 0:
+            start_epoch = global_steps // num_train_batches
+            batches_to_skip = global_steps % num_train_batches
+        for epoch in range(start_epoch, siirl_args.trainer.total_epochs):
+            for batch_idx in range(num_train_batches):
+                for _ in range(siirl_args.trainer.async_factor):
+                    ray.get(data_coordinator_handle.run_dataloader.remote(epoch))
+                batch_idx += siirl_args.trainer.async_factor
+                while True:
+                    pass
         # 4. Initialize Actor worker
-        while True:
-            pass
+        
+        
+        
         # 5. start rollout and actor worker
 
 
@@ -105,7 +120,11 @@ def main() -> None:
     siirl_args = parse_config()
     siirl_args.actor_rollout_ref.model.path = '/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-1.7B'
     siirl_args.rollout.tensor_model_parallel_size = 2
-    
+    siirl_args.data.train_files = ['/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/train.parquet']
+    siirl_args.data.val_files = ['/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/test.parquet']
+    siirl_args.data.max_prompt_length=2048
+    siirl_args.data.max_response_length=4096
+    siirl_args.data.filter_overlong_prompts=True
     log_dict_formatted(siirl_args.to_dict(), "SiiRLArguments")
 
     # Launch the main orchestration actor and wait for it to complete.

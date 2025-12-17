@@ -20,41 +20,17 @@ import time
 
 import requests
 from loguru import logger
-from requests.exceptions import RequestException
-
+from typing import List, Dict
 
 from sglang.utils import async_stream_and_merge, stream_and_merge
 from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 
 
-
+from siirl.models.loader import load_tokenizer
 from siirl.params.training_args import SiiRLArguments
-from siirl.utils.backend.net import get_net_interface_ip
-
-
-def wait_until_ok(
-    url: str,
-    *,
-    process: "multiprocessing.Process" = None,
-    max_wait: int = 3000,
-    interval: int = 2,
-    timeout: int = 3000,
-    extra_headers: dict | None = None,
-) -> None:
-    """Block until `url` returns 200 or time-out."""
-    deadline = time.monotonic() + max_wait
-    while time.monotonic() < deadline:
-        if process and not process.is_alive():
-            raise RuntimeError(f"Server process terminated unexpectedly. {process} {process.is_alive()}")
-        try:
-            if requests.get(url, timeout=timeout, headers=extra_headers or {}).status_code == 200:
-                return
-        except RequestException as exc:
-            logger.debug("Request failed: %s", exc)
-        time.sleep(interval)
-
-    raise RuntimeError(f"Health check failed after {max_wait} seconds.")
+from siirl.utils.net_utils.net import get_net_interface_ip
+from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient, wait_until_ok
 
 
 class SglangEngine:
@@ -65,6 +41,7 @@ class SglangEngine:
         self.port = port
         self.nccl_port = nccl_port
         self.ip = ip
+        self.tokenizer = load_tokenizer(path = config.actor_rollout_ref.model.path, model_args = config.actor_rollout_ref.model)
         self.launch_server()
         
     def get_sglang_params(self, base_gpu_id, node_rank, nnodes):
@@ -124,4 +101,19 @@ class SglangEngine:
             extra_headers={"Authorization": f"Bearer {sgl_args.api_key}"},
         )
 
-        
+    def set_router(self, router_address):
+        self.router_address = router_address
+    
+    async def generate(self, input_ids:List[int], sampling_params:Dict):
+        url = f"http://{self.router_address}/generate"
+        # Prepare payload for sglang server
+        payload = {
+            "sampling_params": sampling_params,
+            "return_logprob": True,
+        }
+        payload["input_ids"] = input_ids
+        output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
+
+        responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
+        rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
+        return responses, rollout_log_prob

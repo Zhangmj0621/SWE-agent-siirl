@@ -19,13 +19,24 @@ import random
 import ray
 import loguru
 import time
+import threading
+
 from collections import deque
+from loguru import logger
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+
+
 from siirl.data_coordinator.sample import SampleInfo
 from siirl.utils.model_utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions
-
-
-@ray.remote
+from siirl.params.training_args import SiiRLArguments
+from siirl.data_coordinator.dataloader import DataLoaderNode
+from siirl.data_coordinator.sample import preprocess_dataloader, Dict2Samples, Sample
+@ray.remote(
+    max_concurrency=1, 
+    concurrency_groups={"dataloader": 1},
+    num_cpus=2
+)
 class DataCoordinator:
     """
     A globally unique central Actor responsible for coordinating data producers (RolloutWorkers)
@@ -43,6 +54,11 @@ class DataCoordinator:
         self.lock = asyncio.Lock()
         loguru.logger.info("Global DataCoordinator initialized.")
         self._cache = []
+        
+        # # dataloader
+        self.dataloader_queue:deque[Sample] = deque()
+        self.dataloader = None
+        self.dataloader_lock = asyncio.Lock()  
         
     async def put(self, sample_info: SampleInfo, sample_ref: Any, caller_node_id: Optional[str] = None):
         """
@@ -68,10 +84,6 @@ class DataCoordinator:
         # caller to pass their node_id explicitly.
         if caller_node_id is None:
             caller_node_id = ray.get_runtime_context().get_node_id()
-            loguru.logger.warning(
-                "DataCoordinator.put() called without caller_node_id. "
-                f"Using DataCoordinator's node_id {caller_node_id[:16]}... which may be incorrect."
-            )
 
         # 2. Inject the node ID into SampleInfo for subsequent filtering
         #    Only inject if node_id has not been manually set, to facilitate testing.
@@ -104,10 +116,6 @@ class DataCoordinator:
         # caller to pass their node_id explicitly.
         if caller_node_id is None:
             caller_node_id = ray.get_runtime_context().get_node_id()
-            loguru.logger.warning(
-                "DataCoordinator.put_batch() called without caller_node_id. "
-                f"Using DataCoordinator's node_id {caller_node_id[:16]}... which may be incorrect."
-            )
 
         for i in range(len(sample_infos)):
             if sample_infos[i].node_id is None:
@@ -314,6 +322,43 @@ class DataCoordinator:
     def __repr__(self) -> str:
         return f"<DataCoordinator(total_samples={len(self._sample_queue)})>"
 
+    
+    
+    # # dataloader function
+    @ray.method(concurrency_group="dataloader")
+    def init_dataloader(self, config: SiiRLArguments):
+        self.dataloader = DataLoaderNode(
+            global_config = config,
+            config={
+                "group_world_size": 1,
+                "group_rank": 0,
+                "group_parallel_size": 1,
+                "num_loader_workers": config.data.num_loader_workers,
+                "auto_repeat": config.data.auto_repeat,
+            },
+        )
+        
+    @ray.method(concurrency_group="dataloader")
+    def epoch_info(self):
+        return self.dataloader.total_training_steps, self.dataloader.num_train_batches
+    
+    @ray.method(concurrency_group="dataloader")
+    async def run_dataloader(self, epoch):
+        batch = self.dataloader.run(epoch)
+        tensor_dict = preprocess_dataloader(batch)
+        samples = await Dict2Samples(tensor_dict, True)
+        async with self.dataloader_lock:
+            self.dataloader_queue.extend(samples)
+        
+    @ray.method(concurrency_group="dataloader")
+    async def get_dataloader(self, batch_size):
+        async with self.dataloader_lock:
+            if len(self.dataloader_queue) > batch_size:
+                return [self.dataloader_queue.popleft() for _ in range(batch_size)]
+            else:
+                all_popped = list(self.dataloader_queue)
+                self.dataloader_queue.clear()
+                return all_popped
 
 # ====================================================================
 # Initialization Logic

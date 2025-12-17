@@ -39,7 +39,7 @@ class Sample(BaseModel):
     returns: Optional[np.ndarray] = Field(default=None)
     old_log_probs: Optional[np.ndarray] = Field(default=None)
     ref_log_prob: Optional[np.ndarray] = Field(default=None)
-
+    rollout_log_prob: Optional[np.ndarray] = Field(default=None)
     # from  non_tensor_batch of Dataproto
     raw_prompt: str = Field(default="")
     raw_prompt_ids: List[int] = Field(default_factory=list)
@@ -69,6 +69,10 @@ class Sample(BaseModel):
         default=None,
         metadata={"help": "used in multi-agent"}
     )
+    rewards: float = Field(
+        default=None,
+        metadata={"help": "Rewards"}
+    )
     traj_step: int = Field(
         default=None,
         metadata={"help": "used in multi-agent"}
@@ -83,7 +87,6 @@ class Sample(BaseModel):
     )
     multi_modal_inputs: Optional[Dict[str, Any]] = Field(default=None)
     uid: Optional[str] = Field(default=None)
-
     temperature: float = Field(
         default=None,
         metadata={"help": "temperature"}
@@ -130,9 +133,9 @@ def preprocess_dataloader(data:Dict, n:int = 1):
     
     return tensor_dict
 
-def Dict2Samples(data:TensorDict)-> List[SampleManager]:
+def Dict2Samples(data: TensorDict, async_mode: bool = False) -> Union[List[Sample], asyncio.Future]:
     batch_size = data.batch_size[0]
-    async def calc_sample(index):
+    def calc_sample(index):
         local_sample = Sample()
         local_sample.input_ids = data['input_ids'][index].numpy()
         local_sample.attention_mask = data['attention_mask'][index].numpy()
@@ -152,30 +155,26 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
         local_sample.old_log_probs = data['old_log_probs'][index].numpy() if 'old_log_probs' in data else None
         local_sample.ref_log_prob = data['ref_log_prob'][index].numpy() if 'ref_log_prob' in data else None
         local_sample.extra_info = data['extra_info'][index] if 'extra_info' in data else None
-
         if 'multi_modal_inputs' in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
         local_sample.uid = data['uid'][index]
-        # local_sample = ray.put(local_sample)
         return local_sample
-    loop = asyncio.get_event_loop()
-    futures = []
-    for index in range(batch_size):
-        futures.append(calc_sample(index))
-    samples = loop.run_until_complete(asyncio.gather(*futures))   
-    del data 
-    return samples
+
+    async def async_wrapper(data):
+        loop = asyncio.get_running_loop()
+        tasks = [loop.run_in_executor(None, calc_sample, index) for index in range(batch_size)]
+        samples = await asyncio.gather(*tasks)
+        del data
+        return samples
+
+    if async_mode:
+        return async_wrapper(data)  
+    else:
+        samples = [calc_sample(index) for index in range(batch_size)]
+        del data
+        return samples
 
 def Samples2Dict(samples: List[Sample]) -> TensorDict:
-    async def get_sample(samples, index):
-        # sample = ray.get(samples[index].sample)
-        # samples[index].sample = sample
-        return samples[index]
-    futures = []
-    for i in range(len(samples)):
-        futures.append(get_sample(samples, i))
-    loop = asyncio.get_event_loop()
-    samples = loop.run_until_complete(asyncio.gather(*futures))
     # convert to tensordict
     fields = Sample.model_fields 
     sample_fields = [name for name in fields.keys()]
