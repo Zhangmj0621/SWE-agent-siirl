@@ -32,6 +32,7 @@ from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.net import get_net_interface_ip
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient, wait_until_ok
 
+global_engine_process = None
 
 class SglangEngine:
     def __init__(self, rank: int, config: SiiRLArguments, dist_init_addr: str, ip: str, port: int , nccl_port: int):
@@ -105,6 +106,7 @@ class SglangEngine:
         self.router_address = router_address
     
     async def generate(self, input_ids:List[int], sampling_params:Dict):
+        # url = f"http://{self.ip}:{self.port}/generate"
         url = f"http://{self.router_address}/generate"
         # Prepare payload for sglang server
         payload = {
@@ -117,3 +119,5 @@ class SglangEngine:
         responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
         return responses, rollout_log_prob
+
+

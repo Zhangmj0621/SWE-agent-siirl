@@ -202,7 +202,7 @@ class RolloutManager:
         # Wait for all rollout processes to start
         ray.get(future)
         
-    def start_router(self, request_timeout: int = 100):
+    def start_router(self, request_timeout: int = 3600):
         """
         Start SGLang router process and configure it with worker URLs.
         Performs health check to ensure router is operational before proceeding.

@@ -91,7 +91,6 @@ class GlobalAsyncHTTPClient:
                 cls._instance = httpx.AsyncClient(
                     limits=httpx.Limits(
                         max_connections=None,  # Fix: Change None to reasonable value in production
-                        max_keepalive_connections=20,
                     ),
                     timeout=httpx.Timeout(
                         connect=cls._connect_timeout,

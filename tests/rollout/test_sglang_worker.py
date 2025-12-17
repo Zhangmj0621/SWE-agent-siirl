@@ -84,8 +84,7 @@ class MainRunner:
                 for _ in range(siirl_args.trainer.async_factor):
                     ray.get(data_coordinator_handle.run_dataloader.remote(epoch))
                 batch_idx += siirl_args.trainer.async_factor
-                while True:
-                    pass
+                time.sleep(10)
         # 4. Initialize Actor worker
         
         
@@ -125,6 +124,8 @@ def main() -> None:
     siirl_args.data.max_prompt_length=2048
     siirl_args.data.max_response_length=4096
     siirl_args.data.filter_overlong_prompts=True
+    siirl_args.rollout.n=8
+    # siirl_args.data.train_batch_size = siirl_args.data.train_batch_size // 2
     log_dict_formatted(siirl_args.to_dict(), "SiiRLArguments")
 
     # Launch the main orchestration actor and wait for it to complete.

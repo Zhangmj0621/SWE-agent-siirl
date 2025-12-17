@@ -106,7 +106,7 @@ class RolloutWorker:
             module_path, name = executor_path.rsplit('.', 1)
             mod = importlib.import_module(module_path)
             Executor = getattr(mod, name)
-        executor = Executor(self.config, router_address, data_coordinator, self.engine, self.config.data.train_batch_size // num_engine)
+        executor = Executor(self.config, data_coordinator, self.engine, self.config.data.train_batch_size // num_engine)
         self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(executor,), daemon=True)
         self.rollout_thread.start()
 

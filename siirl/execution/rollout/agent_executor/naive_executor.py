@@ -18,8 +18,9 @@ import ray
 import torch
 import importlib
 
+from collections import deque
 from loguru import logger
-from typing import List, Set
+from typing import List, Set, Dict, Any
 from loguru import logger
 from siirl.params.training_args import SiiRLArguments
 from siirl.data_coordinator.sample import Sample, SampleInfo, Samples2Dict
@@ -30,36 +31,36 @@ class NaiveExecutor:
     Manages asynchronous sample generation, pre/post processing, and data coordination
     for rollout processes in reinforcement learning with large language models.
     '''
-    def __init__(self, config:SiiRLArguments, router_address, data_coordinator, engine, train_batch_size):
+    def __init__(self, config:SiiRLArguments, data_coordinator, engine, train_batch_size):
         """
         Initialize NaiveExecutor with core configuration and dependencies.
         
         Args:
             config: SiiRLArguments containing all training/rollout hyperparameters
-            router_address: Address of SGLang router for model inference
             data_coordinator: Ray handle to data coordinator for sample management
             engine: Inference engine instance (e.g., SglangEngine) for text generation
             train_batch_size: Batch size for rollout sample generation
         """
         self.config = config
-        self.router_address = router_address  # SGLang router address for engine communication
         self.data_coordinator = data_coordinator  # Ray actor handle to data coordinator
         self.running = False  # Flag to control executor main loop
         self.engine = engine  # Inference engine for text generation
-        self.train_batch_size = train_batch_size  # Target batch size for rollout samples
+        self.train_batch_size = train_batch_size # Target batch size for rollout samples
+        self.max_concurrency_size = train_batch_size * config.rollout.n
         self.tasks:Set[asyncio.Task] = set()  # Track active generation tasks for cleanup
-        
+        self.finish_group_samples:Dict[str, List[Any]] = {} # Save result of finish samples until reach n group
+        self.waiting_samples = deque()
+        self.rollout_n = config.rollout.n
         # Sampling parameters for text generation (LLM inference config)
         self.sampling_params =  dict(
             temperature=config.rollout.temperature,  # Randomness control for generation
             top_p=config.rollout.top_p,  # Nucleus sampling threshold
             repetition_penalty=1.0,  # Penalty for repetitive text generation
-            logprobs=config.rollout.calculate_log_probs,  # Whether to return log probabilities
             max_new_tokens=config.data.max_response_length  # Maximum generated tokens
         )
         
         # Semaphore to control concurrent generation tasks (limit to batch size)
-        self.semaphore = asyncio.Semaphore(train_batch_size) 
+        self.semaphore = asyncio.Semaphore(self.max_concurrency_size) 
         self.reward_fn = None  # Custom reward function (optional)
         self.rollout_flow = None  # Rollout flow function for sample generation
         
@@ -73,6 +74,9 @@ class NaiveExecutor:
         if flow_path == "naive":
             from siirl.execution.rollout.agent_flow.naive_flow import naive_flow
             self.rollout_flow = naive_flow
+        elif flow_path == "aio":
+            from siirl.execution.rollout.agent_flow.aio_flow import aio_flow
+            self.aio_flow = aio_flow
         else:
             # Dynamically import custom rollout flow function
             module_path, name = flow_path.rsplit('.', 1)
@@ -89,11 +93,23 @@ class NaiveExecutor:
             List of new samples from data coordinator (empty if batch is full)
         """
         # Calculate number of samples needed to reach target batch size
-        need_replenish = self.train_batch_size - len(self.tasks)
+        need_replenish = self.max_concurrency_size - len(self.tasks)
         if need_replenish == 0:
             return []
         # Request new samples from data coordinator (Ray remote call)
-        new_samples = await self.data_coordinator.get_dataloader.remote(need_replenish)
+        if len(self.waiting_samples) < need_replenish:
+            diff = need_replenish - len(self.waiting_samples)
+            pull_size = (diff + self.rollout_n - 1) // self.rollout_n
+            
+            pull_samples = await self.data_coordinator.get_dataloader.remote(pull_size)
+            
+            for sample in pull_samples:
+                samples = [copy.deepcopy(sample) for _ in range(self.rollout_n)]
+                self.waiting_samples.extend(samples)
+        new_samples = []
+        if len(self.waiting_samples):
+            for _ in range(need_replenish):
+                new_samples.append(self.waiting_samples.popleft())
         return new_samples
     
     
@@ -212,6 +228,34 @@ class NaiveExecutor:
         
         return sample   
     
+    async def put_data(self, sample, loop):
+        sample_ref = await loop.run_in_executor(
+                    None, 
+                    ray.put, 
+                    sample
+                )
+        
+        # Create sample metadata for tracking
+        sample_info = SampleInfo(
+            sum_tokens=getattr(sample, 'sum_tokens', int(sample.attention_mask.sum())),
+            prompt_length=getattr(sample, 'prompt_length', 0),
+            response_length=getattr(sample, 'response_length', 0),
+            uid=str(sample.uid),
+            dict_info={
+                'key': "Actor",
+            })
+        if sample.uid not in self.finish_group_samples:
+            self.finish_group_samples[sample.uid] = []
+        self.finish_group_samples[sample.uid].append((sample_info, sample_ref))
+        # Send processed sample to data coordinator
+        if len(self.finish_group_samples[sample.uid]) == self.rollout_n:
+            tuple_datas = self.finish_group_samples.pop(sample.uid)
+            sample_infos = [tuple_data[0] for tuple_data in tuple_datas]
+            sample_refs = [tuple_data[1] for tuple_data in tuple_datas]
+            await self.data_coordinator.put_batch.remote(sample_infos, sample_refs)
+        
+        return sample
+    
     async def generate(self, sample):
         """
         Asynchronous sample generation pipeline: preprocess → rollout → postprocess → data coordination.
@@ -244,27 +288,9 @@ class NaiveExecutor:
                     )
             
             # 4. Store processed sample in Ray object store and notify data coordinator
-            sample_ref = await loop.run_in_executor(
-                        None, 
-                        ray.put, 
-                        sample
-                    )
-            
-            # Create sample metadata for tracking
-            sample_info = SampleInfo(
-                sum_tokens=getattr(sample, 'sum_tokens', int(sample.attention_mask.sum())),
-                prompt_length=getattr(sample, 'prompt_length', 0),
-                response_length=getattr(sample, 'response_length', 0),
-                uid=str(sample.uid),
-                dict_info={
-                    'key': "Actor",
-                })
-            
-            # Send processed sample to data coordinator
-            await self.data_coordinator.put_batch.remote([sample_info], [sample_ref])
-            
+            await self.put_data(sample = sample, loop = loop)
             return sample
-    
+
     async def run(self):
         """
         Main execution loop for the executor.
