@@ -307,7 +307,7 @@ def offload_megatron_model_to_cpu(models):
     - fp32 optimizer state chunked in model and dp group
     """
     for model_chunk in models:
-        if isinstance(model_chunk, DDP):
+        if isinstance(model_chunk, DDP) and model_chunk.ddp_config.use_distributed_optimizer:
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
@@ -336,7 +336,7 @@ def offload_megatron_model_to_cpu(models):
 @torch.no_grad()
 def load_megatron_model_to_gpu(models, load_grad=True):
     for model_chunk in models:
-        if isinstance(model_chunk, DDP):
+        if isinstance(model_chunk, DDP) and model_chunk.ddp_config.use_distributed_optimizer:
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
