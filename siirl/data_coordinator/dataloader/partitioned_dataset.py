@@ -110,23 +110,31 @@ class PartitionedRLHFDataset(Dataset):
         self.drop_last = drop_last if drop_last is not None else (not is_eval)
 
         self.prompt_key = self.data_args.prompt_key
-        self.image_key = self.data_args.image_key
-        self.video_key = self.data_args.video_key
+        # self.image_key = self.data_args.image_key
+        # self.video_key = self.data_args.video_key
+        # todo: support multi-model
+        self.image_key = None
+        self.video_key = None
         self.max_prompt_length = self.data_args.max_prompt_length
         self.truncation = self.data_args.truncation
         self.return_raw_chat = self.data_args.return_raw_chat
-        self.return_full_prompt = self.data_args.return_full_prompt
         self.filter_overlong_prompts = self.data_args.filter_overlong_prompts
         self.num_workers = self.data_args.preprocessing_num_workers if self.data_args.preprocessing_num_workers else max(1, os.cpu_count() // 8)
         self.force_on_the_fly = config.data.force_on_the_fly
-        self.image_max_pixels = self.data_args.processor.image_max_pixels
-        self.image_min_pixels = self.data_args.processor.image_min_pixels
-        self.video_max_pixels = self.data_args.processor.video_max_pixels
-        self.video_min_pixels = self.data_args.processor.video_min_pixels
-        self.video_fps = self.data_args.processor.video_fps
-        self.video_maxlen = self.data_args.processor.video_maxlen
-        self.multi_turn = config.actor_rollout_ref.rollout.multi_turn.enable
-
+        # self.image_max_pixels = self.data_args.processor.image_max_pixels
+        # self.image_min_pixels = self.data_args.processor.image_min_pixels
+        # self.video_max_pixels = self.data_args.processor.video_max_pixels
+        # self.video_min_pixels = self.data_args.processor.video_min_pixels
+        # self.video_fps = self.data_args.processor.video_fps
+        # self.video_maxlen = self.data_args.processor.video_maxlen
+        self.image_max_pixels = None
+        self.image_min_pixels = None
+        self.video_max_pixels = None
+        self.video_min_pixels = None
+        self.video_fps = None
+        self.video_maxlen = None
+        
+        
         self.is_trailing_rank = False  # Indicates trailing ranks that received one less data item in round-robin partitioning.
 
         if self._rank == 0:
@@ -393,20 +401,8 @@ class PartitionedRLHFDataset(Dataset):
         processed_row["raw_prompt_ids"] = raw_prompt_ids
         if self.return_raw_chat:
             processed_row["raw_prompt"] = messages
-        if self.return_full_prompt:
-            processed_row["full_prompts"] = raw_prompt  # array of strings
 
         # add index for each prompt
-        if self.multi_turn:
-            index = processed_row.get("extra_info", {}).get("index", 0)
-            tools_kwargs = processed_row.get("extra_info", {}).get("tools_kwargs", {})
-            interaction_kwargs = processed_row.get("extra_info", {}).get("interaction_kwargs", {})
-            # need_tools_kwargs = row_dict.get("extra_info", {}).get("need_tools_kwargs", self.need_tools_kwargs)
-            # if need_tools_kwargs and not tools_kwargs:
-            #     logger.warning("tools_kwargs is empty for index {}, data source: {}", index, row_dict["data_source"])
-            processed_row["index"] = index
-            processed_row["tools_kwargs"] = tools_kwargs
-            processed_row["interaction_kwargs"] = interaction_kwargs
         return processed_row
 
     def __getitem__(self, item: int) -> Dict:

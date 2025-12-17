@@ -1,4 +1,3 @@
-"""Simplified Megatron PPO Actor/Critic implementation"""
 import os
 import datetime
 from functools import partial
@@ -13,14 +12,12 @@ from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
 
-# Local simplified modules
 from siirl.engine.actor.utils import (
     agg_loss, get_policy_loss_fn, kl_penalty, compute_value_loss,
     append_to_dict, set_random_seed,
 )
 from siirl.params.model_args import ActorRefArguments
 
-# Utilities
 from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
 from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
@@ -47,31 +44,29 @@ def global_initialize_model_parallel(config: ActorRefArguments):
             timeout=datetime.timedelta(seconds=600),
             init_method=os.environ.get("DIST_INIT_METHOD", None),
         )
-    get_torch_device().set_device(rank)
+        get_torch_device().set_device(rank)
 
-    if megatron_config.sequence_parallel:
-        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        if megatron_config.sequence_parallel:
+            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 
-    mpu.initialize_model_parallel(
-        tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
-        pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
-        virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
-        pipeline_model_parallel_split_rank=None,
-        use_sharp=False,
-        context_parallel_size=megatron_config.context_parallel_size,
-        expert_model_parallel_size=megatron_config.expert_model_parallel_size,
-        expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
-        nccl_communicator_config_path=None,
-    )
-    set_random_seed(seed=megatron_config.seed)
+        mpu.initialize_model_parallel(
+            tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
+            pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_split_rank=None,
+            use_sharp=False,
+            context_parallel_size=megatron_config.context_parallel_size,
+            expert_model_parallel_size=megatron_config.expert_model_parallel_size,
+            expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
+            nccl_communicator_config_path=None,
+        )
+        set_random_seed(seed=megatron_config.seed)
 
 
 class ActorWorker:
-    """Dedicated worker for actor training"""
 
     def __init__(self, config: DictConfig):
         assert isinstance(config, ActorRefArguments)
-        # Initialize attributes from MegatronWorker
         self.rank = 0
         self.hf_config = None
         self.tf_config = None
@@ -190,7 +185,6 @@ class ActorWorker:
         return actor_module, actor_optimizer, actor_optimizer_scheduler, self.hf_config, optim_config
 
     def init_model(self):
-
         override_model_config = self.config.model.override_config
         override_transformer_config = self.config.actor.megatron.override_transformer_config or OmegaConf.create()
         override_ddp_config = self.config.actor.megatron.override_ddp_config or OmegaConf.create()
@@ -249,8 +243,7 @@ class ActorWorker:
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
 
-        data["micro_batch_size"] = NonTensorData(self.config.actor.log_prob_micro_batch_size_per_gpu)
-        data["max_token_len"] = NonTensorData(self.config.actor.log_prob_max_token_len_per_gpu)
+        data["micro_batch_size"] = NonTensorData(self.config.actor.ppo_micro_batch_size_per_gpu)
         data["temperature"] = NonTensorData(self.config.actor.temperature)
         data = data.to(get_device_id())
 
@@ -270,7 +263,6 @@ class ReferenceWorker:
 
     def __init__(self, config: DictConfig):
         assert isinstance(config, ActorRefArguments)
-        # Initialize attributes from MegatronWorker
         self.rank = 0
         self.hf_config = None
         self.tf_config = None
@@ -467,7 +459,7 @@ class CriticWorker:
                 nccl_communicator_config_path=None,
             )
 
-        set_random_seed(seed=self.config.megatron.seed)
+            set_random_seed(seed=self.config.megatron.seed)
 
         self._is_offload_param = self.config.megatron.param_offload
         self._is_offload_optimizer = self.config.megatron.optimizer_offload
@@ -609,7 +601,6 @@ class CriticWorker:
     def compute_values(self, data: TensorDict):
         micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
-        data["max_token_len"] = NonTensorData(self.config.forward_max_token_len_per_gpu)
         data = data.to(get_device_id())
 
         if self._is_offload_param:
@@ -666,7 +657,6 @@ class MegatronPPOActor():
     def compute_log_prob(self, data: TensorDict, calculate_entropy=False):
         """Compute log probability and optionally entropy"""
         micro_batch_size = data["micro_batch_size"]
-        max_token_len = data["max_token_len"]
 
         assert micro_batch_size is not None
 
@@ -683,7 +673,6 @@ class MegatronPPOActor():
             output = self.forward_backward_batch(
                 batch, temperature=temperature, forward_only=True,
                 calculate_entropy=calculate_entropy, micro_batch_size=micro_batch_size, 
-                max_token_len=max_token_len,
             )
 
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
@@ -813,15 +802,6 @@ class MegatronPPOActor():
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
-            multi_modal_inputs = {}
-            if "multi_modal_inputs" in batch:
-                for key in batch["multi_modal_inputs"][0].keys():
-                    idxs = batch["multi_modal_inputs_idx"]
-                    mmi = batch["multi_modal_inputs"]
-                    multi_modal_inputs[key] = torch.cat(
-                        [mmi[idx].get(key) for idx in idxs if mmi[idx].get(key) is not None], dim=0
-                    )
-
             responses = batch["responses"]
             response_length = responses.size(1)
             label = position_ids.clone()
@@ -852,7 +832,6 @@ class MegatronPPOActor():
             output = forward_fn(
                 model, input_ids, attention_mask, position_ids,
                 sequence_parallel=self.tf_config.sequence_parallel,
-                multi_modal_inputs=multi_modal_inputs,
                 logits_processor=logits_processor,
                 logits_processor_args=logits_processor_args,
             )
@@ -943,7 +922,6 @@ class MegatronPPOCritic():
         data.to(get_device_id())
         responses = data["responses"]
         micro_batch_size = data["micro_batch_size"]
-        max_token_len = data["max_token_len"]
 
         assert micro_batch_size is not None
 
@@ -952,7 +930,7 @@ class MegatronPPOCritic():
         with torch.no_grad():
             output = self.forward_backward_batch(
                 data=data, forward_only=True,
-                micro_batch_size=micro_batch_size, max_token_len=max_token_len, mini_batch_size=None
+                micro_batch_size=micro_batch_size
             )
 
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
@@ -1039,7 +1017,7 @@ class MegatronPPOCritic():
                 value_model=True,
             )
 
-            return output, partial(loss_func, data=batch, meta_info={})
+            return output, partial(loss_func, data=batch)
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.critic_module))
 
@@ -1073,11 +1051,9 @@ class MegatronPPOCritic():
                     chunk.zero_grad_buffer()
 
                 micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
-                max_token_len = None
 
                 metric_micro_batch = self.forward_backward_batch(
                     data, forward_only=False, micro_batch_size=micro_batch_size, 
-                    max_token_len=max_token_len, mini_batch_size=self.config.ppo_mini_batch_size
                 )
 
                 metric_micro_batch = metric_micro_batch["output"]

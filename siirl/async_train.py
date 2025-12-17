@@ -68,7 +68,6 @@ class MainRunner:
 
         # 2. initialize pg
         pgs = create_placement_groups(siirl_args)
-        print(f"[pgs] {pgs}")
         # 3. Initialize rollout worker
         rollout_pgs = pgs
         rollout_worker = RolloutManager(siirl_args, rollout_pgs)
