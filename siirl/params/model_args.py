@@ -149,12 +149,21 @@ class EvalSamplingArguments:
 
 
 @dataclass
+class MultiturnArguments:
+    env_type: str = field(default=None, metadata={"help": "env type: tool_env, vla_env ..."})
+    max_env_turns: int = field(default=1, metadata={"help": "max env turns"})
+    max_assistant_turns: int = field(default=1, metadata={"help": "max model generate turns"})
+    env_path: str = field(default=None, metadata={"help": "env yaml config path"})
+    env_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
+    max_parallel_calls: int = field(default=1, metadata={"help": "Max parallel env"})
+    max_env_response_length: int = field(default=256, metadata={"help": "Max env response"})
+    env_response_truncate_side: str = field(default="middle", metadata={"help": "Truncate side of Env response: left, middle, right"})
+@dataclass
 class RolloutArguments:
     name: str = field(default="sglang", metadata={"help": "Rollout engine"})
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
     top_k: int = field(default=-1, metadata={"help": "Top-k sampling"})
     top_p: float = field(default=1.0, metadata={"help": "Top-p sampling"})
-    use_fire_sampling: bool = field(default=False, metadata={"help": "Fire sampling optimization"})
     dtype: str = field(default="bfloat16", metadata={"help": "Compute dtype"})
     gpu_memory_utilization: float = field(default=0.5, metadata={"help": "GPU memory usage"})
     ignore_eos: bool = field(default=False, metadata={"help": "Ignore EOS tokens"})
@@ -178,9 +187,9 @@ class RolloutArguments:
     executor_module: str = field(default="naive", metadata={"help": "Batch rollout Generate Executor"})
     flow_function: str = field(default="naive", metadata={"help": "Sample rollout Generate Executor"})
     flow_config: dict = field(default_factory=dict, metadata={"help": "Sample rollout Generate Executor config"})
+    multiturn: MultiturnArguments = field(default_factory=MultiturnArguments)
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
-
 
 @dataclass
 class RefArguments:

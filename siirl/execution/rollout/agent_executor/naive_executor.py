@@ -49,14 +49,13 @@ class NaiveExecutor:
         self.max_concurrency_size = train_batch_size * config.rollout.n
         self.tasks:Set[asyncio.Task] = set()  # Track active generation tasks for cleanup
         self.finish_group_samples:Dict[str, List[Any]] = {} # Save result of finish samples until reach n group
-        self.waiting_samples = deque()
+        self.pending_queue = deque()
         self.rollout_n = config.rollout.n
         # Sampling parameters for text generation (LLM inference config)
         self.sampling_params =  dict(
             temperature=config.rollout.temperature,  # Randomness control for generation
             top_p=config.rollout.top_p,  # Nucleus sampling threshold
             repetition_penalty=1.0,  # Penalty for repetitive text generation
-            max_new_tokens=config.data.max_response_length  # Maximum generated tokens
         )
         
         # Semaphore to control concurrent generation tasks (limit to batch size)
@@ -72,11 +71,8 @@ class NaiveExecutor:
         # Load rollout flow function (naive or custom)
         flow_path = config.rollout.flow_function
         if flow_path == "naive":
-            from siirl.execution.rollout.agent_flow.naive_flow import naive_flow
-            self.rollout_flow = naive_flow
-        elif flow_path == "aio":
-            from siirl.execution.rollout.agent_flow.aio_flow import aio_flow
-            self.aio_flow = aio_flow
+            from siirl.execution.rollout.agent_flow.naive_flow import NaiveFlow
+            self.rollout_flow = NaiveFlow(self.config, self.engine)
         elif flow_path == "agent":
             from siirl.execution.rollout.agent_flow.agent_flow import build_agentflow
             self.rollout_flow = build_agentflow(config.rollout.flow_config, engine)
@@ -85,8 +81,8 @@ class NaiveExecutor:
             module_path, name = flow_path.rsplit('.', 1)
             mod = importlib.import_module(module_path)
             self.rollout_flow = getattr(mod, name)
-        
-        
+
+
     async def get_sample(self):
         """
         Get new samples from data coordinator to replenish the batch.
@@ -100,20 +96,20 @@ class NaiveExecutor:
         if need_replenish == 0:
             return []
         # Request new samples from data coordinator (Ray remote call)
-        if len(self.waiting_samples) < need_replenish:
-            diff = need_replenish - len(self.waiting_samples)
+        if len(self.pending_queue) < need_replenish:
+            diff = need_replenish - len(self.pending_queue)
             pull_size = (diff + self.rollout_n - 1) // self.rollout_n
             
             pull_samples = await self.data_coordinator.get_dataloader.remote(pull_size)
             
             for sample in pull_samples:
                 samples = [copy.deepcopy(sample) for _ in range(self.rollout_n)]
-                self.waiting_samples.extend(samples)
+                self.pending_queue.extend(samples)
         new_samples = []
 
         for _ in range(need_replenish): 
-            if len(self.waiting_samples):
-                new_samples.append(self.waiting_samples.popleft())
+            if len(self.pending_queue):
+                new_samples.append(self.pending_queue.popleft())
         return new_samples
     
     
@@ -168,7 +164,7 @@ class NaiveExecutor:
         sample.prompts = sample.raw_prompt_ids
         return sample
     
-    def _post_process(self, sample):
+    def _post_process(self, sample:Sample):
         """
         Postprocess generated sample with padding, sequence concatenation, and reward formatting.
         Standardizes prompt/response lengths, creates attention masks, and formats reward tensors.
@@ -292,6 +288,7 @@ class NaiveExecutor:
             
             # 4. Store processed sample in Ray object store and notify data coordinator
             await self.put_data(sample = sample, loop = loop)
+            return sample
 
     async def run(self):
         """

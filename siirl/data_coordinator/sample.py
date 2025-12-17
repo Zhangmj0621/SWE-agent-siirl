@@ -17,7 +17,6 @@ class SampleInfo(BaseModel):
     dict_info: Dict[str, Any] = Field(default_factory=dict)
     uid: Optional[str] = Field(default=None)
 
-
 class Sample(BaseModel):
     # from tensordict of Dataproto
     prompts: Optional[np.ndarray] = Field(default=None)
@@ -39,7 +38,7 @@ class Sample(BaseModel):
     ref_log_prob: Optional[np.ndarray] = Field(default=None)
     rollout_log_prob: Optional[np.ndarray] = Field(default=None)
     # from  non_tensor_batch of Dataproto
-    raw_prompt: str = Field(default="")
+    raw_prompt: List[str] = Field(default_factory=list)
     raw_prompt_ids: List[int] = Field(default_factory=list)
     prompt_texts: str = Field(
         default="",
@@ -80,15 +79,6 @@ class Sample(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
-
-
-class SampleManager(BaseModel):
-    sample_info: Optional[SampleInfo] = Field(default=None)
-    sample: Optional[Union[Sample, ray.ObjectRef]] = Field(default=None)
-
-    class Config:
-        arbitrary_types_allowed = True
-
 
 
 def preprocess_dataloader(data:Dict, n:int = 1):

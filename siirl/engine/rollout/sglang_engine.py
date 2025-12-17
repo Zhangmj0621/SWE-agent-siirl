@@ -82,10 +82,13 @@ class SglangEngine:
         self.node_rank = node_rank
         self.nnodes = nnodes
         
+        # init some local_parms
         self.tokenizer = load_tokenizer(
             path=config.actor_ref.model.path, 
             model_args=config.actor_ref.model
         )
+        self.max_model_len = config.rollout.max_model_len if config.rollout.max_model_len else config.data.max_prompt_length + config.data.max_response_length
+        self.max_response_length = config.data.max_response_length
         self.launch_server()
         
     def _build_server_args(self) -> dict:
@@ -121,7 +124,7 @@ class SglangEngine:
             # Server settings
             "trust_remote_code": config.trust_remote_code,
             "max_running_requests": config.max_num_seqs,
-            "log_level": "info",
+            "log_level": "warning",
             "mm_attention_backend": "fa3",
             "attention_backend": "fa3",
             "skip_tokenizer_init": False,
@@ -160,8 +163,9 @@ class SglangEngine:
         self.router_address = router_address
     
     async def generate(self, input_ids:List[int], sampling_params:Dict):
-        # url = f"http://{self.ip}:{self.port}/generate"
-        url = f"http://{self.router_address}/generate"
+        sampling_params['max_new_tokens'] = min(self.max_model_len - len(input_ids), self.max_response_length)
+        url = f"http://{self.ip}:{self.port}/generate"
+        # url = f"http://{self.router_address}/generate"
         # Prepare payload for sglang server
         payload = {
             "sampling_params": sampling_params,
@@ -269,3 +273,4 @@ class SglangEngine:
             pass
 
 
+    
