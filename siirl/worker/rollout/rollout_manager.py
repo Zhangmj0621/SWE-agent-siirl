@@ -172,17 +172,17 @@ class RolloutManager:
         # Asynchronously initialize engines on workers
         future = []
         for rank, worker in enumerate(self.worker_handle):
-            # Get network configuration from worker
-            ip = ray.get(worker.get_ip.remote())
-            port = ray.get(worker.get_free_port.remote())
-            nccl_port = ray.get(worker.get_free_port.remote())
             # Only initialize engine on TP0 workers (SGLang requirement)
             if rank % self.config.rollout.tensor_model_parallel_size == 0 or rank % self.config.trainer.n_gpus_per_node == 0:
+                # Get network configuration from worker
+                ip = ray.get(worker.get_ip.remote())
+                port = ray.get(worker.get_free_port.remote())
+                nccl_port = ray.get(worker.get_free_port.remote())
                 future.append(
                     worker.init_engine.remote(rank, dist_init_addr[rank // tp_size], ip, port, nccl_port)
                 )
-            # Record worker URL for router configuration
-            self.worker_urls.append(f"http://{ip}:{port}")
+                # Record worker URL for router configuration
+                self.worker_urls.append(f"http://{ip}:{port}")
         # Wait for all engine initialization to complete
         ray.get(future)  
 
@@ -225,9 +225,8 @@ class RolloutManager:
             worker_urls=self.worker_urls,  # List of rollout worker URLs
             balance_abs_threshold=0,  # Load balancing threshold
             log_level="warn",  # Router log level
-            request_timeout_secs=request_timeout,  # Request timeout
+            request_timeout_secs=3600,  # Request timeout
         )
-        
         # Start router in separate process
         router_process = multiprocessing.Process(target=launch_router, args=(router_args,))
         router_process.daemon = True  # Set as daemon to exit with main process
