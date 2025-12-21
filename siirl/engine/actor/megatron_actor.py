@@ -259,8 +259,6 @@ class ActorWorker:
 
 
 class ReferenceWorker:
-    """Dedicated worker for reference policy"""
-
     def __init__(self, config: DictConfig):
         assert isinstance(config, ActorRefArguments)
         self.rank = 0
@@ -425,8 +423,6 @@ class ReferenceWorker:
 
 
 class CriticWorker:
-    """Dedicated worker for critic training"""
-
     def __init__(self, config):
         self.rank = 0
         self.hf_config = None

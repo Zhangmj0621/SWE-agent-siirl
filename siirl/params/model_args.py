@@ -286,7 +286,7 @@ class KLCtrlArguments:
 class AlgorithmArguments:
     gamma: float = field(default=1.0, metadata={"help": "Discount factor"})
     lam: float = field(default=1.0, metadata={"help": "GAE lambda"})
-    adv_estimator: str = field(default="gae", metadata={"help": "Advantage estimator"})
+    adv_estimator: str = field(default="ppo", metadata={"help": "Advantage estimator"})
     kl_penalty: str = field(default="kl", metadata={"help": "KL penalty type"})
     kl_ctrl: KLCtrlArguments = field(default_factory=KLCtrlArguments)
     use_kl_in_reward: bool = field(default=False, metadata={"help": "Use KL In-Reward"})

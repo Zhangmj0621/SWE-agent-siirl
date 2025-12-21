@@ -11,13 +11,11 @@ from typing import get_args, get_origin
 
 
 class SampleInfo(BaseModel):
-    agent_group: int = Field(default=0)
     sum_tokens: int = Field(default=0)
     prompt_length: int = Field(default=0)
     response_length: int = Field(default=0)
     dict_info: Dict[str, Any] = Field(default_factory=dict)
     uid: Optional[str] = Field(default=None)
-    node_id: Optional[str] = Field(default=None)
 
 
 class Sample(BaseModel):
