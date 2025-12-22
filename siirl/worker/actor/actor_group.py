@@ -14,9 +14,11 @@
 
 import ray
 import os
+import time
+from tensordict import stack
 from loguru import logger
 from typing import List, Optional
-from siirl.utils.enums import DistributedEnv
+from megatron.core import parallel_state as mpu
 
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.enums import DistributedEnv
@@ -27,13 +29,8 @@ from siirl.engine.actor.utils import get_master_info
 
 class Trainer:
     """
-    Manages a single training unit consisting of:
-    - One Actor model
-    - One Reference model
-    - One Critic model (optional, only for PPO)
-
-    Each Trainer instance corresponds to one GPU and handles the training logic
-    for its set of models. The Trainer itself will be wrapped as a Ray Actor by TrainerGroup.
+    Single training unit managing actor, reference, and optionally critic models.
+    Each Trainer handles data fetching and training execution for one GPU.
     """
 
     def __init__(
@@ -43,35 +40,21 @@ class Trainer:
         local_rank: int,
         world_size: int,
         use_critic: bool = False,
+        data_coordinator=None,
     ):
-        """
-        Initialize a Trainer and create its models (actor, ref, optionally critic).
-
-        Args:
-            config: Training configuration
-            rank: Global rank for this trainer
-            local_rank: Local rank on the node
-            world_size: Total number of trainers
-            use_critic: Whether to create a critic model
-        """
-
         self.config = config
         self.rank = rank
         self.local_rank = local_rank
         self.world_size = world_size
         self.use_critic = use_critic
-
-        # Initialize models (will be created in init_models method)
+        self.data_coordinator = data_coordinator
         self.actor_worker = None
         self.ref_worker = None
         self.critic_worker = None
+        self.dp_rank = None
+        self.dp_world_size = None
 
     def init_models(self):
-        """
-        Initialize actor, ref, and optionally critic models.
-        This method creates the actual model instances and initializes them.
-        """
-
         self.actor_worker = ActorWorker(config=self.config)
         self.actor_worker.init_model()
 
@@ -82,46 +65,76 @@ class Trainer:
             self.critic_worker = CriticWorker(config=self.config)
             self.critic_worker.init_model()
 
-        logger.success(f"Trainer[{self.rank}]: All models initialized successfully")
+        self.dp_rank = mpu.get_data_parallel_rank()
+        self.dp_world_size = mpu.get_data_parallel_world_size()
+
+        logger.success(f"Trainer[{self.rank}]: Models initialized, dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}")
 
     def has_critic(self):
-        """Check if this trainer has a critic worker."""
         return self.critic_worker is not None
 
-    def compute_log_prob(self, data):
-        """Compute log probabilities using the actor."""
-        return self.actor_worker.compute_log_prob(data)
+    def get_batch(self, batch_size: int):
+        if self.data_coordinator is None:
+            raise RuntimeError("DataCoordinator not available")
 
-    def compute_ref_log_prob(self, data):
-        """Compute reference log probabilities."""
-        return self.ref_worker.compute_ref_log_prob(data)
+        batch_ref = ray.get(
+            self.data_coordinator.get_batch.remote(
+                batch_size=batch_size,
+                dp_rank=self.dp_rank,
+                balance_partitions=self.dp_world_size,
+            )
+        )
 
-    def compute_values(self, data):
-        """Compute values using the critic (PPO only)."""
-        if not self.has_critic():
-            raise RuntimeError("Critic not available for this trainer")
-        return self.critic_worker.compute_values(data)
+        if not batch_ref:
+            return None
 
-    def update_actor(self, data):
-        """Update the actor policy."""
-        return self.actor_worker.update_actor(data)
+        batch_data_list = ray.get(batch_ref)
 
-    def update_critic(self, data):
-        """Update the critic (PPO only)."""
-        if not self.has_critic():
-            raise RuntimeError("Critic not available for this trainer")
-        return self.critic_worker.update_critic(data)
+        return stack(batch_data_list, dim=0)
+
+    def train_step(self, batch_data):
+        data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
+        data_with_ref = self.ref_worker.compute_ref_log_prob(data_with_logprobs)
+
+        if self.use_critic:
+            data_with_values = self.critic_worker.compute_values(data_with_ref)
+        else:
+            data_with_values = data_with_ref
+
+        adv_estimator = self.config.algo.adv_estimator
+        gamma = self.config.algo.gamma
+        lam = self.config.algo.lam
+
+        data_for_update = compute_advantage(
+            data=data_with_values,
+            adv_estimator=adv_estimator,
+            gamma=gamma,
+            lam=lam,
+        )
+
+        actor_result = self.actor_worker.update_actor(data_for_update)
+
+        if self.use_critic:
+            critic_result = self.critic_worker.update_critic(data_for_update)
+            metrics = {"actor": actor_result, "critic": critic_result}
+        else:
+            metrics = {"actor": actor_result}
+
+        return metrics
+
+    def train(self, batch_size: int):
+        while True:
+            batch_data = self.get_batch(batch_size)
+            if batch_data is not None:
+                self.train_step(batch_data)
+                break
+            time.sleep(0.1)
 
 
 class TrainerGroup:
     """
     Manages a group of Trainers for distributed RL training.
-    Each Trainer manages one actor, one ref, and optionally one critic (for PPO).
-    Supports multiple algorithms (PPO, GRPO) and training backends (megatron, fsdp, etc.)
-
-    Model requirements by algorithm:
-    - PPO: actor + critic + ref (per Trainer)
-    - GRPO: actor + ref (per Trainer)
+    Supports PPO and GRPO algorithms with train/inference separation architecture.
     """
 
     def __init__(
@@ -131,32 +144,15 @@ class TrainerGroup:
         num_gpus: int,
         placement_groups: Optional[List] = None,
     ) -> None:
-        """
-        Initialize TrainerGroup with configuration and resource handles.
-
-        Args:
-            config: Training configuration
-            data_coordinator: Ray handle to DataCoordinator
-            num_gpus: Number of GPUs to use (creates one Trainer per GPU)
-            placement_groups: Ray placement groups for resource allocation
-        """
         self.config = config
         self.data_coordinator = data_coordinator
         self.num_gpus = num_gpus
         self.placement_groups = placement_groups
-
         self.trainers: List[Trainer] = []
-
         self.use_critic = self.config.actor_ref.algo.adv_estimator == "ppo"
-
-        #TODO: add roubust port access
         self.master_addr, self.master_ports = get_master_info()
 
     def init_actors(self):
-        """
-        Initialize trainers by creating Trainer instances and wrapping them as Ray Actors.
-        Each Trainer manages its own actor, ref, and optionally critic models.
-        """
         n_gpus_per_node = self.config.trainer.n_gpus_per_node
 
         for rank in range(self.num_gpus):
@@ -178,239 +174,38 @@ class TrainerGroup:
                 env_vars['GLOO_SOCKET_IFNAME'] = os.getenv('GLOO_SOCKET_IFNAME')
 
             TrainerActor = ray.remote(Trainer)
-
             trainer_options = {
                 "runtime_env": {"env_vars": env_vars},
                 "name": f"trainer_{rank}",
                 "num_gpus": 1,
             }
 
-            if pg:
-                trainer_handle = TrainerActor.options(
-                    **trainer_options,
-                    placement_group=pg,
-                    placement_group_bundle_index=bundle_index,
-                ).remote(
-                    config=self.config.actor_ref,
-                    rank=rank,
-                    local_rank=local_rank,
-                    world_size=self.num_gpus,
-                    use_critic=self.use_critic,
-                )
-            else:
-                trainer_handle = TrainerActor.options(**trainer_options).remote(
-                    config=self.config.actor_ref,
-                    rank=rank,
-                    local_rank=local_rank,
-                    world_size=self.num_gpus,
-                    use_critic=self.use_critic,
-                )
+            trainer_handle = TrainerActor.options(
+                **trainer_options,
+                placement_group=pg,
+                placement_group_bundle_index=bundle_index,
+            ).remote(
+                config=self.config.actor_ref,
+                rank=rank,
+                local_rank=local_rank,
+                world_size=self.num_gpus,
+                use_critic=self.use_critic,
+                data_coordinator=self.data_coordinator,
+            )
 
             self.trainers.append(trainer_handle)
 
-        futures = [trainer.init_models.remote() for trainer in self.trainers]
-        ray.get(futures)
+        ray.get([trainer.init_models.remote() for trainer in self.trainers])
+        logger.success(f"Initialized {len(self.trainers)} trainers")
 
-        logger.success(f"Successfully initialized {len(self.trainers)} trainers with their models")
-
-    def get_batch(self, batch_size: int, dp_rank: int = 0):
-        """
-        Fetch a batch of training data from DataCoordinator.
-
-        Args:
-            batch_size: Number of samples to fetch
-            dp_rank: Data parallel rank
-
-        Returns:
-            Batch data references from DataCoordinator
-        """
-        logger.debug(f"Fetching batch of size {batch_size} from DataCoordinator")
-        batch_refs = ray.get(
-            self.data_coordinator.get_batch.remote(
-                batch_size=batch_size,
-                dp_rank=dp_rank,
-                balance_partitions=self.num_gpus,
-            )
-        )
-        return batch_refs
-
-    def train(self, num_epochs: int = 1, use_critic: Optional[bool] = None):
-        """
-        Execute training loop for both PPO and GRPO algorithms.
-
-        Args:
-            num_epochs: Number of training epochs
-            use_critic: Whether to use critic model. If None, uses self.use_critic
-                       (True for PPO, False for GRPO)
-        """
-        if use_critic is None:
-            use_critic = self.use_critic
-
-
-        for epoch in range(num_epochs):
-            logger.info(f"Epoch {epoch + 1}/{num_epochs}")
-
-            batch_size = self.config.actor_ref.actor.ppo_mini_batch_size
-            batch_refs = self.get_batch(batch_size, dp_rank=0)
-
-            if not batch_refs:
-                logger.warning("No data available, skipping training step")
-                continue
-
-            batch_data = ray.get(batch_refs)
-
-            metrics = self._train_step(batch_data, use_critic=use_critic)
-
-            logger.info(f"Epoch {epoch + 1} metrics: {metrics}")
-
-        logger.success(f"Training completed for {num_epochs} epochs")
-
-    def _train_step(self, batch_data, use_critic: bool = True):
-        """
-        Execute a single training step for PPO or GRPO using Trainer abstraction.
-
-        Args:
-            batch_data: Training batch data
-            use_critic: Whether to use critic model (True for PPO, False for GRPO)
-
-        Returns:
-            Aggregated metrics
-        """
-
-        logger.debug("Computing actor log probabilities")
-        actor_futures = []
-        for i, trainer in enumerate(self.trainers):
-            actor_data = batch_data[i] if isinstance(batch_data, list) else batch_data
-            actor_futures.append(trainer.compute_log_prob.remote(actor_data))
-        actor_data_with_logprobs = ray.get(actor_futures)
-
-        logger.debug("Computing reference log probabilities")
-        ref_futures = []
-        for i, trainer in enumerate(self.trainers):
-            ref_data = actor_data_with_logprobs[i] if isinstance(actor_data_with_logprobs, list) else actor_data_with_logprobs
-            ref_futures.append(trainer.compute_ref_log_prob.remote(ref_data))
-        data_with_ref = ray.get(ref_futures)
-
-        if use_critic:
-            logger.debug("Computing critic values")
-            critic_futures = []
-            for i, trainer in enumerate(self.trainers):
-                critic_data = data_with_ref[i] if isinstance(data_with_ref, list) else data_with_ref
-                critic_futures.append(trainer.compute_values.remote(critic_data))
-            data_with_values = ray.get(critic_futures)
-        else:
-            data_with_values = data_with_ref
-
-        logger.debug("Computing advantages")
-        adv_estimator = self.config.actor_ref.algo.adv_estimator
-        gamma = self.config.algorithm.gamma
-        lam = self.config.algorithm.lam
-
-        data_for_update = []
-        for i, data in enumerate(data_with_values if isinstance(data_with_values, list) else [data_with_values]):
-            data_with_adv = compute_advantage(
-                data=data,
-                adv_estimator=adv_estimator,
-                gamma=gamma,
-                lam=lam,
-            )
-            data_for_update.append(data_with_adv)
-
-        if not isinstance(data_with_values, list):
-            data_for_update = data_for_update[0]
-
-        logger.debug("Updating actor policy")
-        actor_update_futures = []
-        for i, trainer in enumerate(self.trainers):
-            update_data = data_for_update[i] if isinstance(data_for_update, list) else data_for_update
-            actor_update_futures.append(trainer.update_actor.remote(update_data))
-        actor_results = ray.get(actor_update_futures)
-
-        if use_critic:
-            logger.debug("Updating critic")
-            critic_update_futures = []
-            for i, trainer in enumerate(self.trainers):
-                update_data = data_for_update[i] if isinstance(data_for_update, list) else data_for_update
-                critic_update_futures.append(trainer.update_critic.remote(update_data))
-            critic_results = ray.get(critic_update_futures)
-            all_results = actor_results + critic_results
-        else:
-            all_results = actor_results
-
-        metrics = self._aggregate_metrics(all_results)
-
-        return metrics
-
-    def _aggregate_metrics(self, results: List):
-        """
-        Aggregate training metrics from all trainers.
-
-        Args:
-            results: List of result dicts from trainers
-
-        Returns:
-            Aggregated metrics dict
-        """
-        if not results:
-            return {}
-
-        aggregated = {}
-        for result in results:
-            if "metrics" in result:
-                metrics = result["metrics"]
-                for key, value in metrics.items():
-                    if key not in aggregated:
-                        aggregated[key] = []
-                    aggregated[key].append(value)
-
-        for key in aggregated:
-            if isinstance(aggregated[key], list) and aggregated[key]:
-                first_elem = aggregated[key][0]
-                try:
-                    if isinstance(first_elem, (int, float)):
-                        aggregated[key] = sum(aggregated[key]) / len(aggregated[key])
-                    elif hasattr(first_elem, 'item'):
-                        values = [v.item() if hasattr(v, 'item') else v for v in aggregated[key]]
-                        aggregated[key] = sum(values) / len(values)
-                    else:
-                        aggregated[key] = aggregated[key][0]
-                except (TypeError, AttributeError):
-                    aggregated[key] = aggregated[key][0]
-
-        return aggregated
+    def train(self):
+        batch_size = self.config.actor_ref.actor.ppo_mini_batch_size
+        ray.get([trainer.train.remote(batch_size) for trainer in self.trainers])
 
     def put_weight(self):
-        """
-        Extract trained model parameters from actor and update to RolloutManager.
-        Supports model weight synchronization for rollout/inference.
-
-        Note: Weight extraction strategy depends on specific backend implementation.
-        For megatron backend, this typically involves extracting state_dict and
-        synchronizing across workers.
-        """
-        logger.info("Extracting model weights from actor workers")
-
         if not self.trainers:
             logger.warning("No trainers available for weight extraction")
             return
 
-        # Extract weights from the first trainer's actor (assuming all actors have synchronized weights)
-        # In data parallel training, all actors should have identical weights after training
-        logger.info("Preparing to update weights to RolloutManager")
-
-        # Placeholder for actual weight extraction and update logic
-        # Actual implementation would involve:
-        # 1. Extract state_dict from actor_module on first trainer's actor
-        # 2. Save weights to shared storage or serialize
-        # 3. Notify or directly update RolloutManager workers
-        # 4. RolloutManager loads new weights into inference engines
-
-        # Example pseudo-code:
-        # weights = ray.get(self.trainers[0].actor_handle.get_model_weights.remote())
-        # ray.get(self.rollout_manager.update_weights.remote(weights))
-
-        logger.warning(
-            "Weight update functionality is a placeholder. "
-            "Implement based on specific requirements and backend."
-        )
+        logger.warning("Weight update functionality not implemented")
 

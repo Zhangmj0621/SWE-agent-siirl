@@ -143,10 +143,14 @@ class DataCoordinator:
                     batch_refs = self._apply_length_balancing(batch_items, balance_partitions)
                 else:
                     batch_refs = [item[1] for item in batch_items]
-                self._cache = batch_refs
-                get_refs = self._cache[:batch_size]
-                self._cache = self._cache[batch_size:] if len(self._cache) >= batch_size else None
-                return get_refs
+
+                # Build cache as list of lists, one for each dp_rank
+                self._cache = []
+                for rank in range(balance_partitions):
+                    self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
+
+                res = self._cache[dp_rank]
+                return res
             # With filter plugin, use O(N) filtering and reconstruction
             else:
                 # 1. The filtering process does not consume elements from the queue
