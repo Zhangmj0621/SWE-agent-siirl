@@ -60,7 +60,7 @@ class DataCoordinator:
         self.dataloader = None
         self.dataloader_lock = asyncio.Lock()  
         
-    async def put(self, sample_info: SampleInfo, sample_ref: Any, caller_node_id: Optional[str] = None):
+    async def put(self, sample_info: SampleInfo, sample_ref: Any):
         """
         Called by a RolloutWorker to register a new sample reference and its metadata.
         This method automatically routes the ObjectRef to a DataBuffer on its local
@@ -69,8 +69,6 @@ class DataCoordinator:
         Args:
             sample_info: Metadata about the sample
             sample_ref: Ray ObjectRef or the actual sample data
-            caller_node_id: The node ID of the caller. If None, will try to get it from
-                          the runtime context (but this won't work correctly for remote calls)
         """
         # Due to Ray's small object optimization, an ObjectRef passed by the client
         # might be automatically resolved to its actual value. Here, we ensure that
@@ -78,25 +76,13 @@ class DataCoordinator:
         if not isinstance(sample_ref, ray.ObjectRef):
             sample_ref = ray.put(sample_ref)
 
-        # 1. Get the node ID of the caller
-        # Note: When called remotely, ray.get_runtime_context().get_node_id() returns
-        # the node ID of the DataCoordinator actor, not the caller. So we require the
-        # caller to pass their node_id explicitly.
-        if caller_node_id is None:
-            caller_node_id = ray.get_runtime_context().get_node_id()
-
-        # 2. Inject the node ID into SampleInfo for subsequent filtering
-        #    Only inject if node_id has not been manually set, to facilitate testing.
-        if sample_info.node_id is None:
-            sample_info.node_id = caller_node_id
-
-        # 4. Register the metadata and reference to the global queue
+        # Register the metadata and reference to the global queue
         async with self.lock:
             # More complex logic can be implemented here, such as inserting into a
             # priority queue based on priority
             self._sample_queue.append((sample_info, sample_ref))
 
-    async def put_batch(self, sample_infos: List[SampleInfo], sample_refs: List[ray.ObjectRef], caller_node_id: Optional[str] = None):
+    async def put_batch(self, sample_infos: List[SampleInfo], sample_refs: List[ray.ObjectRef]):
         """
         Called by a worker to register a batch of new sample references and their metadata.
         This method routes the ObjectRefs to DataBuffers on their local nodes.
@@ -109,17 +95,6 @@ class DataCoordinator:
         """
         if not sample_refs:
             return
-
-        # Get the node ID of the caller
-        # Note: When called remotely, ray.get_runtime_context().get_node_id() returns
-        # the node ID of the DataCoordinator actor, not the caller. So we require the
-        # caller to pass their node_id explicitly.
-        if caller_node_id is None:
-            caller_node_id = ray.get_runtime_context().get_node_id()
-
-        for i in range(len(sample_infos)):
-            if sample_infos[i].node_id is None:
-                sample_infos[i].node_id = caller_node_id
         
         async with self.lock:
             self._sample_queue.extend(zip(sample_infos, sample_refs))

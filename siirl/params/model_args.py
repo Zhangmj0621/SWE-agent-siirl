@@ -126,12 +126,12 @@ class PolicyLossArguments:
 
 @dataclass
 class ActorArguments:
+    train_backend: str = field(default="megatron", metadata={"help": "Backend for training"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
     ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
     clip_ratio_high: float = field(default=0.2, metadata={"help": "Max value for clip ratio"})
-    clip_ratio_c: float = field(default=3.0, metadata={"help": "lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729"})
     entropy_coeff: float = field(default=0, metadata={"help": "Entropy coefficient"})
     use_kl_loss: bool = field(default=False, metadata={"help": "Enable KL loss"})
     kl_loss_coef: float = field(default=0.001, metadata={"help": "KL loss coefficient"})
@@ -169,12 +169,6 @@ class LayerNameMapArguments:
         return asdict(self)
 
 @dataclass
-class EngineArguments:
-    vllm: Dict[str, Any] = field(default_factory=lambda: {})
-    sglang: Dict[str, Any] = field(default_factory=lambda: {})
-
-
-@dataclass
 class RolloutArguments:
     name: str = field(default="sglang", metadata={"help": "Rollout engine"})
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
@@ -191,7 +185,6 @@ class RolloutArguments:
     max_num_batched_tokens: int = field(default=8192, metadata={"help": "Max batched tokens"})
     max_model_len: Optional[int] = field(default=None, metadata={"help": "Max model length"})
     max_num_seqs: int = field(default=1024, metadata={"help": "Max concurrent sequences"})
-    limit_images: Optional[int] = field(default=None, metadata={"help": "support for multi-image data"})
     do_sample: bool = field(default=True, metadata={"help": "Enable sampling"})
     n: int = field(default=1, metadata={"help": "Number of responses"})
     enable_chunked_prefill: bool = field(default=True, metadata={"help": "Whether or not enable chunked prefill"})
@@ -199,7 +192,6 @@ class RolloutArguments:
     val_kwargs: EvalSamplingArguments = field(default_factory=EvalSamplingArguments)
     layer_name_map: LayerNameMapArguments = field(default_factory=LayerNameMapArguments)
     seed: int = field(default=0, metadata={"help": "The random seed"})
-    engine_kwargs: EngineArguments = field(default_factory=EngineArguments)
     calculate_log_probs: bool = field(default=True, metadata={"help": "Whether rollout calculate log probs"})
     multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
     router_ip: str = field(default=None, metadata={"help": "Rollout Router IP"})
@@ -217,18 +209,12 @@ class RefArguments:
     log_prob_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
     log_prob_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
     log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
-    ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
     use_torch_compile: bool = field(default=True, metadata={"help": "Whether or not use torch compile"})
     ppo_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Micro-batch size"})
     ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     param_offload: bool = field(default=False, metadata={"help": "Enable param offload or not"})
-    grad_offload: bool = field(default=False, metadata={"help": "Enable grad offload or not"})
-    optimizer_offload: bool = field(default=False, metadata={"help": "Enable optimizer offload or not"})
     load_weight: bool = field(default=True)
-    shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
-    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
-    recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
 
     def to_dict(self) -> Dict[str, Any]:
@@ -236,11 +222,33 @@ class RefArguments:
 
 
 @dataclass
+class KLCtrlArguments:
+    type: str = field(default="fixed", metadata={"help": "Type of KL Ctrl, fixed or adaptive"})
+    kl_coef: float = field(default=0.001, metadata={"help": "Coef of KL"})
+    target_kl: Optional[float] = field(default=0.1, metadata={"help": "Target KL value"})
+    horizon: Optional[float] = field(default=1000, metadata={"help": "Horizon of KL"})
+
+
+@dataclass
+class AlgorithmArguments:
+    adv_estimator: str = field(default="grpo", metadata={"help": "Advantage estimator"})
+    gamma: float = field(default=1.0, metadata={"help": "Discount factor"})
+    lam: float = field(default=1.0, metadata={"help": "GAE lambda"})
+    kl_penalty: str = field(default="kl", metadata={"help": "KL penalty type"})
+    kl_ctrl: KLCtrlArguments = field(default_factory=KLCtrlArguments)
+    use_kl_in_reward: bool = field(default=False, metadata={"help": "Use KL In-Reward"})
+    share_reward_in_agent: bool = field(default=True, metadata={"help": "Shard Reward in Reward"})
+    norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+@dataclass
 class ActorRefArguments:
-    hybrid_engine: bool = field(default=True, metadata={"help": "Hybrid engine mode"})
     model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Base model settings"})
     actor: ActorArguments = field(default_factory=ActorArguments, metadata={"help": "Actor configuration"})
     ref: RefArguments = field(default_factory=RefArguments, metadata={"help": "Reference model settings"})
+    algo: AlgorithmArguments = field(default_factory=AlgorithmArguments, metadata={"help": "Algorithm settings"})
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -274,28 +282,3 @@ class CriticArguments:
         return asdict(self)
 
 
-@dataclass
-class KLCtrlArguments:
-    type: str = field(default="fixed", metadata={"help": "Type of KL Ctrl, fixed or adaptive"})
-    kl_coef: float = field(default=0.001, metadata={"help": "Coef of KL"})
-    target_kl: Optional[float] = field(default=0.1, metadata={"help": "Target KL value"})
-    horizon: Optional[float] = field(default=1000, metadata={"help": "Horizon of KL"})
-
-
-@dataclass
-class AlgorithmArguments:
-    gamma: float = field(default=1.0, metadata={"help": "Discount factor"})
-    lam: float = field(default=1.0, metadata={"help": "GAE lambda"})
-    adv_estimator: str = field(default="ppo", metadata={"help": "Advantage estimator"})
-    kl_penalty: str = field(default="kl", metadata={"help": "KL penalty type"})
-    kl_ctrl: KLCtrlArguments = field(default_factory=KLCtrlArguments)
-    use_kl_in_reward: bool = field(default=False, metadata={"help": "Use KL In-Reward"})
-    share_reward_in_agent: bool = field(default=True, metadata={"help": "Shard Reward in Reward"})
-    norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
-    weight_factor_in_cpgd: str = field(default="STD_weight", metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"})
-    algorithm_name: str = field(default="grpo", metadata={"help": "Algorithm name, e.g., grpo, ppo, dapo"})
-    use_pf_ppo: bool = field(default=False, metadata={"help": "Whether to enable preference feedback PPO."})
-    pf_ppo: dict[str, Any] = field(default_factory=dict, metadata={"help": " Preference feedback PPO settings."})
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)

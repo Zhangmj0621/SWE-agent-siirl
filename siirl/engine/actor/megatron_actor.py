@@ -12,10 +12,9 @@ from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
 
-from siirl.engine.actor.utils import (
-    agg_loss, get_policy_loss_fn, kl_penalty, compute_value_loss,
-    append_to_dict, set_random_seed,
-)
+from siirl.engine.actor.utils import append_to_dict, set_random_seed
+from siirl.algorithm.loss import agg_loss, get_policy_loss_fn, compute_value_loss
+from siirl.algorithm.kl_penalty import kl_penalty
 from siirl.params.model_args import ActorRefArguments
 
 from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
@@ -64,7 +63,6 @@ def global_initialize_model_parallel(config: ActorRefArguments):
 
 
 class ActorWorker:
-
     def __init__(self, config: DictConfig):
         assert isinstance(config, ActorRefArguments)
         self.rank = 0
@@ -434,29 +432,8 @@ class CriticWorker:
         self.share_embeddings_and_output_weights = False
 
         self.config = config
-
-        if not torch.distributed.is_initialized():
-            rank = int(os.environ["LOCAL_RANK"])
-            torch.distributed.init_process_group(backend=get_nccl_backend())
-            get_torch_device().set_device(rank)
-
-            if self.config.megatron.sequence_parallel:
-                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-
-            mpu.initialize_model_parallel(
-                tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-                pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-                virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-                pipeline_model_parallel_split_rank=None,
-                use_sharp=False,
-                context_parallel_size=self.config.megatron.context_parallel_size,
-                expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-                expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-                nccl_communicator_config_path=None,
-            )
-
-            set_random_seed(seed=self.config.megatron.seed)
-
+        global_initialize_model_parallel(self.config)
+        
         self._is_offload_param = self.config.megatron.param_offload
         self._is_offload_optimizer = self.config.megatron.optimizer_offload
 
@@ -644,8 +621,6 @@ class MegatronPPOActor():
         self.actor_optimizer = actor_optimizer
 
     def _validate_config(self, config):
-        if config.shuffle:
-            assert config.data_loader_seed is not None
         if config.megatron.tensor_model_parallel_size == 1:
             config.megatron.sequence_parallel = False
         self.config = config
@@ -907,8 +882,6 @@ class MegatronPPOCritic():
         self.critic_optimizer_config = critic_optimizer_config
 
     def _validate_config(self, config):
-        if config.shuffle:
-            assert config.data_loader_seed is not None
         if config.megatron.tensor_model_parallel_size == 1:
             config.megatron.sequence_parallel = False
         self.config = config

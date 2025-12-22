@@ -77,7 +77,7 @@ class CustomRewardArguments:
 @dataclass
 class SiiRLArguments:
     data: DataArguments = field(default_factory=DataArguments)
-    actor_rollout_ref: ActorRefArguments = field(default_factory=ActorRefArguments)
+    actor_ref: ActorRefArguments = field(default_factory=ActorRefArguments)
     rollout: RolloutArguments = field(default_factory=RolloutArguments)
     critic: CriticArguments = field(default_factory=CriticArguments)
     algorithm: AlgorithmArguments = field(default_factory=AlgorithmArguments)
