@@ -6,12 +6,12 @@ from .agent import AgentBuilder
 from .runtime import RuntimeBuilder
 
 BUILTIN_PROVIDERS = {
-    "agent": {"minisweagent": "agentflow.swe.agent.minisweagent:MiniSWEAgentBuilder"},
+    "agent": {"minisweagent": ".swe.agent.minisweagent:MiniSWEAgentBuilder"},
     "environment": {
-        "k8s": "agentflow.swe.environment.k8s:K8sEnvBuilder",
-        "k8rs": "agentflow.swe.environment.k8rs:K8rsEnvBuilder",
+        "k8s": ".swe.environment.k8s:K8sEnvBuilder",
+        "k8rs": ".swe.environment.k8rs:K8rsEnvBuilder",
     },
-    "runtime": {"swefactory": "agentflow.swe.runtime.swefactory:SWEFactoryBuiler"},
+    "runtime": {"swefactory": ".swe.runtime.swefactory:SWEFactoryBuiler"},
 }
 
 

@@ -5,7 +5,7 @@ from .utils import import_any
 
 __all__ = ["Model", "AgentFlow", "Sample", "ModelResponse", "load_agentflow"]
 
-BUILTIN_FLOW = {"swe": "agentflow.swe:agentflow"}
+BUILTIN_FLOW = {"swe": ".swe:agentflow"}
 
 
 def load_agentflow(config: dict, model: Model) -> AgentFlow:

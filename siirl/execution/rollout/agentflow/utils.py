@@ -1,16 +1,6 @@
 from abc import ABC
 from typing import Any, Optional, Type, TypeVar, cast
 import importlib
-from pathlib import Path
-from threading import Lock
-import sys
-
-MODULE_PATH = Path(__file__).parent.resolve()
-PARENT_PATH = str(MODULE_PATH.parent.resolve())
-MODULE_NAME = MODULE_PATH.name
-
-# global lock for import_any to support freethread
-import_lock = Lock()
 
 
 def import_any(
@@ -25,19 +15,11 @@ def import_any(
         if isinstance(builtin_name, str):
             name = builtin_name
     if ":" in name:
-        with import_lock:
-            module_path, class_name = name.split(":")
-            oldpath = sys.path.copy()
-            sys.path.append(str(PARENT_PATH))
-            if path is not None:
-                sys.path = path + oldpath
-            try:
-                module = importlib.import_module(module_path)
-                agent_class = getattr(module, class_name)
-            except Exception as e:
-                sys.path = oldpath
-                raise e
-            sys.path = oldpath
+        module_path, class_name = name.split(":")
+        module = importlib.import_module(
+            module_path, "siirl.execution.rollout.agentflow"
+        )
+        agent_class = getattr(module, class_name)
         return agent_class
     raise ImportError(name=name)
 
