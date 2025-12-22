@@ -42,15 +42,15 @@ class SglangEngine:
         self.port = port
         self.nccl_port = nccl_port
         self.ip = ip
-        self.tokenizer = load_tokenizer(path = config.actor_rollout_ref.model.path, model_args = config.actor_rollout_ref.model)
+        self.tokenizer = load_tokenizer(path = config.actor_ref.model.path, model_args = config.actor_ref.model)
         self.launch_server()
         
     def get_sglang_params(self, base_gpu_id, node_rank, nnodes):
         config = self.config.rollout
-        print(f"model_path ", self.config.actor_rollout_ref.model.path)
+        print(f"model_path ", self.config.actor_ref.model.path)
         
         args = {
-            "model_path": self.config.actor_rollout_ref.model.path,
+            "model_path": self.config.actor_ref.model.path,
             "dtype": config.dtype,
             "random_seed": self.config.rollout.seed + self.rank,
             "mem_fraction_static": config.gpu_memory_utilization,
@@ -115,9 +115,9 @@ class SglangEngine:
         }
         payload["input_ids"] = input_ids
         output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
-
         responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-        return responses, rollout_log_prob
+        text = output['text'] 
+        return text, responses, rollout_log_prob
 
 

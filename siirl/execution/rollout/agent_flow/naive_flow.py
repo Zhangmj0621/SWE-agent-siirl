@@ -38,7 +38,7 @@ async def naive_flow(sample: Sample, sampling_params: Dict, engine, reward_fn = 
     """
     # todo: add multiturn (support multi-turn conversation generation)
     # Generate response and log probabilities from prompt using inference engine
-    sample.responses, sample.rollout_log_prob = await engine.generate(sample.prompts, sampling_params)
+    _, sample.responses, sample.rollout_log_prob = await engine.generate(sample.prompts, sampling_params)
     
     # Create response mask (all 1s since all generated tokens are valid)
     sample.response_mask = [1] * len(sample.responses)
