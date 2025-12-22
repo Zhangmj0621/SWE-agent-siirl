@@ -16,8 +16,6 @@ import ray
 import os
 from loguru import logger
 from typing import List, Optional
-import torch.distributed as dist
-import os
 from siirl.utils.enums import DistributedEnv
 
 from siirl.params.training_args import SiiRLArguments
@@ -44,10 +42,6 @@ class Trainer:
         rank: int,
         local_rank: int,
         world_size: int,
-        master_addr: str,
-        master_port_actor: str,
-        master_port_critic: str,
-        master_port_ref: str,
         use_critic: bool = False,
     ):
         """
@@ -58,11 +52,7 @@ class Trainer:
             rank: Global rank for this trainer
             local_rank: Local rank on the node
             world_size: Total number of trainers
-            master_addr: Master address for distributed training
-            master_port_actor: Port for actor process group
-            master_port_critic: Port for critic process group (if used)
-            master_port_ref: Port for ref process group
-            use_critic: Whether to create a critic model (PPO vs GRPO)
+            use_critic: Whether to create a critic model
         """
 
         self.config = config
@@ -71,12 +61,6 @@ class Trainer:
         self.world_size = world_size
         self.use_critic = use_critic
 
-        # Store distributed training info
-        self.master_addr = master_addr
-        self.master_port_actor = master_port_actor
-        self.master_port_critic = master_port_critic
-        self.master_port_ref = master_port_ref
-
         # Initialize models (will be created in init_models method)
         self.actor_worker = None
         self.ref_worker = None
@@ -84,36 +68,18 @@ class Trainer:
 
     def init_models(self):
         """
-        Initialize actor, ref, and optionally critic workers.
-        This method creates the actual worker instances and initializes their models.
+        Initialize actor, ref, and optionally critic models.
+        This method creates the actual model instances and initializes them.
         """
 
-        # Create Actor worker with actor port
-        logger.info(f"Trainer[{self.rank}]: Creating ActorWorker...")
-        os.environ[DistributedEnv.MASTER_PORT.value] = self.master_port_actor
         self.actor_worker = ActorWorker(config=self.config)
-
-        # Create Reference worker with ref port
-        logger.info(f"Trainer[{self.rank}]: Creating ReferenceWorker...")
-        os.environ[DistributedEnv.MASTER_PORT.value] = self.master_port_ref
-        self.ref_worker = ReferenceWorker(config=self.config)
-
-        # Create Critic worker (only for PPO) with critic port
-        if self.use_critic:
-            logger.info(f"Trainer[{self.rank}]: Creating CriticWorker...")
-            os.environ[DistributedEnv.MASTER_PORT.value] = self.master_port_critic
-            self.critic_worker = CriticWorker(config=self.config)
-
-        # Initialize models for all workers
-        logger.info(f"Trainer[{self.rank}]: Initializing models...")
-        os.environ[DistributedEnv.MASTER_PORT.value] = self.master_port_actor
         self.actor_worker.init_model()
 
-        os.environ[DistributedEnv.MASTER_PORT.value] = self.master_port_ref
+        self.ref_worker = ReferenceWorker(config=self.config)
         self.ref_worker.init_model()
 
         if self.use_critic:
-            os.environ[DistributedEnv.MASTER_PORT.value] = self.master_port_critic
+            self.critic_worker = CriticWorker(config=self.config)
             self.critic_worker.init_model()
 
         logger.success(f"Trainer[{self.rank}]: All models initialized successfully")
@@ -183,14 +149,8 @@ class TrainerGroup:
 
         self.use_critic = self.config.actor_ref.algo.adv_estimator == "ppo"
 
-        self.master_addr, base_port = get_master_info()
-        base_port_int = int(base_port)
         #TODO: add roubust port access
-        self.master_ports = {
-            "actor": str(base_port_int),
-            "critic": str(base_port_int + 1),
-            "ref": str(base_port_int + 2),
-        }
+        self.master_addr, self.master_ports = get_master_info()
 
     def init_actors(self):
         """
@@ -199,26 +159,24 @@ class TrainerGroup:
         """
         n_gpus_per_node = self.config.trainer.n_gpus_per_node
 
-        # Create Trainer Ray Actors
         for rank in range(self.num_gpus):
             node_idx = rank // n_gpus_per_node
             local_rank = rank % n_gpus_per_node
             pg = self.placement_groups[node_idx] if self.placement_groups else None
             bundle_index = local_rank
 
-            # Set up environment variables for this trainer
             env_vars = {
                 DistributedEnv.WORLD_SIZE.value: str(self.num_gpus),
                 DistributedEnv.RANK.value: str(rank),
                 DistributedEnv.LOCAL_RANK.value: str(local_rank),
                 DistributedEnv.MASTER_ADDR.value: self.master_addr,
+                DistributedEnv.MASTER_PORT.value: self.master_ports,
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             }
 
             if os.getenv('GLOO_SOCKET_IFNAME'):
                 env_vars['GLOO_SOCKET_IFNAME'] = os.getenv('GLOO_SOCKET_IFNAME')
 
-            # Create Trainer as Ray Actor
             TrainerActor = ray.remote(Trainer)
 
             trainer_options = {
@@ -237,10 +195,6 @@ class TrainerGroup:
                     rank=rank,
                     local_rank=local_rank,
                     world_size=self.num_gpus,
-                    master_addr=self.master_addr,
-                    master_port_actor=self.master_ports["actor"],
-                    master_port_critic=self.master_ports["critic"],
-                    master_port_ref=self.master_ports["ref"],
                     use_critic=self.use_critic,
                 )
             else:
@@ -249,20 +203,11 @@ class TrainerGroup:
                     rank=rank,
                     local_rank=local_rank,
                     world_size=self.num_gpus,
-                    master_addr=self.master_addr,
-                    master_port_actor=self.master_ports["actor"],
-                    master_port_critic=self.master_ports["critic"],
-                    master_port_ref=self.master_ports["ref"],
                     use_critic=self.use_critic,
                 )
 
             self.trainers.append(trainer_handle)
 
-        # Wait for all Trainer __init__ to complete
-        ray.get([trainer.__ray_ready__.remote() for trainer in self.trainers])
-        logger.success(f"All {len(self.trainers)} Trainer Ray Actors __init__ completed")
-
-        # Initialize models on all trainers
         futures = [trainer.init_models.remote() for trainer in self.trainers]
         ray.get(futures)
 
