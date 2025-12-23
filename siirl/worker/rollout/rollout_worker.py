@@ -155,3 +155,23 @@ class RolloutWorker:
         """
         host = get_net_interface_ip()
         return get_free_port(host)
+    
+    def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+        return self.engine.init_param_sync_group(master_address, master_port, rank_offset, world_size, group_name, backend)
+
+    def param_sync_from_distributed(
+        self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
+    ):
+        return self.engine.sync_param_from_distributed(names, dtypes, shapes, group_name, flush_cache, weight_version)
+    
+    def destroy_weights_update_group(self, group_name):
+        return self.engine.destroy_weights_update_group(group_name)
+    
+    def flush_cache(self):
+        self.engine.flush_cache()
+
+    def pause_generation(self):
+        self.engine.pause_generation()
+
+    def continue_generation(self):
+        return self.engine.continue_generation()

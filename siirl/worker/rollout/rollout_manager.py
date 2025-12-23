@@ -19,7 +19,6 @@ import asyncio
 import multiprocessing
 
 from loguru import logger
-from typing import Any, Dict, List, Optional, Tuple
 from ray.util import list_named_actors
 
 
@@ -186,7 +185,14 @@ class RolloutManager:
         # Wait for all engine initialization to complete
         ray.get(future)  
 
-        
+    def get_rollout_worker_on_tp0(self):
+        result = []
+        for rank, worker in enumerate(self.worker_handle):
+            # Only initialize engine on TP0 workers (SGLang requirement)
+            if rank % self.config.rollout.tensor_model_parallel_size == 0 or rank % self.config.trainer.n_gpus_per_node == 0: 
+                result.append(worker)
+        return result
+
     def start_rollout(self):
         """
         Start the rollout process on all TP0 RolloutWorker instances.

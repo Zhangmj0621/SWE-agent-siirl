@@ -17,6 +17,7 @@ import io
 import os
 import multiprocessing
 import time
+from urllib3.exceptions import NewConnectionError
 
 import requests
 from loguru import logger
@@ -84,22 +85,22 @@ class SglangEngine:
         
         
         args = self.get_sglang_params(base_gpu_id, node_rank, nnodes)
-        sgl_args = ServerArgs(**args)
+        self.sgl_args = ServerArgs(**args)
         print(f"Launch SglangHttpServer at: {get_net_interface_ip()}:{self.port}")
         multiprocessing.set_start_method("spawn", force=True)
-        self.process = multiprocessing.Process(target=launch_server, args=(sgl_args,))
+        self.process = multiprocessing.Process(target=launch_server, args=(self.sgl_args,))
         self.process.start()
-        base_url = sgl_args.url()
+        base_url = self.sgl_args.url()
         wait_until_ok(
-            f"{base_url}/health_generate" if sgl_args.is_embedding else f"{base_url}/health",
+            f"{base_url}/health_generate" if self.sgl_args.is_embedding else f"{base_url}/health",
             process=self.process,
-            extra_headers={"Authorization": f"Bearer {sgl_args.api_key}"},
+            extra_headers={"Authorization": f"Bearer {self.sgl_args.api_key}"},
         )
         # Ensure cache is ready
         wait_until_ok(
             f"{base_url}/flush_cache",
             process=self.process,
-            extra_headers={"Authorization": f"Bearer {sgl_args.api_key}"},
+            extra_headers={"Authorization": f"Bearer {self.sgl_args.api_key}"},
         )
 
     def set_router(self, router_address):
@@ -119,5 +120,99 @@ class SglangEngine:
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
         text = output['text'] 
         return text, responses, rollout_log_prob
+
+    def flush_cache(self):
+        """Flush the cache of the server."""
+        if self.rank != 0:
+            return
+        # flush cache will not return status_code 200 when there are pending requests
+        for _ in range(60):
+            try:
+                response = requests.get(f"{self.sgl_args.url()}/flush_cache")
+                if response.status_code == 200:
+                    break
+            except NewConnectionError as e:
+                raise e
+            except Exception as e:
+                logger.info(f"Error flushing cache: {e}")
+                time.sleep(1)
+                continue
+        else:
+            raise TimeoutError("Timeout while flushing cache.")
+
+    def pause_generation(self):
+        response = requests.post(f"{self.sgl_args.url()}/pause_generation", json={})
+        response.raise_for_status()
+        return response
+
+    def continue_generation(self):
+        response = requests.post(f"{self.sgl_args.url()}/continue_generation", json={})
+        response.raise_for_status()
+        return response
+
+    def _make_request(self, endpoint: str, payload: dict | None = None):
+        """Make a POST request to the specified endpoint with the given payload.
+
+        Args:
+            endpoint: The API endpoint to call
+            payload: The JSON payload to send (default: empty dict)
+
+        Returns:
+            The JSON response from the server
+        """
+        if self.sgl_args.node_rank != 0:
+            return
+
+        url = f"{self.sgl_args.url()}/{endpoint}"
+        response = requests.post(url, json=payload or {})
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            e.add_note(f"{response.text=}")
+            raise
+        return response.json()
+
+
+    def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+        return self._make_request(
+            "init_weights_update_group",
+            {
+                "master_address": master_address,
+                "master_port": master_port,
+                "rank_offset": rank_offset,
+                "world_size": world_size,
+                "group_name": group_name,
+                "backend": backend,
+            },
+        )
+
+    def sync_param_from_distributed(
+        self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
+    ):
+        payload = {
+            "names": names,
+            "dtypes": [str(dtype).replace("torch.", "") for dtype in dtypes],
+            "shapes": shapes,
+            "group_name": group_name,
+            "flush_cache": flush_cache,
+        }
+        if weight_version is not None:
+            payload["weight_version"] = weight_version
+        return self._make_request(
+            "update_weights_from_distributed",
+            payload,
+        )
+
+    def destroy_weights_update_group(self, group_name):
+        try:
+            return self._make_request(
+                "destroy_weights_update_group",
+                {
+                    "group_name": group_name,
+                },
+            )
+        except requests.exceptions.RequestException:
+            # catch the case there the engine is just created and does not have the group.
+            pass
 
 
