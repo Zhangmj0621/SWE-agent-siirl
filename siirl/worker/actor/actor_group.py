@@ -27,7 +27,7 @@ from siirl.engine.param_sync.update_weight import ParamSyncDistribute
 from siirl.algorithm.advantage import compute_advantage
 from siirl.engine.actor.utils import get_master_info
 from siirl.worker.rollout.rollout_manager import RolloutManager
-
+from siirl.utils.distributed_utils import init_gloo_group, get_gloo_group
 class Trainer:
     """
     Single training unit managing actor, reference, and optionally critic models.
@@ -51,7 +51,6 @@ class Trainer:
         self.data_coordinator = data_coordinator
 
         self.rollout_manager = None
-        self.rollout_workers = None
 
         # Initialize models (will be created in init_models method)
         self.actor_worker = None
@@ -82,11 +81,16 @@ class Trainer:
     def setup_param_sync(self):
         assert self.actor_worker is not None,"must init models first"
         assert self.rollout_workers is not None, "must set rollout workers"
-        self.param_sync = ParamSyncDistribute(config=self.config,model=self.actor_worker.actor_module,bridge = self.actor_worker.bridge,rollout_workers=self.rollout_workers)
-        self.param_sync.setup_param_sync_group()
-
+        self.param_sync = ParamSyncDistribute(config=self.config,model=self.actor_worker.actor_module,bridge = self.actor_worker.bridge)
+        init_gloo_group()
     # @timer
     def update_rollout_weight(self):
+        assert self.param_sync is not None, "must setup param sync first"
+        if isinstance(self.param_sync,ParamSyncDistribute):
+            # TODO support elastic rollout connection
+            rollout_workers = self.rollout_manager.get_rollout_worker_on_tp0.remote()
+            if any(self.param_sync.has_connected_to_actor(x) for x in rollout_workers):   
+                self.param_sync.setup_param_sync_group(rollout_workers)
         self.param_sync.update_weights()
 
     def has_critic(self):
