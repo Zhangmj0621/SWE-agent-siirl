@@ -115,20 +115,11 @@ class CheckpointArguments:
 
 
 @dataclass
-class PolicyLossArguments:
-    loss_mode: str = field(default="vanilla", metadata={"help": "Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'."})
-    clip_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be clipped for clip-cov loss."})
-    clip_cov_lb: float = field(default=1.0, metadata={"help": "Lower bound for clip-cov loss."})
-    clip_cov_ub: float = field(default=5.0, metadata={"help": "Upper bound for clip-cov loss."})
-    kl_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be applied KL penalty for kl-cov loss."})
-    ppo_kl_coef: float = field(default=0.1, metadata={"help": "KL divergence penalty coefficient."})
-
-
-@dataclass
 class ActorArguments:
     train_backend: str = field(default="megatron", metadata={"help": "Backend for training"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
     ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
+    loss_mode: str = field(default="vanilla", metadata={"help": "loss_mode for loss compute"})
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
     clip_ratio_high: float = field(default=0.2, metadata={"help": "Max value for clip ratio"})
@@ -137,13 +128,10 @@ class ActorArguments:
     kl_loss_coef: float = field(default=0.001, metadata={"help": "KL loss coefficient"})
     kl_loss_type: str = field(default="low_var_kl", metadata={"help": "KL loss type"})
     ppo_epochs: int = field(default=1, metadata={"help": "PPO epochs"})
-    shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
-    policy_loss: PolicyLossArguments = field(default_factory=PolicyLossArguments, metadata={"help": "Policy loss settings"})
     optim: OptimizerArguments = field(default_factory=OptimizerArguments, metadata={"help": "Optimizer settings"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     load_weight: bool = field(default=True)
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "seq-mean-token-sum, seq-mean-token-mean"})
-    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
     n: int = field(default=1, metadata={"help": "Number of responses per prompt"})
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
 
@@ -159,14 +147,6 @@ class EvalSamplingArguments:
     n: int = field(default=1)
     do_sample: bool = field(default=False)
 
-
-@dataclass
-class LayerNameMapArguments:
-    qkv_layer_name: str = field(default="qkv", metadata={"help": "QKV layer name map"})
-    gate_proj_layer_name: str = field(default="linear_fc1.weight", metadata={"help": "Gate projection layer name map"})
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 @dataclass
 class RolloutArguments:
@@ -190,7 +170,6 @@ class RolloutArguments:
     enable_chunked_prefill: bool = field(default=True, metadata={"help": "Whether or not enable chunked prefill"})
     trust_remote_code: bool = field(default=False, metadata={"help": "trust the code or not."})
     val_kwargs: EvalSamplingArguments = field(default_factory=EvalSamplingArguments)
-    layer_name_map: LayerNameMapArguments = field(default_factory=LayerNameMapArguments)
     seed: int = field(default=0, metadata={"help": "The random seed"})
     calculate_log_probs: bool = field(default=True, metadata={"help": "Whether rollout calculate log probs"})
     multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
@@ -204,14 +183,10 @@ class RolloutArguments:
 
 @dataclass
 class RefArguments:
-    strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     log_prob_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
     log_prob_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
-    log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
-    use_torch_compile: bool = field(default=True, metadata={"help": "Whether or not use torch compile"})
-    ppo_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Micro-batch size"})
     ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     param_offload: bool = field(default=False, metadata={"help": "Enable param offload or not"})
     load_weight: bool = field(default=True)
@@ -222,22 +197,11 @@ class RefArguments:
 
 
 @dataclass
-class KLCtrlArguments:
-    type: str = field(default="fixed", metadata={"help": "Type of KL Ctrl, fixed or adaptive"})
-    kl_coef: float = field(default=0.001, metadata={"help": "Coef of KL"})
-    target_kl: Optional[float] = field(default=0.1, metadata={"help": "Target KL value"})
-    horizon: Optional[float] = field(default=1000, metadata={"help": "Horizon of KL"})
-
-
-@dataclass
 class AlgorithmArguments:
     adv_estimator: str = field(default="grpo", metadata={"help": "Advantage estimator"})
     gamma: float = field(default=1.0, metadata={"help": "Discount factor"})
     lam: float = field(default=1.0, metadata={"help": "GAE lambda"})
     kl_penalty: str = field(default="kl", metadata={"help": "KL penalty type"})
-    kl_ctrl: KLCtrlArguments = field(default_factory=KLCtrlArguments)
-    use_kl_in_reward: bool = field(default=False, metadata={"help": "Use KL In-Reward"})
-    share_reward_in_agent: bool = field(default=True, metadata={"help": "Shard Reward in Reward"})
     norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
 
     def to_dict(self) -> Dict[str, Any]:
@@ -248,14 +212,13 @@ class ActorRefArguments:
     model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Base model settings"})
     actor: ActorArguments = field(default_factory=ActorArguments, metadata={"help": "Actor configuration"})
     ref: RefArguments = field(default_factory=RefArguments, metadata={"help": "Reference model settings"})
-    algo: AlgorithmArguments = field(default_factory=AlgorithmArguments, metadata={"help": "Algorithm settings"})
+    algorithm: AlgorithmArguments = field(default_factory=AlgorithmArguments, metadata={"help": "Algorithm settings"})
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
 @dataclass
 class CriticArguments:
-    strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
     optim: OptimizerArguments = field(
         default_factory=lambda: OptimizerArguments(lr=1e-5),
         metadata={"help": "Optimizer settings"},
@@ -266,17 +229,13 @@ class CriticArguments:
     )
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
-    ppo_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Micro-batch size"})
     ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     ppo_epochs: int = field(default=1, metadata={"help": "PPO epochs"})
-    shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     cliprange_value: float = field(default=0.5, metadata={"help": "Value clipping range"})
     load_weight: bool = field(default=True)
     rollout_n: int = field(default=1, metadata={"help": "rollout n"})
     checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
-    ppo_max_token_len_per_gpu: int = field(default=32768, metadata={"help": "Max tokens per GPU"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
-    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -18,7 +18,6 @@ from .data_args import DataArguments
 from .model_args import (
     ActorRefArguments,
     CriticArguments,
-    AlgorithmArguments,
     RolloutArguments
 )
 
@@ -45,21 +44,11 @@ class TrainingArguments:
         metadata={"help": "Checkpoint directory"},
     )
     seed: int = field(default=1, metadata={"help": "Train seed param"})
-    should_log: bool = field(default=False, metadata={"help": "Should print debug log for training"})
-    should_save: bool = field(
-        default=False,
-        metadata={"help": "Should save tokenized dataset to local disk and exit"},
-    )
     val_before_train: bool = field(default=True, metadata={"help": "Whether or not to validate before train"})
     val_only: bool = field(default=False, metadata={"help": "Whether or not just eval only"})
-    balance_batch: bool = field(
-        default=False,
-        metadata={"help": "Whether or not to balance the number of valid tokens on each dp rank."},
-    )
     max_actor_ckpt_to_keep: int = field(default=100, metadata={"help": "Maximum number of actor ckpts."})
     max_critic_ckpt_to_keep: int = field(default=100, metadata={"help": "Maximum number of critic ckpts."})
     validation_data_dir: Optional[str] = field(default=None, metadata={"help": "Validation data directory."})
-    rollout_data_dir: Optional[str] = field(default=None, metadata={"help": "Rollout data directory."})
     device: Optional[str] = field(default="cuda", metadata={"help": "Training device."})
     async_factor: int = field(default=1, metadata={"help": "Control async speed"})
     param_sync_buffer_size: int = field(default=512 * 1024**2,metadata={"help":"buffer size for param_sync, in bytes. This is used for updating weights by chunk and should be useful for MoE models."})
@@ -68,21 +57,12 @@ class TrainingArguments:
 
 
 @dataclass
-class CustomRewardArguments:
-    path: str = field(default=None, metadata={"help": "Custom reward function import file path"})
-    name: str = field(default="compute_score", metadata={"help": "Custom reward function name"})
-    reward_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
-
-
-@dataclass
 class SiiRLArguments:
     data: DataArguments = field(default_factory=DataArguments)
     actor_ref: ActorRefArguments = field(default_factory=ActorRefArguments)
     rollout: RolloutArguments = field(default_factory=RolloutArguments)
     critic: CriticArguments = field(default_factory=CriticArguments)
-    algorithm: AlgorithmArguments = field(default_factory=AlgorithmArguments)
     trainer: TrainingArguments = field(default_factory=TrainingArguments)
-    custom_reward_function: CustomRewardArguments = field(default_factory=CustomRewardArguments)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
