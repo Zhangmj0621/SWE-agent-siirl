@@ -13,21 +13,16 @@
 # limitations under the License.
 
 import ray
-import os
 import time
 from tensordict import stack
-from loguru import logger
-from typing import List, Optional
 from megatron.core import parallel_state as mpu
 
-from siirl.params.training_args import SiiRLArguments
-from siirl.utils.enums import DistributedEnv
 from siirl.engine.actor.megatron_actor import ActorWorker, ReferenceWorker, CriticWorker
 from siirl.engine.param_sync.update_weight import ParamSyncDistribute
 from siirl.algorithm.advantage import compute_advantage
-from siirl.engine.actor.utils import get_master_info
-from siirl.worker.rollout.rollout_manager import RolloutManager
-from siirl.utils.distributed_utils import init_gloo_group, get_gloo_group
+from siirl.utils.distributed_utils import init_gloo_group
+
+
 class Trainer:
     """
     Single training unit managing actor, reference, and optionally critic models.
@@ -60,20 +55,19 @@ class Trainer:
         self.dp_world_size = None
 
     def init_models(self):
-        self.actor_worker = ActorWorker(config=self.config)
+        self.actor_worker = ActorWorker(config=self.config.actor_ref)
         self.actor_worker.init_model()
 
-        self.ref_worker = ReferenceWorker(config=self.config)
+        self.ref_worker = ReferenceWorker(config=self.config.actor_ref)
         self.ref_worker.init_model()
 
         if self.use_critic:
-            self.critic_worker = CriticWorker(config=self.config)
+            self.critic_worker = CriticWorker(config=self.config.critic)
             self.critic_worker.init_model()
 
         self.dp_rank = mpu.get_data_parallel_rank()
         self.dp_world_size = mpu.get_data_parallel_world_size()
 
-        logger.success(f"Trainer[{self.rank}]: Models initialized, dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}")
 
     def set_rollout_workers(self, rollout_workers):
         self.rollout_workers = rollout_workers
@@ -81,8 +75,9 @@ class Trainer:
     def setup_param_sync(self):
         assert self.actor_worker is not None,"must init models first"
         assert self.rollout_workers is not None, "must set rollout workers"
-        self.param_sync = ParamSyncDistribute(config=self.config,model=self.actor_worker.actor_module,bridge = self.actor_worker.bridge)
+        self.param_sync = ParamSyncDistribute(config=self.actor_ref, model=self.actor_worker.actor_module, bridge=self.actor_worker.bridge)
         init_gloo_group()
+        
     # @timer
     def update_rollout_weight(self):
         assert self.param_sync is not None, "must setup param sync first"
@@ -124,9 +119,10 @@ class Trainer:
         else:
             data_with_values = data_with_ref
 
-        adv_estimator = self.config.algo.adv_estimator
-        gamma = self.config.algo.gamma
-        lam = self.config.algo.lam
+        algo_config = self.config.actor_ref.algorithm
+        adv_estimator = algo_config.adv_estimator
+        gamma = algo_config.gamma
+        lam = algo_config.lam
 
         data_for_update = compute_advantage(
             data=data_with_values,
@@ -146,100 +142,9 @@ class Trainer:
         return metrics
 
     def train(self, batch_size: int):
+        """Continuous training loop that processes batches as they become available."""
         while True:
             batch_data = self.get_batch(batch_size)
             if batch_data is not None:
                 self.train_step(batch_data)
-                break
             time.sleep(0.1)
-
-
-class TrainerGroup:
-    """
-    Manages a group of Trainers for distributed RL training.
-    Supports PPO and GRPO algorithms with train/inference separation architecture.
-    """
-
-    def __init__(
-        self,
-        config: SiiRLArguments,
-        data_coordinator,
-        num_gpus: int,
-        placement_groups: Optional[List] = None,
-    ) -> None:
-        self.config = config
-        self.data_coordinator = data_coordinator
-        self.num_gpus = num_gpus
-        self.placement_groups = placement_groups
-        self.trainers: List[Trainer] = []
-        self.use_critic = self.config.actor_ref.algo.adv_estimator == "ppo"
-        self.master_addr, self.master_ports = get_master_info()
-
-    def init_actors(self,rollout_manager: RolloutManager):
-        """
-        Initialize trainers by creating Trainer instances and wrapping them as Ray Actors.
-        Each Trainer manages its own actor, ref, and optionally critic models.
-        """
-        n_gpus_per_node = self.config.trainer.n_gpus_per_node
-
-        for rank in range(self.num_gpus):
-            node_idx = rank // n_gpus_per_node
-            local_rank = rank % n_gpus_per_node
-            pg = self.placement_groups[node_idx] if self.placement_groups else None
-            bundle_index = local_rank
-
-            env_vars = {
-                DistributedEnv.WORLD_SIZE.value: str(self.num_gpus),
-                DistributedEnv.RANK.value: str(rank),
-                DistributedEnv.LOCAL_RANK.value: str(local_rank),
-                DistributedEnv.MASTER_ADDR.value: self.master_addr,
-                DistributedEnv.MASTER_PORT.value: self.master_ports,
-                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-            }
-
-            if os.getenv('GLOO_SOCKET_IFNAME'):
-                env_vars['GLOO_SOCKET_IFNAME'] = os.getenv('GLOO_SOCKET_IFNAME')
-
-            TrainerActor = ray.remote(Trainer)
-            trainer_options = {
-                "runtime_env": {"env_vars": env_vars},
-                "name": f"trainer_{rank}",
-                "num_gpus": 1,
-            }
-
-            trainer_handle = TrainerActor.options(
-                **trainer_options,
-                placement_group=pg,
-                placement_group_bundle_index=bundle_index,
-            ).remote(
-                config=self.config.actor_ref,
-                rank=rank,
-                local_rank=local_rank,
-                world_size=self.num_gpus,
-                use_critic=self.use_critic,
-                data_coordinator=self.data_coordinator,
-            )
-
-            self.trainers.append(trainer_handle)
-
-        ray.get([trainer.init_models.remote() for trainer in self.trainers])
-
-        futures = [trainer.set_rollout_workers.remote(rollout_manager.get_rollout_worker_on_tp0()) for trainer in self.trainers]
-        ray.get(futures)
-
-        futures = [trainer.setup_param_sync.remote() for trainer in self.trainers]
-        ray.get(futures)
-
-        logger.success(f"Initialized {len(self.trainers)} trainers")
-
-    def train(self):
-        batch_size = self.config.actor_ref.actor.ppo_mini_batch_size
-        ray.get([trainer.train.remote(batch_size) for trainer in self.trainers])
-
-    def put_weight(self):
-        if not self.trainers:
-            logger.warning("No trainers available for weight extraction")
-            return
-        ray.get([trainer.update_rollout_weight.remote() for trainer in self.trainers])
-        logger.warning("Weight update functionality not implemented")
-
