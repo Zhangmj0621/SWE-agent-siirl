@@ -1,12 +1,9 @@
-from siirl.params.training_args import SiiRLArguments
 import torch
-from typing import List, Sequence
-import mbridge
+from typing import Sequence
 from mbridge.core.bridge import Bridge
 from mbridge.core.util import unwrap_model
-from megatron.core import mpu
 
-def _named_params_and_buffers_global_in_current_pp_stage(self:Bridge, models: Sequence[torch.nn.Module]):
+def _export_weights_in_current_pipeline_stage(self:Bridge, models: Sequence[torch.nn.Module]):
         models = [unwrap_model(model) for model in models]
 
         def get_model_chunk_generator():
@@ -46,11 +43,6 @@ def _named_params_and_buffers_global_in_current_pp_stage(self:Bridge, models: Se
             for name in extra_keys:
                 weights_names.append((self.mpu.pp_rank, vpp_rank, name))
 
-        # weights_names_all_pp = weights_names
-        # torch.distributed.all_gather_object(
-        #     object_list=weights_names_all_pp, obj=weights_names, group=self.mpu.pp_group
-        # )
-        weights_names = sum(weights_names, [])
         model_chunk_generator = get_model_chunk_generator()
         local_to_global_maps = [
             self._weight_name_mapping_mcore_local_to_global(model, consider_ep=False)
@@ -63,9 +55,6 @@ def _named_params_and_buffers_global_in_current_pp_stage(self:Bridge, models: Se
             except StopIteration:
                 name, param = None, None
             name = local_to_global_map[iter_name]
-
-            # name = broadcast_str_from_megatron_pp(name)
-            # broad_pp_param = broadcast_from_megatron_pp(param)
 
             # EP
             if ".mlp.experts.linear_fc" in name and self.mpu.ep_size > 1:
@@ -139,4 +128,4 @@ def _named_params_and_buffers_global_in_current_pp_stage(self:Bridge, models: Se
 
             yield from zip(converted_names, converted_params)
 
-Bridge.export_weights = _named_params_and_buffers_global_in_current_pp_stage
+Bridge._export_weights_in_current_pipeline_stage = _export_weights_in_current_pipeline_stage

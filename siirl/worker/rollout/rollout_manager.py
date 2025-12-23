@@ -31,7 +31,7 @@ from siirl.worker.ray_utils import get_random_string, RayClassWithInitArgs
 from siirl.worker.rollout.rollout_worker import RolloutWorker
 from siirl.engine.rollout.sglang_engine import wait_until_ok
 
-
+@ray.remote
 class RolloutManager:
     """
     Manages the lifecycle of rollout workers and SGLang router in a distributed training environment.
@@ -183,7 +183,7 @@ class RolloutManager:
                 # Record worker URL for router configuration
                 self.worker_urls.append(f"http://{ip}:{port}")
         # Wait for all engine initialization to complete
-        ray.get(future)  
+        ray.get(future)
 
     def get_rollout_worker_on_tp0(self):
         result = []

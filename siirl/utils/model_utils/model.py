@@ -34,19 +34,6 @@ from transformers import (
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
-class LambdaLayer(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-
-    def forward(self, *args, **kwargs):
-        return self.fn(*args, **kwargs)
-
-
-def squeeze(x):
-    return torch.squeeze(x, dim=-1)
-
-
 def update_model_config(module_config, override_config_kwargs):
     """Update the module config with the override_config_kwargs.
     Args:
@@ -69,22 +56,6 @@ def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, t
     update_model_config(module_config, override_config_kwargs)
 
     return module_config
-
-def get_generation_config(
-    model: str,
-    trust_remote_code: bool = False,
-) -> Optional[GenerationConfig]:
-    try:
-        return GenerationConfig.from_pretrained(model)
-    except OSError:  # Not found
-        try:
-            config = get_huggingface_actor_config(
-                model,
-                trust_remote_code=trust_remote_code,
-            )
-            return GenerationConfig.from_model_config(config)
-        except OSError:  # Not found
-            return None
 
 
 def get_model_size(model: nn.Module, scale="auto"):
@@ -112,13 +83,6 @@ def get_model_size(model: nn.Module, scale="auto"):
         raise NotImplementedError(f"Unknown scale {scale}")
 
     return n_params, scale
-
-
-def print_model_size(model: nn.Module, name: str = None):
-    n_params, scale = get_model_size(model, scale="auto")
-    if name is None:
-        name = model.__class__.__name__
-    logger.info(f"{name} contains {n_params:.2f}{scale} parameters")
 
 
 def normalize_model_name(name, pp_rank, vpp_rank, transformer_config, layer_name="layers"):
@@ -230,30 +194,7 @@ def load_megatron_gptmodel_weights(
     del state_dict, model
 
 
-def convert_weight_keys(state_dict: Dict[str, torch.Tensor], model: PreTrainedModel):
-    # convert state dict keys: https://github.com/huggingface/transformers/pull/38385
-    if not hasattr(model, "_checkpoint_conversion_mapping"):
-        return state_dict
-
-    reverse_key_mapping = {v: k for k, v in model._checkpoint_conversion_mapping.items()}
-    original_weights = {}
-    for key, value in state_dict.items():
-        for pattern, replacement in reverse_key_mapping.items():
-            replacement = replacement.lstrip("^")  # strip off un-needed chars and patterns
-            replacement = re.sub(r"\(.*\)", "", replacement)
-            key, n_replace = re.subn(pattern, replacement, key)
-            # Early exit of the loop
-            if n_replace > 0:
-                break
-
-        original_weights[key] = value
-
-    return original_weights
-
 def compute_position_id_with_mask(mask):
     return torch.clip(torch.cumsum(mask, dim=-1) - 1, min=0, max=None)
 
-@dataclass
-class CausalLMOutputForPPO(CausalLMOutputWithPast):
-    log_probs: Optional[torch.FloatTensor] = None
-    entropy: Optional[torch.FloatTensor] = None
+

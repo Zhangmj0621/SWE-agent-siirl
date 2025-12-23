@@ -17,7 +17,7 @@
 """Pretrain utilities."""
 
 import gc
-from typing import Any, Dict
+from typing import Any
 import inspect
 from dataclasses import dataclass
 
@@ -27,7 +27,7 @@ from megatron.core import mpu, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.enums import ModelType
-from megatron.core.optimizer import ChainedOptimizer, OptimizerConfig
+from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.module import Float16Module
 from megatron.core.utils import get_attr_wrapped_model
@@ -271,30 +271,6 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
     )
 
     return transformer_config
-
-
-def init_megatron_optim_config(optim_config: Dict) -> OptimizerConfig:
-    optim_args = {
-        "optimizer": "adam",
-        "lr": optim_config.lr,
-        "min_lr": optim_config.min_lr,
-        "clip_grad": optim_config.clip_grad,
-        "weight_decay": optim_config.weight_decay,
-        "bf16": True,
-        "params_dtype": torch.bfloat16,
-        "use_distributed_optimizer": True,
-    }
-
-    override_config = optim_config.override_optimizer_config
-    if override_config:
-        for k, v in override_config.items():
-            optim_args[k] = v
-
-    print_rank_0(f"optimizer config after override: {optim_args}")
-
-    config = OptimizerConfig(**optim_args)
-    return config
-
 
 
 @torch.no_grad()
