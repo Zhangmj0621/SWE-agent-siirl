@@ -62,7 +62,7 @@ class TrainingArguments:
     rollout_data_dir: Optional[str] = field(default=None, metadata={"help": "Rollout data directory."})
     device: Optional[str] = field(default="cuda", metadata={"help": "Training device."})
     async_factor: int = field(default=1, metadata={"help": "Control async speed"})
-    
+    param_sync_buffer_size: int = field(default=512 * 1024**2,metadata={"help":"buffer size for param_sync, in bytes. This is used for updating weights by chunk and should be useful for MoE models."})
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 

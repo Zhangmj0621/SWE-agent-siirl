@@ -23,9 +23,10 @@ from megatron.core import parallel_state as mpu
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.enums import DistributedEnv
 from siirl.engine.actor.megatron_actor import ActorWorker, ReferenceWorker, CriticWorker
+from siirl.engine.param_sync.update_weight import ParamSyncDistribute
 from siirl.algorithm.advantage import compute_advantage
 from siirl.engine.actor.utils import get_master_info
-
+from siirl.worker.rollout.rollout_manager import RolloutManager
 
 class Trainer:
     """
@@ -48,6 +49,11 @@ class Trainer:
         self.world_size = world_size
         self.use_critic = use_critic
         self.data_coordinator = data_coordinator
+
+        self.rollout_manager = None
+        self.rollout_workers = None
+
+        # Initialize models (will be created in init_models method)
         self.actor_worker = None
         self.ref_worker = None
         self.critic_worker = None
@@ -69,6 +75,19 @@ class Trainer:
         self.dp_world_size = mpu.get_data_parallel_world_size()
 
         logger.success(f"Trainer[{self.rank}]: Models initialized, dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}")
+
+    def set_rollout_workers(self, rollout_workers):
+        self.rollout_workers = rollout_workers
+
+    def setup_param_sync(self):
+        assert self.actor_worker is not None,"must init models first"
+        assert self.rollout_workers is not None, "must set rollout workers"
+        self.param_sync = ParamSyncDistribute(config=self.config,model=self.actor_worker.actor_module,bridge = self.actor_worker.bridge,rollout_workers=self.rollout_workers)
+        self.param_sync.setup_param_sync_group()
+
+    # @timer
+    def update_rollout_weight(self):
+        self.param_sync.update_weights()
 
     def has_critic(self):
         return self.critic_worker is not None
@@ -152,7 +171,11 @@ class TrainerGroup:
         self.use_critic = self.config.actor_ref.algo.adv_estimator == "ppo"
         self.master_addr, self.master_ports = get_master_info()
 
-    def init_actors(self):
+    def init_actors(self,rollout_manager: RolloutManager):
+        """
+        Initialize trainers by creating Trainer instances and wrapping them as Ray Actors.
+        Each Trainer manages its own actor, ref, and optionally critic models.
+        """
         n_gpus_per_node = self.config.trainer.n_gpus_per_node
 
         for rank in range(self.num_gpus):
@@ -196,6 +219,13 @@ class TrainerGroup:
             self.trainers.append(trainer_handle)
 
         ray.get([trainer.init_models.remote() for trainer in self.trainers])
+
+        futures = [trainer.set_rollout_workers.remote(rollout_manager.get_rollout_worker_on_tp0()) for trainer in self.trainers]
+        ray.get(futures)
+
+        futures = [trainer.setup_param_sync.remote() for trainer in self.trainers]
+        ray.get(futures)
+
         logger.success(f"Initialized {len(self.trainers)} trainers")
 
     def train(self):
@@ -206,6 +236,6 @@ class TrainerGroup:
         if not self.trainers:
             logger.warning("No trainers available for weight extraction")
             return
-
+        ray.get([trainer.update_rollout_weight.remote() for trainer in self.trainers])
         logger.warning("Weight update functionality not implemented")
 
