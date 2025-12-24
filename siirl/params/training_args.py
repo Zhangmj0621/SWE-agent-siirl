@@ -52,6 +52,21 @@ class TrainingArguments:
     device: Optional[str] = field(default="cuda", metadata={"help": "Training device."})
     async_factor: int = field(default=1, metadata={"help": "Control async speed"})
     param_sync_buffer_size: int = field(default=512 * 1024**2,metadata={"help":"buffer size for param_sync, in bytes. This is used for updating weights by chunk and should be useful for MoE models."})
+
+    # === Resource Allocation Configuration ===
+    actor_gpus: int = field(
+        default=2,
+        metadata={"help": "Number of GPUs for training (Actor/Ref/Critic)"}
+    )
+    rollout_gpus: int = field(
+        default=6,
+        metadata={"help": "Number of GPUs for rollout/inference"}
+    )
+    colocate: bool = field(
+        default=False,
+        metadata={"help": "Share GPUs between training and rollout (colocated mode)"}
+    )
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 

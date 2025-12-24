@@ -21,7 +21,7 @@ import ray
 from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.data_coordinator.data_buffer import init_data_coordinator
-from siirl.worker.ray_utils import create_placement_groups
+from siirl.worker.ray_utils import allocate_resources
 from siirl.worker.rollout.rollout_manager import RolloutManager
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
@@ -66,13 +66,15 @@ class MainRunner:
             world_size=siirl_args.trainer.nnodes * siirl_args.trainer.n_gpus_per_node
         )
         dataloader_fut = data_coordinator_handle.init_dataloader.remote(siirl_args)
-        # 2. initialize pg
-        pgs = create_placement_groups(siirl_args)
-        print(f"[pgs] {pgs}")
+        # 2. Allocate GPU resources
+        resources = allocate_resources(siirl_args)
+        rollout_resources = resources["rollout"]
+        logger.info(f"Allocated rollout resources: {rollout_resources}")
+        
         # 3. Initialize rollout worker
-        rollout_pgs = pgs
-        rollout_worker = RolloutManager(siirl_args, rollout_pgs, data_coordinator_handle)
         ray.get(dataloader_fut)
+        rollout_worker = RolloutManager.remote(siirl_args, rollout_resources, data_coordinator_handle)
+        logger.info("RolloutManager initialized")
         total_training_steps, num_train_batches = ray.get(data_coordinator_handle.epoch_info.remote())
         global_steps = 0
         

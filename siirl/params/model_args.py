@@ -177,6 +177,7 @@ class RolloutArguments:
     router_port: str = field(default=None, metadata={"help": "Rollout Router Port"})
     executor_module: str = field(default="naive", metadata={"help": "Batch rollout Generate Executor"})
     flow_function: str = field(default="naive", metadata={"help": "Sample rollout Generate Executor"})
+    flow_config: dict = field(default_factory=dict, metadata={"help": "Sample rollout Generate Executor config"})
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
