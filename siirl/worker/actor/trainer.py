@@ -15,15 +15,16 @@
 import ray
 import time
 import os
+import torch.distributed as dist
 import traceback
 from loguru import logger
-from tensordict import stack
 from megatron.core import parallel_state as mpu
 
 from siirl.engine.actor.megatron_actor import ActorWorker, ReferenceWorker, CriticWorker
 from siirl.engine.param_sync.update_weight import ParamSyncDistribute
 from siirl.algorithm.advantage import compute_advantage
 from siirl.utils.distributed_utils import init_gloo_group
+from siirl.data_coordinator.sample import Samples2Dict
 
 
 class Trainer:
@@ -130,13 +131,23 @@ class Trainer:
 
         batch_data_list = ray.get(batch_ref)
 
-        return stack(batch_data_list, dim=0)
+        ray.get(self.data_coordinator.reset_cache.remote()) if self.rank == 0 else None
+        dist.barrier()
+
+        return Samples2Dict(batch_data_list)
 
     def train_step(self, batch_data):
+        step_start_time = time.time()
+        logger.info(f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} starting")
+
+        logger.info(f"[Trainer.train_step] step={self.global_step} computing actor log probs")
         data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
+
+        logger.info(f"[Trainer.train_step] step={self.global_step} computing reference log probs")
         data_with_ref = self.ref_worker.compute_ref_log_prob(data_with_logprobs)
 
         if self.use_critic:
+            logger.info(f"[Trainer.train_step] step={self.global_step} computing critic values")
             data_with_values = self.critic_worker.compute_values(data_with_ref)
         else:
             data_with_values = data_with_ref
@@ -146,6 +157,7 @@ class Trainer:
         gamma = algo_config.gamma
         lam = algo_config.lam
 
+        logger.info(f"[Trainer.train_step] step={self.global_step} computing advantages with {adv_estimator}")
         data_for_update = compute_advantage(
             data=data_with_values,
             adv_estimator=adv_estimator,
@@ -153,13 +165,18 @@ class Trainer:
             lam=lam,
         )
 
+        logger.info(f"[Trainer.train_step] step={self.global_step} updating actor")
         actor_result = self.actor_worker.update_actor(data_for_update)
 
         if self.use_critic:
+            logger.info(f"[Trainer.train_step] step={self.global_step} updating critic")
             critic_result = self.critic_worker.update_critic(data_for_update)
             metrics = {"actor": actor_result, "critic": critic_result}
         else:
             metrics = {"actor": actor_result}
+
+        step_duration = time.time() - step_start_time
+        logger.success(f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} completed in {step_duration:.2f}s")
 
         return metrics
 
@@ -173,7 +190,7 @@ class Trainer:
             logger.warning(f"[Trainer rank={self.rank}] Failed to check coordinator: {e}")
             logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
             return False
-    
+
     def _report_failure(self, error_msg: str):
         """Report failure to coordinator."""
         if not self.coordinator:
@@ -203,22 +220,22 @@ class Trainer:
                 if self._check_should_stop():
                     logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
                     break
-                
+
                 # Get batch data
                 batch_data = self.get_batch(batch_size)
                 if batch_data is None:
                     time.sleep(0.1)
                     continue
-                
+
                 # Execute training step
                 self.train_step(batch_data)
                 self.global_step += 1
                 
                 if self.global_step % 100 == 0:
                     logger.info(f"[Trainer rank={self.rank}] Completed step {self.global_step}")
-                
+
                 time.sleep(0.01)
-                
+
         except Exception as e:
             error_msg = f"Training failed at step {self.global_step}: {e}"
             logger.error(f"[Trainer rank={self.rank}] {error_msg}")

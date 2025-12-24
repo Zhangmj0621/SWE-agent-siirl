@@ -13,19 +13,13 @@
 # limitations under the License.
 
 import asyncio
-from typing import Dict, List, Optional, Tuple, Callable, Any
-import heapq
-import random
+from typing import List, Optional, Tuple, Callable, Any
 import ray
 import loguru
-import time
-import threading
 import copy
 
 from collections import deque
 from loguru import logger
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-
 
 
 from siirl.data_coordinator.sample import SampleInfo
@@ -300,7 +294,8 @@ class DataCoordinator:
                     if source_dp_size is not None:
                         return source_dp_size
             return None
-
+    
+    #TODO: supporty for async train
     def reset_cache(self):
         loguru.logger.warning("reset datacoordinator")
         self._sample_queue.clear()

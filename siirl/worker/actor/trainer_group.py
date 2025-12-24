@@ -149,17 +149,13 @@ class TrainerGroup:
 
         logger.success(f"Successfully initialized {len(self.trainers)} trainers with their models")
 
-    def train(self, num_epochs: int = 1):
+    def train(self):
         """
         Execute training loop.
-
-        Args:
-            num_epochs: Number of training epochs
         """
-        batch_size = self.config.actor_ref.actor.ppo_mini_batch_size
+        batch_size = self.config.data.train_batch_size
         futures = [trainer.train.remote(batch_size) for trainer in self.trainers]
         ray.get(futures)
-        logger.info(f"Training completed for {num_epochs} epochs")
 
     def put_weight(self):
         """
