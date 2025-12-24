@@ -85,6 +85,10 @@ class TrainerGroup:
         Each Trainer manages its own actor, ref, and optionally critic models.
         Uses GPU bundle indices and local_ranks from allocated GPUResources for precise GPU assignment.
         """
+        logger.info(f"[TrainerGroup.init_actors] Creating {self.num_gpus} trainers")
+        logger.info(f"  gpu_indices={self.gpu_indices}, local_ranks={self.local_ranks}")
+        logger.info(f"  node_ips={self.node_ips}, is_shared={self.is_shared}")
+        
         # Iterate over allocated GPU bundle indices and their local ranks
         for rank, (bundle_idx, local_rank) in enumerate(zip(self.gpu_indices, self.local_ranks)):
             env_vars = {
@@ -95,6 +99,9 @@ class TrainerGroup:
                 DistributedEnv.MASTER_PORT.value: self.master_ports,
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             }
+            logger.debug(f"  Creating Trainer rank={rank}: bundle_idx={bundle_idx}, local_rank={local_rank}, "
+                        f"env={{WORLD_SIZE={self.num_gpus}, RANK={rank}, LOCAL_RANK={local_rank}, "
+                        f"MASTER_ADDR={self.master_addr}, MASTER_PORT={self.master_ports}}}")
 
             if os.getenv('GLOO_SOCKET_IFNAME'):
                 env_vars['GLOO_SOCKET_IFNAME'] = os.getenv('GLOO_SOCKET_IFNAME')

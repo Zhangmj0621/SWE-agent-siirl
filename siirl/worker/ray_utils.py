@@ -217,8 +217,14 @@ def _allocate_separated(config: SiiRLArguments) -> Dict[str, GPUResources]:
     rollout_local_ranks = local_ranks[actor_gpus:]
     rollout_node_ips = node_ips[actor_gpus:]
     
-    logger.info(f"  Actor GPUs: bundle indices {actor_indices}, local_ranks {actor_local_ranks}")
-    logger.info(f"  Rollout GPUs: bundle indices {rollout_indices}, local_ranks {rollout_local_ranks}")
+    logger.info(f"[GPU Allocation - Separated Mode]")
+    logger.info(f"  Total bundles: {total_gpus}, Actor GPUs: {actor_gpus}, Rollout GPUs: {rollout_gpus}")
+    logger.info(f"  Actor allocation:")
+    for i, (idx, lr, ip) in enumerate(zip(actor_indices, actor_local_ranks, actor_node_ips)):
+        logger.info(f"    rank {i}: bundle_idx={idx}, local_rank={lr}, node={ip}")
+    logger.info(f"  Rollout allocation:")
+    for i, (idx, lr, ip) in enumerate(zip(rollout_indices, rollout_local_ranks, rollout_node_ips)):
+        logger.info(f"    idx {i}: bundle_idx={idx}, local_rank={lr}, node={ip}")
     
     return {
         "actor": GPUResources(
@@ -264,7 +270,10 @@ def _allocate_colocated(config: SiiRLArguments) -> Dict[str, GPUResources]:
     # Sort bundle indices by node IP and GPU ID for consistency
     sorted_indices, local_ranks, node_ips = _sort_by_node(pg, total_gpus)
     
-    logger.info(f"  Shared GPUs: bundle indices {sorted_indices}, local_ranks {local_ranks}")
+    logger.info(f"[GPU Allocation - Colocated Mode]")
+    logger.info(f"  Total shared GPUs: {total_gpus}")
+    for i, (idx, lr, ip) in enumerate(zip(sorted_indices, local_ranks, node_ips)):
+        logger.info(f"    idx {i}: bundle_idx={idx}, local_rank={lr}, node={ip}")
     
     return {
         "shared": GPUResources(
@@ -291,7 +300,10 @@ def _sort_by_node(pg: PlacementGroup, num_bundles: int) -> Tuple[List[int], List
         - local_ranks: List of local GPU IDs (CUDA device) for each bundle
         - node_ips: List of node IP addresses for each bundle
     """
-    @ray.remote(num_cpus=0.01)
+    from loguru import logger
+    
+    # Must request GPU to get correct GPU IDs from ray.get_gpu_ids()
+    @ray.remote(num_gpus=1)
     class _InfoActor:
         def info(self):
             return ray.util.get_node_ip_address(), ray.get_gpu_ids()
@@ -317,8 +329,11 @@ def _sort_by_node(pg: PlacementGroup, num_bundles: int) -> Tuple[List[int], List
     for i in range(num_bundles):
         ip = infos[i][0]
         gpu_ids = infos[i][1]
-        gpu_id = int(gpu_ids[0]) if gpu_ids else 0
+        if not gpu_ids:
+            raise RuntimeError(f"Bundle {i} has no GPU assigned. Check placement group configuration.")
+        gpu_id = int(gpu_ids[0])
         indexed.append((i, ip, gpu_id))
+        logger.debug(f"Bundle {i}: node={ip}, gpu_id={gpu_id}")
     
     # Sort by (IP as tuple of ints, GPU ID)
     def sort_key(x):
@@ -331,5 +346,7 @@ def _sort_by_node(pg: PlacementGroup, num_bundles: int) -> Tuple[List[int], List
     sorted_indices = [x[0] for x in indexed]
     local_ranks = [x[2] for x in indexed]  # GPU IDs as local ranks
     node_ips = [x[1] for x in indexed]     # Node IPs for each bundle
+    
+    logger.info(f"Sorted GPU allocation: indices={sorted_indices}, local_ranks={local_ranks}")
     
     return sorted_indices, local_ranks, node_ips

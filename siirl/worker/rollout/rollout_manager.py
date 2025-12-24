@@ -115,9 +115,11 @@ class RolloutManager:
         
         res = self.gpu_resources
         
-        logger.info(f"Creating {self.num_actors} RolloutWorker actors "
-                    f"(rollout_gpu={self.rollout_gpu}, tp_size={self.tp_size}, "
-                    f"gpus_per_actor={self.gpus_per_actor})")
+        logger.info(f"[RolloutManager.init_worker] Configuration:")
+        logger.info(f"  rollout_gpu={self.rollout_gpu}, tp_size={self.tp_size}, n_gpus_per_node={self.n_gpus_per_node}")
+        logger.info(f"  gpus_per_actor={self.gpus_per_actor}, num_actors={self.num_actors}")
+        logger.info(f"  num_tp_groups={self.num_tp_groups}, actors_per_tp_group={self.actors_per_tp_group}")
+        logger.info(f"  GPU indices: {res.indices}, local_ranks: {res.local_ranks}")
         
         for actor_idx in range(self.num_actors):
             # Calculate the first GPU index this actor manages
@@ -257,7 +259,16 @@ class RolloutManager:
         """
         from loguru import logger
         
+        logger.info(f"[RolloutManager.init_engine] Starting SGLang engine initialization")
+        
         engine_configs = self._build_engine_configs()
+        
+        logger.info(f"  Built {len(engine_configs)} engine configs:")
+        for cfg in engine_configs:
+            logger.info(f"    Actor {cfg['actor_idx']}: tp_group={cfg['tp_group_idx']}, "
+                       f"node_rank={cfg['node_rank']}/{cfg['nnodes']}, "
+                       f"base_gpu_id={cfg['base_gpu_id']}, is_tp0={cfg['is_tp0']}, "
+                       f"dist_init_addr={cfg['dist_init_addr']}")
         
         futures = []
         for cfg in engine_configs:
