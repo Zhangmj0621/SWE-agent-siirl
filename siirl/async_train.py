@@ -61,7 +61,7 @@ class MainRunner:
 
         logger.info("MainRunner started. Beginning workflow setup...")
         start_time = time.time()
-        
+
         # === 0. Create Task Coordinator ===
         # Coordinator manages task lifecycle: graceful shutdown, failure propagation
         coordinator = create_coordinator()
@@ -94,35 +94,37 @@ class MainRunner:
         # === 3. Initialize Components (RolloutManager & TrainerGroup) ===
         rollout_manager = None
         trainer_group = None
-        
+
         try:
             logger.info(f"Initializing components: {actor_resources.num_gpus} training GPUs, {rollout_resources.num_gpus} rollout GPUs...")
             
             rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator, coordinator)
             trainer_group = TrainerGroup(config, actor_resources, data_coordinator, rollout_manager, coordinator)
-            
+
             # Initialize trainer actors (creates Trainer Ray actors with models)
             trainer_group.init_actors()
-            
+
             # Now that all Ray actors are created, we can safely configure file logging
             # (file handles won't be serialized anymore)
             set_basic_config()
-            
+
             router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
             logger.success(f"RolloutManager initialized. Router at: {router_address}")
             logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
-            
+
             init_time = time.time() - start_time
             logger.info(f"Initialization completed in {init_time:.1f}s")
 
             # === 4. Async Training Loop ===
             logger.info("Starting async training loop...")
+            rollout_manager.run_dataloader.remote()
+            ray.get(rollout_manager.next_rollout.remote())
             total_epochs = config.trainer.total_epochs
             trainer_group.train(num_epochs=total_epochs)
-            
+
             # === 5. Wait for completion or failure ===
             self._wait_for_completion(coordinator, logger)
-            
+
         except Exception as e:
             logger.error(f"Training failed with exception: {e}")
             ray.get(coordinator.report_failure.remote("main_runner", str(e)))
@@ -131,7 +133,7 @@ class MainRunner:
         finally:
             # === 6. Cleanup and summary ===
             self._cleanup_and_report(coordinator, trainer_group, rollout_manager, start_time, logger)
-    
+
     def _wait_for_completion(self, coordinator, logger, check_interval: float = 5.0):
         """
         Wait for training to complete, fail, or shutdown.
@@ -139,29 +141,29 @@ class MainRunner:
         Polls coordinator status periodically until task ends.
         """
         logger.info("Monitoring task status...")
-        
+
         while True:
             status = ray.get(coordinator.get_status.remote())
             if status != "running":
                 break
             time.sleep(check_interval)
-        
+
         # Log final status
         summary = ray.get(coordinator.get_summary.remote())
         logger.info(f"Task ended with status: {summary['status']}")
         if summary['failure_reason']:
             logger.info(f"Reason: {summary['failure_reason']}")
-    
+
     def _cleanup_and_report(self, coordinator, trainer_group, rollout_manager, start_time, logger):
         """
         Cleanup resources and report final summary.
         """
         total_time = time.time() - start_time
-        
+
         # Get final summary
         summary = ray.get(coordinator.get_summary.remote())
         events = ray.get(coordinator.get_events.remote())
-        
+
         logger.info("=" * 60)
         logger.info("TRAINING SUMMARY")
         logger.info("=" * 60)
@@ -170,15 +172,15 @@ class MainRunner:
         if summary['failure_reason']:
             logger.info(f"Reason: {summary['failure_reason']}")
         logger.info(f"Total Events: {summary['event_count']}")
-        
+
         # Log recent events for debugging
         if events:
             logger.info("Recent Events:")
             for event in events[-5:]:  # Last 5 events
                 logger.info(f"  [{event['source']}] {event['event_type']}: {event['message']}")
-        
+
         logger.info("=" * 60)
-        
+
         # Determine exit status
         if summary['status'] == "failed":
             logger.error("Training FAILED")
@@ -215,30 +217,30 @@ def main() -> None:
         # Launch the main orchestration actor and wait for it to complete.
         logger.info("Starting MainRunner actor to orchestrate the job.")
         runner = MainRunner.remote()
-        
+
         # This is a blocking call that waits for the remote `run` method to finish.
         ray.get(runner.run.remote(siirl_args))
         logger.success("MainRunner has completed its execution.")
-        
+
     except KeyboardInterrupt:
         logger.warning("Received keyboard interrupt, shutting down...")
         exit_code = 130  # Standard exit code for SIGINT
-        
+
     except Exception as e:
         logger.error(f"Training failed with error: {e}")
         exit_code = 1
-        
+
     finally:
         # Always cleanup Ray
         logger.info("Shutting down Ray cluster...")
         ray.shutdown()
         logger.info("Ray shutdown complete.")
-        
+
         if exit_code == 0:
             logger.success("Training finished successfully!")
         else:
             logger.error(f"Exiting with code {exit_code}")
-        
+
         sys.exit(exit_code)
 
 

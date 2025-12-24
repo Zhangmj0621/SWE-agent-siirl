@@ -62,7 +62,7 @@ class RolloutManager:
         self.name_prefix: str = get_random_string(length=6)
         self.config = config
         self.coordinator = coordinator  # TaskCoordinator for lifecycle management
-        
+
         # Store GPUResources for centralized access
         self.gpu_resources = gpu_resources
         self.pg = gpu_resources.pg
@@ -96,7 +96,12 @@ class RolloutManager:
             ray.remote(RolloutWorker),
             config,
         )
-        
+        # used for dataloader
+        self.total_training_steps, self.num_train_batches = ray.get(self.data_coordinator.epoch_info.remote())
+        self.start_epoch = 0
+        self.batches_to_skip = 0
+        self.event = asyncio.Event()
+        self.global_steps = 0 # need update from pre saved_checkpoint
         # Initialize workers, engines, router and start rollout
         self.init_worker()
         self.init_engine()
@@ -376,11 +381,28 @@ class RolloutManager:
     def get_router_address(self):
         """Get the router address for external access."""
         return self.router_address
-    
+
+    async def run_dataloader(self):
+        if self.num_train_batches > 0:
+            start_epoch = self.global_steps // self.num_train_batches
+            batches_to_skip = self.global_steps % self.num_train_batches
+        for epoch in range(self.start_epoch, self.config.trainer.total_epochs):
+            for batch_idx in range(self.num_train_batches):
+                if epoch == start_epoch and batch_idx < batches_to_skip:
+                    continue
+            await self.event.wait()
+            self.event.clear()
+            ray.get(self.data_coordinator.run_dataloader.remote(epoch))
+            await asyncio.sleep(1)      # 真正的异步业务
+
+    async def next_rollout(self):
+        self.event.set()
+        return self.router_address
+
     def should_stop(self) -> bool:
         """
         Check if rollout should stop based on coordinator status.
-        
+
         Returns:
             True if should stop, False otherwise
         """
@@ -390,32 +412,32 @@ class RolloutManager:
             except Exception:
                 return False
         return False
-    
+
     def report_failure(self, reason: str):
         """
         Report a failure to the coordinator.
-        
+
         Args:
             reason: Description of the failure
         """
         from loguru import logger
         logger.error(f"[RolloutManager] Failure: {reason}")
-        
+
         if self.coordinator:
             try:
                 ray.get(self.coordinator.report_failure.remote("rollout_manager", reason))
             except Exception as e:
                 logger.warning(f"[RolloutManager] Failed to report to coordinator: {e}")
-    
+
     def cleanup(self):
         """
         Clean up rollout resources: stop workers and router.
-        
+
         Should be called when shutting down gracefully.
         """
         from loguru import logger
         logger.info("[RolloutManager] Starting cleanup...")
-        
+
         # Stop all workers
         for i, worker in enumerate(self.worker_handle):
             try:
@@ -423,8 +445,8 @@ class RolloutManager:
                 logger.debug(f"[RolloutManager] Killed worker {i}")
             except Exception as e:
                 logger.warning(f"[RolloutManager] Failed to kill worker {i}: {e}")
-        
+
         self.worker_handle = []
         self.worker_urls = []
-        
+
         logger.info("[RolloutManager] Cleanup completed")

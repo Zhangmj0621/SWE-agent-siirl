@@ -110,8 +110,9 @@ class NaiveExecutor:
                 samples = [copy.deepcopy(sample) for _ in range(self.rollout_n)]
                 self.waiting_samples.extend(samples)
         new_samples = []
-        if len(self.waiting_samples):
-            for _ in range(need_replenish):
+
+        for _ in range(need_replenish): 
+            if len(self.waiting_samples):
                 new_samples.append(self.waiting_samples.popleft())
         return new_samples
     
@@ -272,7 +273,6 @@ class NaiveExecutor:
         """
         async with self.semaphore:  # Limit concurrent generations to batch size
             loop = asyncio.get_running_loop()
-            
             # 1. Preprocess sample (CPU-bound, offload to executor)
             sample = await loop.run_in_executor(
                         None, 
@@ -292,7 +292,6 @@ class NaiveExecutor:
             
             # 4. Store processed sample in Ray object store and notify data coordinator
             await self.put_data(sample = sample, loop = loop)
-            return sample
 
     async def run(self):
         """
@@ -304,7 +303,6 @@ class NaiveExecutor:
         while self.running:
             # Get new samples to replenish batch
             samples = await self.get_sample()
-            
             if not samples:
                 # No new samples - short sleep to avoid busy waiting
                 await asyncio.sleep(0.001)
