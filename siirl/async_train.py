@@ -19,7 +19,6 @@ import traceback
 import ray
 
 from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
-from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.utils.task_coordinator import create_coordinator
 from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.worker.ray_utils import allocate_resources
@@ -55,9 +54,8 @@ class MainRunner:
         Args:
             config: A SiiRLArguments object containing all parsed configurations.
         """
-        # NOTE: Do not call set_basic_config() before creating Ray actors!
-        # The file logger creates file handles that cannot be serialized by Ray.
-        # We use basic loguru logging first, then configure file logging after actors are created.
+        # NOTE: Logging is automatically configured when siirl is imported (see siirl/__init__.py)
+        # All Ray actors inherit this configuration as they import siirl modules.
         from loguru import logger
 
         logger.info("MainRunner started. Beginning workflow setup...")
@@ -104,10 +102,6 @@ class MainRunner:
 
             # Initialize trainer actors (creates Trainer Ray actors with models)
             trainer_group.init_actors()
-
-            # Now that all Ray actors are created, we can safely configure file logging
-            # (file handles won't be serialized anymore)
-            set_basic_config()
 
             router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
             logger.success(f"RolloutManager initialized. Router at: {router_address}")
