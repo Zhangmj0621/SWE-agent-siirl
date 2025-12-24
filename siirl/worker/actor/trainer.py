@@ -14,6 +14,8 @@
 
 import ray
 import time
+import os
+from loguru import logger
 from tensordict import stack
 from megatron.core import parallel_state as mpu
 
@@ -54,19 +56,33 @@ class Trainer:
         self.dp_rank = None
         self.dp_world_size = None
 
+        # Log trainer initialization info
+        node_ip = ray.util.get_node_ip_address()
+        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "not set")
+        ray_gpu_ids = ray.get_gpu_ids()
+        logger.info(f"[Trainer.__init__] rank={rank}, local_rank={local_rank}, world_size={world_size}")
+        logger.info(f"  node_ip={node_ip}, CUDA_VISIBLE_DEVICES={cuda_visible}, ray_gpu_ids={ray_gpu_ids}")
+
     def init_models(self):
+        logger.info(f"[Trainer.init_models] rank={self.rank} starting model initialization...")
+        
         self.actor_worker = ActorWorker(config=self.config.actor_ref)
         self.actor_worker.init_model()
+        logger.info(f"[Trainer.init_models] rank={self.rank} ActorWorker initialized")
 
         self.ref_worker = ReferenceWorker(config=self.config.actor_ref)
         self.ref_worker.init_model()
+        logger.info(f"[Trainer.init_models] rank={self.rank} ReferenceWorker initialized")
 
         if self.use_critic:
             self.critic_worker = CriticWorker(config=self.config.critic)
             self.critic_worker.init_model()
+            logger.info(f"[Trainer.init_models] rank={self.rank} CriticWorker initialized")
 
         self.dp_rank = mpu.get_data_parallel_rank()
         self.dp_world_size = mpu.get_data_parallel_world_size()
+        
+        logger.success(f"[Trainer.init_models] rank={self.rank} completed: dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}")
 
 
     def set_rollout_workers(self, rollout_workers):

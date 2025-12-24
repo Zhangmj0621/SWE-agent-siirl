@@ -99,9 +99,9 @@ class TrainerGroup:
                 DistributedEnv.MASTER_PORT.value: self.master_ports,
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             }
-            logger.debug(f"  Creating Trainer rank={rank}: bundle_idx={bundle_idx}, local_rank={local_rank}, "
-                        f"env={{WORLD_SIZE={self.num_gpus}, RANK={rank}, LOCAL_RANK={local_rank}, "
-                        f"MASTER_ADDR={self.master_addr}, MASTER_PORT={self.master_ports}}}")
+            logger.info(f"  Creating Trainer rank={rank}: bundle_idx={bundle_idx}, local_rank={local_rank}, "
+                       f"node_ip={self.node_ips[rank]}, env={{WORLD_SIZE={self.num_gpus}, RANK={rank}, "
+                       f"LOCAL_RANK={local_rank}, MASTER_ADDR={self.master_addr}, MASTER_PORT={self.master_ports}}}")
 
             if os.getenv('GLOO_SOCKET_IFNAME'):
                 env_vars['GLOO_SOCKET_IFNAME'] = os.getenv('GLOO_SOCKET_IFNAME')
