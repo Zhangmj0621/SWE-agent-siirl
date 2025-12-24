@@ -67,7 +67,7 @@ class NaiveExecutor:
         # Load custom reward function if configured
         if config.custom_reward_function.path:
             from siirl.utils.reward_score.custom_reward import load_custom_reward_function
-            self.reward_fn = load_custom_reward_function(config = config)
+            self.reward_fn = load_custom_reward_function(config=config)
         
         # Load rollout flow function (naive or custom)
         flow_path = config.rollout.flow_function

@@ -22,6 +22,14 @@ from .model_args import (
 )
 
 @dataclass
+class CustomRewardArguments:
+    """Configuration for custom reward function."""
+    path: Optional[str] = field(default=None, metadata={"help": "Path to custom reward function file"})
+    name: str = field(default="reward_function", metadata={"help": "Function name in the custom reward file"})
+    reward_kwargs: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Keyword arguments for reward function"})
+
+
+@dataclass
 class TrainingArguments:
     total_epochs: int = field(default=30, metadata={"help": "Total training epochs"})
     total_training_steps: Optional[int] = field(default=None, metadata={"help": "Override training steps"})
@@ -78,6 +86,7 @@ class SiiRLArguments:
     rollout: RolloutArguments = field(default_factory=RolloutArguments)
     critic: CriticArguments = field(default_factory=CriticArguments)
     trainer: TrainingArguments = field(default_factory=TrainingArguments)
+    custom_reward_function: CustomRewardArguments = field(default_factory=CustomRewardArguments)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
