@@ -15,6 +15,7 @@
 import ray
 import time
 import os
+import traceback
 from loguru import logger
 from tensordict import stack
 from megatron.core import parallel_state as mpu
@@ -162,71 +163,67 @@ class Trainer:
 
         return metrics
 
+    def _check_should_stop(self) -> bool:
+        """Check if training should stop based on coordinator signal."""
+        if not self.coordinator:
+            return False
+        try:
+            return ray.get(self.coordinator.should_stop.remote())
+        except Exception as e:
+            logger.warning(f"[Trainer rank={self.rank}] Failed to check coordinator: {e}")
+            logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
+            return False
+    
+    def _report_failure(self, error_msg: str):
+        """Report failure to coordinator."""
+        if not self.coordinator:
+            return
+        try:
+            ray.get(self.coordinator.report_failure.remote(
+                source=f"trainer_{self.rank}",
+                reason=error_msg
+            ))
+        except Exception as e:
+            logger.warning(f"[Trainer rank={self.rank}] Failed to report failure: {e}")
+            logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
+
     def train(self, batch_size: int):
         """
         Continuous training loop that processes batches as they become available.
         
         The loop checks for stop signals from TaskCoordinator and handles:
-        - Normal completion (data exhausted)
         - Graceful shutdown (coordinator signal)
         - Error propagation (reports failures to coordinator)
         """
         logger.info(f"[Trainer rank={self.rank}] Starting training loop, batch_size={batch_size}")
         
-        while True:
-            # === Check if should stop ===
-            if self.coordinator:
-                try:
-                    should_stop = ray.get(self.coordinator.should_stop.remote())
-                    if should_stop:
-                        status = ray.get(self.coordinator.get_status.remote())
-                        logger.info(f"[Trainer rank={self.rank}] Stop signal received (status={status}), exiting...")
-                        break
-                except Exception as e:
-                    logger.warning(f"[Trainer rank={self.rank}] Failed to check coordinator: {e}")
-            
-            # === Get batch data ===
-            try:
+        try:
+            while True:
+                # Check stop signal
+                if self._check_should_stop():
+                    logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
+                    break
+                
+                # Get batch data
                 batch_data = self.get_batch(batch_size)
-            except Exception as e:
-                error_msg = f"Failed to get batch: {e}"
-                logger.error(f"[Trainer rank={self.rank}] {error_msg}")
-                if self.coordinator:
-                    ray.get(self.coordinator.report_failure.remote(
-                        source=f"trainer_{self.rank}",
-                        reason=error_msg
-                    ))
-                raise
-            
-            # === Check if data exhausted ===
-            if batch_data is None:
-                logger.info(f"[Trainer rank={self.rank}] No more data available, requesting shutdown...")
-                if self.coordinator:
-                    ray.get(self.coordinator.request_shutdown.remote(
-                        reason="Training data exhausted",
-                        source=f"trainer_{self.rank}"
-                    ))
-                break
-            
-            # === Execute training step ===
-            try:
+                if batch_data is None:
+                    time.sleep(0.1)
+                    continue
+                
+                # Execute training step
                 self.train_step(batch_data)
                 self.global_step += 1
                 
                 if self.global_step % 100 == 0:
                     logger.info(f"[Trainer rank={self.rank}] Completed step {self.global_step}")
-                    
-            except Exception as e:
-                error_msg = f"Training step failed at step {self.global_step}: {e}"
-                logger.error(f"[Trainer rank={self.rank}] {error_msg}")
-                if self.coordinator:
-                    ray.get(self.coordinator.report_failure.remote(
-                        source=f"trainer_{self.rank}",
-                        reason=error_msg
-                    ))
-                raise
-            
-            # Small sleep to prevent busy waiting when data is not ready
-            time.sleep(0.01)
+                
+                time.sleep(0.01)
+                
+        except Exception as e:
+            error_msg = f"Training failed at step {self.global_step}: {e}"
+            logger.error(f"[Trainer rank={self.rank}] {error_msg}")
+            logger.error(f"[Trainer rank={self.rank}] Full traceback:\n{traceback.format_exc()}")
+            self._report_failure(error_msg)
+            raise
         
         logger.info(f"[Trainer rank={self.rank}] Training loop ended at step {self.global_step}")

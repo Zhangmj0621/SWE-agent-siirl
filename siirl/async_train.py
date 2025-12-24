@@ -15,6 +15,7 @@
 
 import sys
 import time
+import traceback
 import ray
 
 from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
@@ -124,14 +125,24 @@ class MainRunner:
 
             # === 5. Wait for completion or failure ===
             self._wait_for_completion(coordinator, logger)
+            
+            # === 6. Check final status and raise if failed ===
+            final_status = ray.get(coordinator.get_status.remote())
+            if final_status == "failed":
+                failure_reason = ray.get(coordinator.get_failure_reason.remote())
+                raise RuntimeError(f"Training failed: {failure_reason}")
 
         except Exception as e:
             logger.error(f"Training failed with exception: {e}")
-            ray.get(coordinator.report_failure.remote("main_runner", str(e)))
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
+            # Only report if not already reported (avoid duplicate reports)
+            current_status = ray.get(coordinator.get_status.remote())
+            if current_status == "running":
+                ray.get(coordinator.report_failure.remote("main_runner", str(e)))
             raise
         
         finally:
-            # === 6. Cleanup and summary ===
+            # === 7. Cleanup and summary ===
             self._cleanup_and_report(coordinator, trainer_group, rollout_manager, start_time, logger)
 
     def _wait_for_completion(self, coordinator, logger, check_interval: float = 5.0):
@@ -228,6 +239,7 @@ def main() -> None:
 
     except Exception as e:
         logger.error(f"Training failed with error: {e}")
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
         exit_code = 1
 
     finally:

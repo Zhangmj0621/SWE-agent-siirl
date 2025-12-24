@@ -17,6 +17,7 @@ import re
 import os
 import asyncio
 import multiprocessing
+import traceback
 
 from ray.util import list_named_actors
 
@@ -409,7 +410,10 @@ class RolloutManager:
         if self.coordinator:
             try:
                 return ray.get(self.coordinator.should_stop.remote())
-            except Exception:
+            except Exception as e:
+                from loguru import logger
+                logger.warning(f"[RolloutManager] Failed to check coordinator: {e}")
+                logger.warning(f"[RolloutManager] Traceback:\n{traceback.format_exc()}")
                 return False
         return False
 
@@ -428,6 +432,7 @@ class RolloutManager:
                 ray.get(self.coordinator.report_failure.remote("rollout_manager", reason))
             except Exception as e:
                 logger.warning(f"[RolloutManager] Failed to report to coordinator: {e}")
+                logger.warning(f"[RolloutManager] Traceback:\n{traceback.format_exc()}")
 
     def cleanup(self):
         """
@@ -445,6 +450,7 @@ class RolloutManager:
                 logger.debug(f"[RolloutManager] Killed worker {i}")
             except Exception as e:
                 logger.warning(f"[RolloutManager] Failed to kill worker {i}: {e}")
+                logger.warning(f"[RolloutManager] Traceback:\n{traceback.format_exc()}")
 
         self.worker_handle = []
         self.worker_urls = []
