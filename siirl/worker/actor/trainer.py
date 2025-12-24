@@ -75,7 +75,7 @@ class Trainer:
     def setup_param_sync(self):
         assert self.actor_worker is not None,"must init models first"
         assert self.rollout_workers is not None, "must set rollout workers"
-        self.param_sync = ParamSyncDistribute(config=self.actor_ref, model=self.actor_worker.actor_module, bridge=self.actor_worker.bridge)
+        self.param_sync = ParamSyncDistribute(config=self.config.actor_ref, model=self.actor_worker.actor_module, bridge=self.actor_worker.bridge)
         init_gloo_group()
         
     # @timer

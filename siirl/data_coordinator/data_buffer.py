@@ -51,6 +51,7 @@ class DataCoordinator:
         # Use a deque to store tuples of metadata and references for efficient FIFO operations
         self._sample_queue: deque[Tuple[SampleInfo, ray.ObjectRef]] = deque()
         self._put_counter = 0  # Used for round-robin buffer selection
+        self._batch_wait_log_counter = 0  # Counter to throttle "waiting for samples" logs
         self.lock = asyncio.Lock()
         loguru.logger.info("Global DataCoordinator initialized.")
         self._cache = []
@@ -130,7 +131,9 @@ class DataCoordinator:
                 return res
             if not filter_plugin:
                 if len(self._sample_queue) < batch_size * balance_partitions:
-                    loguru.logger.warning(f"Coordinator queue size ({len(self._sample_queue)}) is less than requested batch size ({batch_size}). Returning empty list.")
+                    self._batch_wait_log_counter += 1
+                    if self._batch_wait_log_counter == 1 or self._batch_wait_log_counter % 100 == 0:
+                        loguru.logger.debug(f"Buffer has {len(self._sample_queue)} samples, waiting for {batch_size * balance_partitions}... (checked {self._batch_wait_log_counter} times)")
                     return []
         
                 batch_items = []
@@ -149,6 +152,7 @@ class DataCoordinator:
                 for rank in range(balance_partitions):
                     self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
 
+                self._batch_wait_log_counter = 0  # Reset counter on successful batch
                 res = self._cache[dp_rank]
                 return res
             # With filter plugin, use O(N) filtering and reconstruction
@@ -165,7 +169,9 @@ class DataCoordinator:
                 # 2. Check if there are enough samples
                 global_batch_size = batch_size * balance_partitions
                 if len(potential_items) < global_batch_size:
-                    loguru.logger.warning(f"After filtering, {filter_plugin} coordinator has {len(potential_items)} samples, which is less than requested batch size ({global_batch_size}). Returning empty list.")
+                    self._batch_wait_log_counter += 1
+                    if self._batch_wait_log_counter == 1 or self._batch_wait_log_counter % 100 == 0:
+                        loguru.logger.debug(f"Buffer has {len(potential_items)} samples, waiting for {global_batch_size}... (checked {self._batch_wait_log_counter} times)")
                     return []
                 potential_items = potential_items[:global_batch_size]
                 # 4. Efficiently remove the selected items from the original queue
@@ -179,6 +185,7 @@ class DataCoordinator:
                     batch_refs = [item[1] for item in potential_items]
                 for rank in range(balance_partitions):
                     self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
+                self._batch_wait_log_counter = 0  # Reset counter on successful batch
                 res = self._cache[dp_rank]
                 
                 return res
