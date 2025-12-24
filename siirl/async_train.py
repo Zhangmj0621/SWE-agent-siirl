@@ -78,7 +78,13 @@ class MainRunner:
         
         # Initialize dataloader in DataCoordinator
         ray.get(data_coordinator.init_dataloader.remote(config))
-        logger.success("DataCoordinator initialized")
+        
+        # Get training info from DataCoordinator and update config
+        # NOTE: Ray actors modify their local copy of config, so we must fetch the calculated values
+        total_training_steps, batches_per_epoch = ray.get(data_coordinator.epoch_info.remote())
+        config.actor_ref.actor.optim.total_training_steps = total_training_steps
+        config.critic.optim.total_training_steps = total_training_steps
+        logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
 
         # === 3. Initialize Components (RolloutManager & TrainerGroup) ===
         if is_colocated:
@@ -107,12 +113,9 @@ class MainRunner:
         router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
         logger.success(f"RolloutManager initialized. Router at: {router_address}")
         logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
-
-        # Get training info from DataCoordinator
-        total_steps, batches_per_epoch = ray.get(data_coordinator.epoch_info.remote())
         
         init_time = time.time() - start_time
-        logger.info(f"Initialization completed in {init_time:.1f}s. {batches_per_epoch} batches per epoch")
+        logger.info(f"Initialization completed in {init_time:.1f}s")
 
         # === 4. Async Training Loop ===
         logger.info("Starting async training loop...")
