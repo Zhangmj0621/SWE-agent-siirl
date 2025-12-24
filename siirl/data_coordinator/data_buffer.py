@@ -20,6 +20,7 @@ import ray
 import loguru
 import time
 import threading
+import copy
 
 from collections import deque
 from loguru import logger
@@ -313,8 +314,11 @@ class DataCoordinator:
     # # dataloader function
     @ray.method(concurrency_group="dataloader")
     def init_dataloader(self, config: SiiRLArguments):
+        # set async factor
+        async_config = copy.deepcopy(config)
+        async_config.data.train_batch_size *= async_config.trainer.async_factor
         self.dataloader = DataLoaderNode(
-            global_config = config,
+            global_config = async_config,
             config={
                 "group_world_size": 1,
                 "group_rank": 0,

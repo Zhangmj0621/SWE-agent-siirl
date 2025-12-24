@@ -175,3 +175,4 @@ class TrainerGroup:
         futures = [trainer.update_rollout_weight.remote() for trainer in self.trainers]
         ray.get(futures)
         logger.info("Weight update completed")
+        

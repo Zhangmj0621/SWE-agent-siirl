@@ -94,7 +94,12 @@ class RolloutManager:
             ray.remote(RolloutWorker),
             config,
         )
-        
+        # used for dataloader
+        self.total_training_steps, self.num_train_batches = ray.get(self.data_coordinator.epoch_info.remote())
+        self.start_epoch = 0
+        self.batches_to_skip = 0
+        self.event = asyncio.Event()
+        self.global_steps = 0 # need update from pre saved_checkpoint
         # Initialize workers, engines, router and start rollout
         self.init_worker()
         self.init_engine()
@@ -373,4 +378,20 @@ class RolloutManager:
 
     def get_router_address(self):
         """Get the router address for external access."""
-        return self.router_address
+        return self.router_address 
+    
+    async def run_dataloader(self):
+        if self.num_train_batches > 0:
+            start_epoch = self.global_steps // self.num_train_batches
+            batches_to_skip = self.global_steps % self.num_train_batches
+        for epoch in range(self.start_epoch, self.config.trainer.total_epochs):
+            for batch_idx in range(self.num_train_batches):
+                if epoch == start_epoch and batch_idx < batches_to_skip:
+                    continue
+            await self.event.wait()
+            self.event.clear()
+            ray.get(self.data_coordinator.run_dataloader.remote(epoch))
+            await asyncio.sleep(1)      # 真正的异步业务
+    
+    async def next_rollout(self):
+        self.event.set()

@@ -102,7 +102,7 @@ class MainRunner:
             
             rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator)
             trainer_group = TrainerGroup(config, actor_resources, data_coordinator, rollout_manager)
-        
+
         # Initialize trainer actors (creates Trainer Ray actors with models)
         trainer_group.init_actors()
         
@@ -119,6 +119,8 @@ class MainRunner:
 
         # === 4. Async Training Loop ===
         logger.info("Starting async training loop...")
+        rollout_manager.run_dataloader.remote()
+        ray.get(rollout_manager.next_rollout.remote())
         total_epochs = config.trainer.total_epochs
         trainer_group.train(num_epochs=total_epochs)
         
