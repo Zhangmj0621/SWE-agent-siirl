@@ -18,18 +18,12 @@ import os
 import asyncio
 import multiprocessing
 
-from loguru import logger
 from ray.util import list_named_actors
-
-
-from sglang_router.launch_router import RouterArgs, launch_router
 
 from siirl.utils.enums import DistributedEnv
 from siirl.utils.net_utils.net import get_net_interface_ip, get_free_port
 from siirl.params.training_args import SiiRLArguments
-from siirl.worker.ray_utils import get_random_string, RayClassWithInitArgs
-from siirl.worker.rollout.rollout_worker import RolloutWorker
-from siirl.engine.rollout.sglang_engine import wait_until_ok
+from siirl.worker.ray_utils import get_random_string, RayClassWithInitArgs, GPUResources
 
 @ray.remote
 class RolloutManager:
@@ -37,26 +31,33 @@ class RolloutManager:
     Manages the lifecycle of rollout workers and SGLang router in a distributed training environment.
     Coordinates worker initialization, engine setup, router deployment, and rollout process execution.
     """
-    def __init__(self, config:SiiRLArguments, pgs, data_coordinator_handle, rollout_gpu = 8):
+    def __init__(self, config: SiiRLArguments, gpu_resources: GPUResources, data_coordinator_handle):
         """
         Initialize RolloutManager with core configuration and resources.
         
         Args:
             config: SiiRLArguments containing all training/rollout configuration parameters
-            pgs: List of Ray placement groups for distributed resource allocation
+            gpu_resources: GPUResources containing placement group and GPU indices for rollout
             data_coordinator_handle: Ray handle to data coordinator for data management
-            rollout_gpu: Total number of GPUs allocated for rollout process (default: 8)
         """
+        # Lazy imports to avoid serialization issues with file handles
+        from siirl.worker.rollout.rollout_worker import RolloutWorker
+        
         # Unique prefix for actor naming to avoid collision in distributed environment
         self.name_prefix: str = get_random_string(length=6)
         self.config = config
-        self.pgs = pgs  # Ray placement groups for resource management
-        self.rollout_gpu = rollout_gpu  # Total GPUs for rollout
+        
+        # GPU resources from allocate_resources()
+        self.pg = gpu_resources.pg  # Ray placement group
+        self.gpu_indices = gpu_resources.indices  # Allocated GPU bundle indices
+        self.rollout_gpu = gpu_resources.num_gpus  # Total GPUs for rollout
+        self.is_shared = gpu_resources.is_shared  # Whether in colocated mode
+        
         self.device_name = config.trainer.device  # Target device (e.g., "cuda")
         # Calculate number of GPUs per engine (TP size constraint)
         self.num_gpu_per_engine = min(config.rollout.tensor_model_parallel_size, config.trainer.n_gpus_per_node)
         # Total number of engine instances based on GPU allocation
-        self.num_engine = rollout_gpu // self.num_gpu_per_engine
+        self.num_engine = self.rollout_gpu // self.num_gpu_per_engine
         self.data_coordinator = data_coordinator_handle  # Handle to data coordinator actor
         
         self.router_address = None  # Address of SGLang router (ip:port)
@@ -75,34 +76,31 @@ class RolloutManager:
         
     def init_worker(self):
         """
-        Initialize RolloutWorker actors across all placement groups and GPU ranks.
-        Creates a worker instance for each GPU rank in the distributed setup.
+        Initialize RolloutWorker actors using allocated GPU bundle indices.
+        Creates a worker instance for each GPU in the allocated resources.
         """
-        rank = -1  # Global rank counter for distributed training
-        # Iterate over placement groups and local GPU ranks to create workers
-        for pg_index, placement_group in enumerate(self.pgs):
-            for local_rank in range(self.config.trainer.n_gpus_per_node):
-                rank += 1
-                worker = self._create_worker(
-                    rank=rank,
-                    local_rank = local_rank,
-                    pg_index=pg_index,
-                    placement_group=placement_group,
-                    num_gpus=0.2,  # GPU resource allocation per worker
-                    device_name=self.device_name,
-                )
-                self.worker_handle.append(worker)
+        # Iterate over allocated GPU bundle indices
+        for rank, bundle_idx in enumerate(self.gpu_indices):
+            # Calculate local rank based on bundle index and GPUs per node
+            local_rank = bundle_idx % self.config.trainer.n_gpus_per_node
+            worker = self._create_worker(
+                rank=rank,
+                local_rank=local_rank,
+                bundle_idx=bundle_idx,
+                num_gpus=0.2,  # GPU resource allocation per worker
+                device_name=self.device_name,
+            )
+            self.worker_handle.append(worker)
         
         
-    def _create_worker(self, rank, local_rank, pg_index, placement_group, num_gpus, device_name):
+    def _create_worker(self, rank, local_rank, bundle_idx, num_gpus, device_name):
         """
         Create a single RolloutWorker Ray actor with distributed environment configuration.
         
         Args:
             rank: Global distributed training rank
             local_rank: Local GPU rank on the node
-            pg_index: Index of the placement group
-            placement_group: Ray placement group for resource allocation
+            bundle_idx: Bundle index in the placement group
             num_gpus: Number of GPUs to allocate for this worker
             device_name: Target device name (e.g., "cuda")
         
@@ -127,7 +125,7 @@ class RolloutManager:
         match = re.search(r"ActorClass\(([^)]+)\)", base_class_repr)
         actor_class_name = match.group(1) if match else base_class_repr
         # Create unique actor name with prefix, class name and ranks
-        actor_name = f"{self.name_prefix}_{actor_class_name}_{pg_index}:{rank}"
+        actor_name = f"{self.name_prefix}_{actor_class_name}_bundle{bundle_idx}:rank{rank}"
         
         # --- 3. Set actor-specific configuration options ---
         self.rollout_ray_class.update_options(
@@ -138,10 +136,11 @@ class RolloutManager:
         )
 
         # --- 4. Create the Ray actor instance ---
-        logger.debug(f"Creating actor '{actor_name}' with rank {rank}.")
+        from loguru import logger
+        logger.debug(f"Creating actor '{actor_name}' with rank {rank}, bundle_idx {bundle_idx}.")
         worker = self.rollout_ray_class(
-            placement_group=placement_group, 
-            placement_group_bundle_idx=local_rank, 
+            placement_group=self.pg, 
+            placement_group_bundle_idx=bundle_idx, 
             num_gpus=num_gpus, 
             device_name=device_name
         )
@@ -216,6 +215,10 @@ class RolloutManager:
         Args:
             request_timeout: Router request timeout in seconds (default: 100)
         """
+        # Lazy imports to avoid serialization issues
+        from sglang_router.launch_router import RouterArgs, launch_router
+        from siirl.engine.rollout.sglang_engine import wait_until_ok
+        
         # Get router IP and port from config (auto-generate if not specified)
         router_ip, router_port = self.config.rollout.router_ip, self.config.rollout.router_port
         if not router_ip:
@@ -242,6 +245,7 @@ class RolloutManager:
         time.sleep(3)
         wait_until_ok(f"http://{router_address}/health", process=router_process)
         self.router_address = router_address
+        from loguru import logger
         logger.info(f"Launch Sglang Router at {self.router_address}")
         
         # Update all TP0 workers with router address
@@ -252,3 +256,12 @@ class RolloutManager:
                     worker.set_router.remote(self.router_address)
                 )
         ray.get(future)
+
+    def get_router_address(self):
+        """
+        Get the router address for external access.
+        
+        Returns:
+            Router address in ip:port format
+        """
+        return self.router_address

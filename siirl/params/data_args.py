@@ -31,6 +31,7 @@ class DataArguments:
     max_prompt_length: int = field(default=512, metadata={"help": "Max token length for prompts"})
     max_response_length: int = field(default=512, metadata={"help": "Max token length for responses"})
     train_batch_size: int = field(default=1024, metadata={"help": "Training batch size"})
+    val_batch_size: Optional[int] = field(default=None, metadata={"help": "Validation batch size. If None, uses entire validation set as one batch"})
     gen_batch_size: Optional[int] = field(default=None, metadata={"help": "Generation batch size for DAPO (typically 3x train_batch_size)"})
     return_raw_chat: bool = field(default=True, metadata={"help": "Return unprocessed chat data"})
     filter_overlong_prompts: bool = field(default=False, metadata={"help": "For large-scale dataset, filtering overlong prompts could be timeconsuming."})
