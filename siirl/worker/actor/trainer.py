@@ -39,6 +39,7 @@ class Trainer:
         world_size: int,
         use_critic: bool = False,
         data_coordinator=None,
+        coordinator=None,
     ):
         self.config = config
         self.rank = rank
@@ -46,6 +47,7 @@ class Trainer:
         self.world_size = world_size
         self.use_critic = use_critic
         self.data_coordinator = data_coordinator
+        self.coordinator = coordinator  # TaskCoordinator for lifecycle management
 
         self.rollout_manager = None
 
@@ -55,6 +57,9 @@ class Trainer:
         self.critic_worker = None
         self.dp_rank = None
         self.dp_world_size = None
+        
+        # Training state
+        self.global_step = 0
 
         # Log trainer initialization info
         node_ip = ray.util.get_node_ip_address()
@@ -158,9 +163,70 @@ class Trainer:
         return metrics
 
     def train(self, batch_size: int):
-        """Continuous training loop that processes batches as they become available."""
+        """
+        Continuous training loop that processes batches as they become available.
+        
+        The loop checks for stop signals from TaskCoordinator and handles:
+        - Normal completion (data exhausted)
+        - Graceful shutdown (coordinator signal)
+        - Error propagation (reports failures to coordinator)
+        """
+        logger.info(f"[Trainer rank={self.rank}] Starting training loop, batch_size={batch_size}")
+        
         while True:
-            batch_data = self.get_batch(batch_size)
-            if batch_data is not None:
+            # === Check if should stop ===
+            if self.coordinator:
+                try:
+                    should_stop = ray.get(self.coordinator.should_stop.remote())
+                    if should_stop:
+                        status = ray.get(self.coordinator.get_status.remote())
+                        logger.info(f"[Trainer rank={self.rank}] Stop signal received (status={status}), exiting...")
+                        break
+                except Exception as e:
+                    logger.warning(f"[Trainer rank={self.rank}] Failed to check coordinator: {e}")
+            
+            # === Get batch data ===
+            try:
+                batch_data = self.get_batch(batch_size)
+            except Exception as e:
+                error_msg = f"Failed to get batch: {e}"
+                logger.error(f"[Trainer rank={self.rank}] {error_msg}")
+                if self.coordinator:
+                    ray.get(self.coordinator.report_failure.remote(
+                        source=f"trainer_{self.rank}",
+                        reason=error_msg
+                    ))
+                raise
+            
+            # === Check if data exhausted ===
+            if batch_data is None:
+                logger.info(f"[Trainer rank={self.rank}] No more data available, requesting shutdown...")
+                if self.coordinator:
+                    ray.get(self.coordinator.request_shutdown.remote(
+                        reason="Training data exhausted",
+                        source=f"trainer_{self.rank}"
+                    ))
+                break
+            
+            # === Execute training step ===
+            try:
                 self.train_step(batch_data)
-            time.sleep(0.1)
+                self.global_step += 1
+                
+                if self.global_step % 100 == 0:
+                    logger.info(f"[Trainer rank={self.rank}] Completed step {self.global_step}")
+                    
+            except Exception as e:
+                error_msg = f"Training step failed at step {self.global_step}: {e}"
+                logger.error(f"[Trainer rank={self.rank}] {error_msg}")
+                if self.coordinator:
+                    ray.get(self.coordinator.report_failure.remote(
+                        source=f"trainer_{self.rank}",
+                        reason=error_msg
+                    ))
+                raise
+            
+            # Small sleep to prevent busy waiting when data is not ready
+            time.sleep(0.01)
+        
+        logger.info(f"[Trainer rank={self.rank}] Training loop ended at step {self.global_step}")

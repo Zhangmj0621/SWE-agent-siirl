@@ -45,7 +45,7 @@ class RolloutManager:
         - 2 SGLang processes form 1 TP group (cross-node)
     """
     
-    def __init__(self, config: SiiRLArguments, gpu_resources: GPUResources, data_coordinator_handle):
+    def __init__(self, config: SiiRLArguments, gpu_resources: GPUResources, data_coordinator_handle, coordinator=None):
         """
         Initialize RolloutManager with configuration and GPU resources.
         
@@ -54,12 +54,14 @@ class RolloutManager:
             gpu_resources: GPUResources from allocate_resources() containing
                            placement group and allocated GPU bundle indices.
             data_coordinator_handle: Ray handle to DataCoordinator for data management.
+            coordinator: Ray handle to TaskCoordinator for lifecycle management.
         """
         # Lazy imports to avoid serialization issues with file handles
         from siirl.worker.rollout.rollout_worker import RolloutWorker
         
         self.name_prefix: str = get_random_string(length=6)
         self.config = config
+        self.coordinator = coordinator  # TaskCoordinator for lifecycle management
         
         # Store GPUResources for centralized access
         self.gpu_resources = gpu_resources
@@ -374,3 +376,55 @@ class RolloutManager:
     def get_router_address(self):
         """Get the router address for external access."""
         return self.router_address
+    
+    def should_stop(self) -> bool:
+        """
+        Check if rollout should stop based on coordinator status.
+        
+        Returns:
+            True if should stop, False otherwise
+        """
+        if self.coordinator:
+            try:
+                return ray.get(self.coordinator.should_stop.remote())
+            except Exception:
+                return False
+        return False
+    
+    def report_failure(self, reason: str):
+        """
+        Report a failure to the coordinator.
+        
+        Args:
+            reason: Description of the failure
+        """
+        from loguru import logger
+        logger.error(f"[RolloutManager] Failure: {reason}")
+        
+        if self.coordinator:
+            try:
+                ray.get(self.coordinator.report_failure.remote("rollout_manager", reason))
+            except Exception as e:
+                logger.warning(f"[RolloutManager] Failed to report to coordinator: {e}")
+    
+    def cleanup(self):
+        """
+        Clean up rollout resources: stop workers and router.
+        
+        Should be called when shutting down gracefully.
+        """
+        from loguru import logger
+        logger.info("[RolloutManager] Starting cleanup...")
+        
+        # Stop all workers
+        for i, worker in enumerate(self.worker_handle):
+            try:
+                ray.kill(worker)
+                logger.debug(f"[RolloutManager] Killed worker {i}")
+            except Exception as e:
+                logger.warning(f"[RolloutManager] Failed to kill worker {i}: {e}")
+        
+        self.worker_handle = []
+        self.worker_urls = []
+        
+        logger.info("[RolloutManager] Cleanup completed")

@@ -41,6 +41,7 @@ class TrainerGroup:
         gpu_resources: GPUResources,
         data_coordinator,
         rollout_manager=None,
+        coordinator=None,
     ) -> None:
         """
         Initialize TrainerGroup with configuration and resource handles.
@@ -50,10 +51,12 @@ class TrainerGroup:
             gpu_resources: GPUResources containing placement group and GPU indices for training
             data_coordinator: Ray handle to DataCoordinator
             rollout_manager: Ray handle to RolloutManager for weight synchronization
+            coordinator: Ray handle to TaskCoordinator for lifecycle management
         """
         self.config = config
         self.data_coordinator = data_coordinator
         self.rollout_manager = rollout_manager
+        self.coordinator = coordinator
 
         # GPU resources from allocate_resources()
         self.pg = gpu_resources.pg  # Ray placement group
@@ -126,6 +129,7 @@ class TrainerGroup:
                 world_size=self.num_gpus,
                 use_critic=self.use_critic,
                 data_coordinator=self.data_coordinator,
+                coordinator=self.coordinator,
             )
 
             self.trainers.append(trainer_handle)
