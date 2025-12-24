@@ -25,50 +25,77 @@ from siirl.utils.net_utils.net import get_net_interface_ip, get_free_port
 from siirl.params.training_args import SiiRLArguments
 from siirl.worker.ray_utils import get_random_string, RayClassWithInitArgs, GPUResources
 
+
 @ray.remote
 class RolloutManager:
     """
     Manages the lifecycle of rollout workers and SGLang router in a distributed training environment.
-    Coordinates worker initialization, engine setup, router deployment, and rollout process execution.
+    
+    Key Design:
+    - Each RolloutWorker actor corresponds to one SGLang process
+    - Single-node TP: 1 actor manages tp_size GPUs
+    - Cross-node TP: 1 actor per node, each manages gpus_per_node GPUs
+    
+    Example (6 GPUs, tp_size=2):
+        - Creates 3 actors, each managing 2 GPUs
+        - 3 SGLang processes (TP groups)
+    
+    Example (16 GPUs across 2 nodes, tp_size=8):
+        - Creates 2 actors (1 per node), each managing 8 GPUs
+        - 2 SGLang processes form 1 TP group (cross-node)
     """
+    
     def __init__(self, config: SiiRLArguments, gpu_resources: GPUResources, data_coordinator_handle):
         """
-        Initialize RolloutManager with core configuration and resources.
+        Initialize RolloutManager with configuration and GPU resources.
         
         Args:
-            config: SiiRLArguments containing all training/rollout configuration parameters
-            gpu_resources: GPUResources containing placement group and GPU indices for rollout
-            data_coordinator_handle: Ray handle to data coordinator for data management
+            config: SiiRLArguments containing all training/rollout configuration.
+            gpu_resources: GPUResources from allocate_resources() containing
+                           placement group and allocated GPU bundle indices.
+            data_coordinator_handle: Ray handle to DataCoordinator for data management.
         """
         # Lazy imports to avoid serialization issues with file handles
         from siirl.worker.rollout.rollout_worker import RolloutWorker
         
-        # Unique prefix for actor naming to avoid collision in distributed environment
         self.name_prefix: str = get_random_string(length=6)
         self.config = config
         
-        # GPU resources from allocate_resources()
-        self.pg = gpu_resources.pg  # Ray placement group
-        self.gpu_indices = gpu_resources.indices  # Allocated GPU bundle indices
-        self.rollout_gpu = gpu_resources.num_gpus  # Total GPUs for rollout
-        self.is_shared = gpu_resources.is_shared  # Whether in colocated mode
+        # Store GPUResources for centralized access
+        self.gpu_resources = gpu_resources
+        self.pg = gpu_resources.pg
+        self.rollout_gpu = gpu_resources.num_gpus
         
-        self.device_name = config.trainer.device  # Target device (e.g., "cuda")
-        # Calculate number of GPUs per engine (TP size constraint)
-        self.num_gpu_per_engine = min(config.rollout.tensor_model_parallel_size, config.trainer.n_gpus_per_node)
-        # Total number of engine instances based on GPU allocation
-        self.num_engine = self.rollout_gpu // self.num_gpu_per_engine
-        self.data_coordinator = data_coordinator_handle  # Handle to data coordinator actor
+        self.device_name = config.trainer.device
+        self.tp_size = config.rollout.tensor_model_parallel_size
+        self.n_gpus_per_node = config.trainer.n_gpus_per_node
         
-        self.router_address = None  # Address of SGLang router (ip:port)
-        self.worker_handle = []  # List of Ray actor handles for RolloutWorkers
-        self.worker_urls = []  # List of worker URLs for router configuration
+        # === Key metrics for actor/engine management ===
+        # GPUs managed by each actor (capped at node boundary)
+        self.gpus_per_actor = min(self.tp_size, self.n_gpus_per_node)
+        # Total number of RolloutWorker actors to create
+        self.num_actors = self.rollout_gpu // self.gpus_per_actor
+        # Number of TP groups (logical inference engines)
+        self.num_tp_groups = self.rollout_gpu // self.tp_size
+        # Number of actors per TP group (>1 for cross-node TP)
+        self.actors_per_tp_group = self.tp_size // self.gpus_per_actor
+        
+        self.data_coordinator = data_coordinator_handle
+        
+        self.router_address = None
+        self.worker_handle = []
+        self.worker_urls = []
+        
+        # Cache for dist_init_addr (used in cross-node TP)
+        self._dist_init_addrs = {}
+        
         # Initialize Ray-wrapped RolloutWorker class with configuration
         self.rollout_ray_class = RayClassWithInitArgs(
             ray.remote(RolloutWorker),
             config,
-        ) 
-        # Initialize worker nodes, engines, router and start rollout process
+        )
+        
+        # Initialize workers, engines, router and start rollout
         self.init_worker()
         self.init_engine()
         self.start_router()
@@ -76,68 +103,79 @@ class RolloutManager:
         
     def init_worker(self):
         """
-        Initialize RolloutWorker actors using allocated GPU bundle indices.
-        Creates a worker instance for each GPU in the allocated resources.
+        Initialize RolloutWorker actors.
+        
+        Creates one actor per SGLang process:
+        - Single-node TP: num_actors = rollout_gpu / tp_size
+        - Cross-node TP: num_actors = rollout_gpu / min(tp_size, gpus_per_node)
+        
+        Each actor is placed on the first GPU bundle it manages.
         """
-        # Iterate over allocated GPU bundle indices
-        for rank, bundle_idx in enumerate(self.gpu_indices):
-            # Calculate local rank based on bundle index and GPUs per node
-            local_rank = bundle_idx % self.config.trainer.n_gpus_per_node
+        from loguru import logger
+        
+        res = self.gpu_resources
+        
+        logger.info(f"Creating {self.num_actors} RolloutWorker actors "
+                    f"(rollout_gpu={self.rollout_gpu}, tp_size={self.tp_size}, "
+                    f"gpus_per_actor={self.gpus_per_actor})")
+        
+        for actor_idx in range(self.num_actors):
+            # Calculate the first GPU index this actor manages
+            first_gpu_idx = actor_idx * self.gpus_per_actor
+            bundle_idx = res.indices[first_gpu_idx]
+            local_rank = res.local_ranks[first_gpu_idx]
+            
             worker = self._create_worker(
-                rank=rank,
+                rank=actor_idx,
                 local_rank=local_rank,
                 bundle_idx=bundle_idx,
-                num_gpus=0.2,  # GPU resource allocation per worker
+                num_gpus=0.2,  # Fractional GPU for Ray scheduling
                 device_name=self.device_name,
             )
             self.worker_handle.append(worker)
-        
+            
+            logger.debug(f"Actor {actor_idx}: bundle_idx={bundle_idx}, "
+                         f"local_rank={local_rank}, manages GPUs [{first_gpu_idx}:{first_gpu_idx + self.gpus_per_actor}]")
         
     def _create_worker(self, rank, local_rank, bundle_idx, num_gpus, device_name):
         """
-        Create a single RolloutWorker Ray actor with distributed environment configuration.
+        Create a single RolloutWorker Ray actor.
         
         Args:
-            rank: Global distributed training rank
-            local_rank: Local GPU rank on the node
+            rank: Actor index (0 to num_actors-1)
+            local_rank: Local GPU rank on the node (for env vars)
             bundle_idx: Bundle index in the placement group
-            num_gpus: Number of GPUs to allocate for this worker
+            num_gpus: Fractional GPU allocation for Ray scheduling
             device_name: Target device name (e.g., "cuda")
         
         Returns:
             Ray actor handle to the created RolloutWorker instance
         """
-        # --- 1. Set distributed environment variables ---
+        # Set distributed environment variables
         env_vars = {
-            DistributedEnv.WORLD_SIZE.value: str(self.rollout_gpu),  # Total number of GPUs in rollout cluster
-            DistributedEnv.RANK.value: str(rank),  # Global rank
-            DistributedEnv.LOCAL_RANK.value: str(local_rank),  # Local rank on node
-            DistributedEnv.WG_PREFIX.value: self.name_prefix,  # Unique prefix for worker group
-            "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",  # Preserve CUDA device visibility
+            DistributedEnv.WORLD_SIZE.value: str(self.num_actors),
+            DistributedEnv.RANK.value: str(rank),
+            DistributedEnv.LOCAL_RANK.value: str(local_rank),
+            DistributedEnv.WG_PREFIX.value: self.name_prefix,
+            "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
         }
-        # Pass through GLOO network interface configuration if present
         if os.getenv('GLOO_SOCKET_IFNAME'):
             env_vars['GLOO_SOCKET_IFNAME'] = os.getenv('GLOO_SOCKET_IFNAME')
 
-        # --- 2. Generate a unique and descriptive actor name ---
-        # Extract base class name from Ray actor representation
-        base_class_repr = type(self.rollout_ray_class.cls).__name__  # e.g., "ActorClass(DAGWorker)"
+        # Generate unique actor name
+        base_class_repr = type(self.rollout_ray_class.cls).__name__
         match = re.search(r"ActorClass\(([^)]+)\)", base_class_repr)
         actor_class_name = match.group(1) if match else base_class_repr
-        # Create unique actor name with prefix, class name and ranks
-        actor_name = f"{self.name_prefix}_{actor_class_name}_bundle{bundle_idx}:rank{rank}"
+        actor_name = f"{self.name_prefix}_{actor_class_name}_actor{rank}_bundle{bundle_idx}"
         
-        # --- 3. Set actor-specific configuration options ---
-        self.rollout_ray_class.update_options(
-            {
-                "runtime_env": {"env_vars": env_vars},  # Set distributed env vars
-                "name": actor_name,  # Assign unique actor name
-            }
-        )
+        self.rollout_ray_class.update_options({
+            "runtime_env": {"env_vars": env_vars},
+            "name": actor_name,
+        })
 
-        # --- 4. Create the Ray actor instance ---
         from loguru import logger
-        logger.debug(f"Creating actor '{actor_name}' with rank {rank}, bundle_idx {bundle_idx}.")
+        logger.debug(f"Creating actor '{actor_name}'")
+        
         worker = self.rollout_ray_class(
             placement_group=self.pg, 
             placement_group_bundle_idx=bundle_idx, 
@@ -146,122 +184,182 @@ class RolloutManager:
         )
         return worker
         
+    def _build_engine_configs(self) -> list:
+        """
+        Build configuration for each SGLang process.
+        
+        Each actor corresponds to one SGLang process. For cross-node TP,
+        multiple actors (one per node) form a single TP group with shared dist_init_addr.
+        
+        Returns:
+            List of dicts, one per actor:
+            {
+                "actor_idx": int,
+                "tp_group_idx": int,
+                "base_gpu_id": int,
+                "node_rank": int,
+                "nnodes": int,
+                "dist_init_addr": str | None,
+                "is_tp0": bool,
+            }
+        """
+        from loguru import logger
+        
+        configs = []
+        res = self.gpu_resources
+        
+        for actor_idx in range(self.num_actors):
+            # Determine which TP group this actor belongs to
+            tp_group_idx = actor_idx // self.actors_per_tp_group
+            # Determine node_rank within the TP group
+            node_rank = actor_idx % self.actors_per_tp_group
+            nnodes = self.actors_per_tp_group
+            
+            # Get base_gpu_id from GPUResources
+            first_gpu_idx = actor_idx * self.gpus_per_actor
+            base_gpu_id = res.local_ranks[first_gpu_idx]
+            
+            # Handle dist_init_addr for cross-node TP
+            if nnodes > 1:
+                if node_rank == 0:
+                    # First actor in TP group: generate and cache dist_init_addr
+                    dist_init_addr = ray.get(self.worker_handle[actor_idx].get_ip_port.remote())
+                    self._dist_init_addrs[tp_group_idx] = dist_init_addr
+                    logger.info(f"TP Group {tp_group_idx}: Cross-node TP with {nnodes} nodes, "
+                                f"dist_init_addr={dist_init_addr}")
+                else:
+                    # Other actors in TP group: use cached dist_init_addr
+                    dist_init_addr = self._dist_init_addrs[tp_group_idx]
+            else:
+                dist_init_addr = None
+            
+            configs.append({
+                "actor_idx": actor_idx,
+                "tp_group_idx": tp_group_idx,
+                "base_gpu_id": base_gpu_id,
+                "node_rank": node_rank,
+                "nnodes": nnodes,
+                "dist_init_addr": dist_init_addr,
+                "is_tp0": (node_rank == 0),  # Only node_rank=0 registers with router
+            })
+            
+            logger.debug(f"Actor {actor_idx}: tp_group={tp_group_idx}, node_rank={node_rank}, "
+                         f"nnodes={nnodes}, base_gpu_id={base_gpu_id}, is_tp0={node_rank == 0}")
+        
+        return configs
+
     def init_engine(self):
         """
-        Initialize SGLang engine instances on RolloutWorkers with distributed configuration.
-        Configures tensor parallelism (TP), data parallelism (DP) and distributed communication addresses.
+        Initialize SGLang engine on each RolloutWorker actor.
+        
+        Each actor starts one SGLang process. For cross-node TP,
+        actors in the same TP group share dist_init_addr and coordinate via NCCL.
         """
-        # Default rollout worker starts at GPU0 of each node
-        tp_size = self.config.rollout.tensor_model_parallel_size  # Tensor parallelism size
-        dp_size = self.rollout_gpu // self.config.rollout.tensor_model_parallel_size  # Data parallelism size
-        pp_size = 1  # Pipeline parallelism (not used in current setup)
+        from loguru import logger
         
-        # Prepare distributed initialization addresses for cross-node TP communication
-        dist_init_addr = []
-        # Need cross-node TP init address when TP size exceeds GPUs per node
-        if tp_size > self.config.trainer.n_gpus_per_node:
-            for dp_rank in range(dp_size):
-                # Get IP:port from TP0 worker of each DP group
-                dist_init_addr.append(ray.get(self.worker_handle[dp_rank * tp_size].get_ip_port.remote()))
-        else:
-            # No cross-node TP needed, use None for all DP ranks
-            dist_init_addr = [None] * dp_size        
+        engine_configs = self._build_engine_configs()
         
-        # Asynchronously initialize engines on workers
-        future = []
-        for rank, worker in enumerate(self.worker_handle):
-            # Only initialize engine on TP0 workers (SGLang requirement)
-            if rank % self.config.rollout.tensor_model_parallel_size == 0 or rank % self.config.trainer.n_gpus_per_node == 0:
-                # Get network configuration from worker
-                ip = ray.get(worker.get_ip.remote())
-                port = ray.get(worker.get_free_port.remote())
-                nccl_port = ray.get(worker.get_free_port.remote())
-                future.append(
-                    worker.init_engine.remote(rank, dist_init_addr[rank // tp_size], ip, port, nccl_port)
-                )
-                # Record worker URL for router configuration
+        futures = []
+        for cfg in engine_configs:
+            worker = self.worker_handle[cfg["actor_idx"]]
+            
+            # Get network configuration from worker
+            ip = ray.get(worker.get_ip.remote())
+            port = ray.get(worker.get_free_port.remote())
+            nccl_port = ray.get(worker.get_free_port.remote())
+            
+            future = worker.init_engine.remote(
+                rank=cfg["actor_idx"],
+                dist_init_addr=cfg["dist_init_addr"],
+                ip=ip,
+                port=port,
+                nccl_port=nccl_port,
+                base_gpu_id=cfg["base_gpu_id"],
+                node_rank=cfg["node_rank"],
+                nnodes=cfg["nnodes"],
+            )
+            futures.append(future)
+            
+            # Only TP0 (node_rank=0) registers with router
+            if cfg["is_tp0"]:
                 self.worker_urls.append(f"http://{ip}:{port}")
-        # Wait for all engine initialization to complete
-        ray.get(future)
+        
+        ray.get(futures)
+        logger.info(f"Initialized {self.num_actors} SGLang processes "
+                    f"({self.num_tp_groups} TP groups, {len(self.worker_urls)} router endpoints)")
 
     def get_rollout_worker_on_tp0(self):
+        """
+        Get RolloutWorker handles for TP0 actors only.
+        
+        These are the actors with node_rank=0 in their TP group,
+        responsible for serving inference requests.
+        
+        Returns:
+            List of Ray actor handles for TP0 RolloutWorkers.
+        """
         result = []
-        for rank, worker in enumerate(self.worker_handle):
-            # Only initialize engine on TP0 workers (SGLang requirement)
-            if rank % self.config.rollout.tensor_model_parallel_size == 0 or rank % self.config.trainer.n_gpus_per_node == 0: 
-                result.append(worker)
+        for actor_idx in range(self.num_actors):
+            # TP0 actors have actor_idx divisible by actors_per_tp_group
+            if actor_idx % self.actors_per_tp_group == 0:
+                result.append(self.worker_handle[actor_idx])
         return result
 
     def start_rollout(self):
         """
-        Start the rollout process on all TP0 RolloutWorker instances.
-        Triggers async rollout execution in background threads on workers.
+        Start the rollout process on TP0 RolloutWorker actors.
+        Only TP0 actors run the executor; other actors only participate in TP communication.
         """
-        future = []
-        for rank, worker in enumerate(self.worker_handle):
-            # Only start rollout on TP0 workers (SGLang engine leaders)
-            if rank % self.config.rollout.tensor_model_parallel_size == 0:
-                future.append(
-                    worker.start_rollout.remote(self.router_address, self.data_coordinator, self.num_engine)
+        futures = []
+        for actor_idx in range(self.num_actors):
+            if actor_idx % self.actors_per_tp_group == 0:
+                futures.append(
+                    self.worker_handle[actor_idx].start_rollout.remote(
+                        self.router_address, self.data_coordinator, self.num_tp_groups
+                    )
                 )
-        # Wait for all rollout processes to start
-        ray.get(future)
+        ray.get(futures)
         
     def start_router(self, request_timeout: int = 3600):
         """
         Start SGLang router process and configure it with worker URLs.
-        Performs health check to ensure router is operational before proceeding.
-        
-        Args:
-            request_timeout: Router request timeout in seconds (default: 100)
         """
-        # Lazy imports to avoid serialization issues
         from sglang_router.launch_router import RouterArgs, launch_router
         from siirl.engine.rollout.sglang_engine import wait_until_ok
         
-        # Get router IP and port from config (auto-generate if not specified)
-        router_ip, router_port = self.config.rollout.router_ip, self.config.rollout.router_port
-        if not router_ip:
-            router_ip = get_net_interface_ip()  # Auto-detect local IP
-        if not router_port:
-            router_port = get_free_port(router_ip)  # Find free port
+        router_ip = self.config.rollout.router_ip or get_net_interface_ip()
+        router_port = self.config.rollout.router_port or get_free_port(router_ip)
         router_address = f"{router_ip}:{router_port}"
         
-        # Configure router arguments
         router_args = RouterArgs(
             host=router_ip,
             port=router_port,
-            worker_urls=self.worker_urls,  # List of rollout worker URLs
-            balance_abs_threshold=0,  # Load balancing threshold
-            log_level="warn",  # Router log level
-            request_timeout_secs=3600,  # Request timeout
+            worker_urls=self.worker_urls,
+            balance_abs_threshold=0,
+            log_level="warn",
+            request_timeout_secs=3600,
         )
-        # Start router in separate process
+        
         router_process = multiprocessing.Process(target=launch_router, args=(router_args,))
-        router_process.daemon = True  # Set as daemon to exit with main process
+        router_process.daemon = True
         router_process.start()
         
-        # Wait for router to become healthy (3 second initial delay)
         time.sleep(3)
         wait_until_ok(f"http://{router_address}/health", process=router_process)
         self.router_address = router_address
-        from loguru import logger
-        logger.info(f"Launch Sglang Router at {self.router_address}")
         
-        # Update all TP0 workers with router address
-        future = []
-        for rank, worker in enumerate(self.worker_handle):
-            if rank % self.config.rollout.tensor_model_parallel_size == 0:
-                future.append(
-                    worker.set_router.remote(self.router_address)
+        from loguru import logger
+        logger.info(f"Launch SGLang Router at {self.router_address}")
+        
+        # Update TP0 workers with router address
+        futures = []
+        for actor_idx in range(self.num_actors):
+            if actor_idx % self.actors_per_tp_group == 0:
+                futures.append(
+                    self.worker_handle[actor_idx].set_router.remote(self.router_address)
                 )
-        ray.get(future)
+        ray.get(futures)
 
     def get_router_address(self):
-        """
-        Get the router address for external access.
-        
-        Returns:
-            Router address in ip:port format
-        """
+        """Get the router address for external access."""
         return self.router_address

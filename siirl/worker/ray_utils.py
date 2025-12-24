@@ -116,73 +116,32 @@ class GPUResources:
     GPU resource allocation result - a simple and intuitive data structure.
     
     Attributes:
-        pg: Ray placement group
-        indices: List of allocated GPU bundle indices
-        num_gpus: Number of GPUs
-        is_shared: Whether in colocated mode
+        pg: Ray placement group for resource scheduling.
+        indices: List of allocated GPU bundle indices within the placement group.
+        local_ranks: List of local GPU ranks (CUDA device IDs) for each bundle.
+        node_ips: List of node IP addresses for each bundle.
+        num_gpus: Total number of GPUs allocated.
+        is_shared: Whether in colocated mode (training and rollout share GPUs).
     
     Example:
         resources = allocate_resources(config)
-        actor_res = resources["actor"]  # GPUResources(2 GPUs, exclusive)
-        rollout_res = resources["rollout"]  # GPUResources(6 GPUs, exclusive)
+        actor_res = resources["actor"]    # GPUResources(2 GPUs, exclusive)
+        rollout_res = resources["rollout"] # GPUResources(6 GPUs, exclusive)
+        
+        # Access bundle index and local rank together:
+        for rank, (bundle_idx, local_rank) in enumerate(zip(res.indices, res.local_ranks)):
+            ...
     """
     pg: PlacementGroup
     indices: List[int]
+    local_ranks: List[int]  # Local GPU IDs (CUDA device) for each bundle
+    node_ips: List[str]     # Node IP addresses for each bundle
     num_gpus: int
     is_shared: bool = False
     
     def __repr__(self):
         mode = "shared" if self.is_shared else "exclusive"
         return f"GPUResources({self.num_gpus} GPUs, {mode})"
-    
-    # === Reserved interfaces for colocated mode ===
-    
-    def request_exclusive(self, role: str) -> '_NoOpContext':
-        """
-        Request exclusive access (time-slicing for colocated mode).
-        
-        Args:
-            role: Role name ("actor" or "rollout")
-            
-        Returns:
-            Context manager for use with 'with' statement
-        """
-        if not self.is_shared:
-            return _NoOpContext()
-        # TODO: Implement colocated lock
-        return _NoOpContext()
-    
-    def offload(self, role: str) -> None:
-        """
-        Offload model to CPU (memory management for colocated mode).
-        
-        Args:
-            role: Role name
-        """
-        if not self.is_shared:
-            return
-        # TODO: Implement offload
-        pass
-    
-    def onload(self, role: str) -> None:
-        """
-        Load model to GPU (memory management for colocated mode).
-        
-        Args:
-            role: Role name
-        """
-        if not self.is_shared:
-            return
-        # TODO: Implement onload
-        pass
-
-
-class _NoOpContext:
-    """No-op context manager (used in separated mode)."""
-    def __enter__(self):
-        return self
-    def __exit__(self, *args):
-        return False
 
 
 def allocate_resources(config: SiiRLArguments) -> Dict[str, GPUResources]:
@@ -222,7 +181,7 @@ def _allocate_separated(config: SiiRLArguments) -> Dict[str, GPUResources]:
     Separated mode: Training and inference use different GPUs.
     
     Args:
-        config: SiiRLArguments configuration object
+        config: SiiRLArguments configuration object.
         
     Returns:
         {"actor": GPUResources, "rollout": GPUResources}
@@ -235,30 +194,41 @@ def _allocate_separated(config: SiiRLArguments) -> Dict[str, GPUResources]:
     rollout_gpus = cfg.rollout_gpus
     total_gpus = actor_gpus + rollout_gpus
     
-    logger.info(f"Allocating resources (separated mode): {actor_gpus} GPUs for training, {rollout_gpus} GPUs for rollout")
+    logger.info(f"Allocating resources (separated mode): "
+                f"{actor_gpus} GPUs for training, {rollout_gpus} GPUs for rollout")
     
     # Determine device type
     device = "GPU" if cfg.device == "cuda" else "NPU"
     
-    # Create placement group
+    # Create a single placement group containing all GPUs
     bundles = [{"CPU": 1, device: 1} for _ in range(total_gpus)]
     pg_name = f"siirl_resources_{get_random_string(6)}"
     pg = placement_group(bundles, strategy="PACK", name=pg_name)
     ray.get(pg.ready())
     
-    # Sort by node and GPU ID
-    sorted_indices = _sort_by_node(pg, total_gpus)
+    # Sort bundle indices by node IP and GPU ID for consistency
+    sorted_indices, local_ranks, node_ips = _sort_by_node(pg, total_gpus)
     
-    # Allocate to different roles
+    # Allocate indices and local_ranks to different roles
     actor_indices = sorted_indices[:actor_gpus]
+    actor_local_ranks = local_ranks[:actor_gpus]
+    actor_node_ips = node_ips[:actor_gpus]
     rollout_indices = sorted_indices[actor_gpus:]
+    rollout_local_ranks = local_ranks[actor_gpus:]
+    rollout_node_ips = node_ips[actor_gpus:]
     
-    logger.info(f"  Actor GPUs: bundle indices {actor_indices}")
-    logger.info(f"  Rollout GPUs: bundle indices {rollout_indices}")
+    logger.info(f"  Actor GPUs: bundle indices {actor_indices}, local_ranks {actor_local_ranks}")
+    logger.info(f"  Rollout GPUs: bundle indices {rollout_indices}, local_ranks {rollout_local_ranks}")
     
     return {
-        "actor": GPUResources(pg=pg, indices=actor_indices, num_gpus=actor_gpus, is_shared=False),
-        "rollout": GPUResources(pg=pg, indices=rollout_indices, num_gpus=rollout_gpus, is_shared=False),
+        "actor": GPUResources(
+            pg=pg, indices=actor_indices, local_ranks=actor_local_ranks,
+            node_ips=actor_node_ips, num_gpus=actor_gpus, is_shared=False
+        ),
+        "rollout": GPUResources(
+            pg=pg, indices=rollout_indices, local_ranks=rollout_local_ranks,
+            node_ips=rollout_node_ips, num_gpus=rollout_gpus, is_shared=False
+        ),
     }
 
 
@@ -267,7 +237,7 @@ def _allocate_colocated(config: SiiRLArguments) -> Dict[str, GPUResources]:
     Colocated mode: Training and inference share the same GPUs.
     
     Args:
-        config: SiiRLArguments configuration object
+        config: SiiRLArguments configuration object.
         
     Returns:
         {"shared": GPUResources}
@@ -276,40 +246,50 @@ def _allocate_colocated(config: SiiRLArguments) -> Dict[str, GPUResources]:
     
     cfg = config.trainer
     
-    # In colocated mode, use actor_gpus or default to all GPUs
+    # In colocated mode, use actor_gpus or default to all available GPUs
     total_gpus = cfg.actor_gpus if cfg.actor_gpus > 0 else (cfg.nnodes * cfg.n_gpus_per_node)
     
-    logger.info(f"Allocating resources (colocated mode): {total_gpus} GPUs shared between training and rollout")
+    logger.info(f"Allocating resources (colocated mode): "
+                f"{total_gpus} GPUs shared between training and rollout")
     
     # Determine device type
     device = "GPU" if cfg.device == "cuda" else "NPU"
     
-    # Create placement group (colocated mode allocates more CPU)
+    # Colocated mode allocates more CPU per bundle for concurrent operations
     bundles = [{"CPU": 2, device: 1} for _ in range(total_gpus)]
     pg_name = f"siirl_shared_{get_random_string(6)}"
     pg = placement_group(bundles, strategy="PACK", name=pg_name)
     ray.get(pg.ready())
     
-    # Sort by node and GPU ID
-    sorted_indices = _sort_by_node(pg, total_gpus)
+    # Sort bundle indices by node IP and GPU ID for consistency
+    sorted_indices, local_ranks, node_ips = _sort_by_node(pg, total_gpus)
     
-    logger.info(f"  Shared GPUs: bundle indices {sorted_indices}")
+    logger.info(f"  Shared GPUs: bundle indices {sorted_indices}, local_ranks {local_ranks}")
     
     return {
-        "shared": GPUResources(pg=pg, indices=sorted_indices, num_gpus=total_gpus, is_shared=True),
+        "shared": GPUResources(
+            pg=pg, indices=sorted_indices, local_ranks=local_ranks,
+            node_ips=node_ips, num_gpus=total_gpus, is_shared=True
+        ),
     }
 
 
-def _sort_by_node(pg: PlacementGroup, num_bundles: int) -> List[int]:
+def _sort_by_node(pg: PlacementGroup, num_bundles: int) -> Tuple[List[int], List[int], List[str]]:
     """
     Sort bundle indices by node IP and GPU ID to ensure consistency across runs.
     
+    This ensures that rank assignment is deterministic when resuming from checkpoints,
+    even if the Ray cluster is restarted.
+    
     Args:
-        pg: Ray placement group
-        num_bundles: Number of bundles
+        pg: Ray placement group.
+        num_bundles: Number of bundles in the placement group.
         
     Returns:
-        Sorted list of bundle indices
+        Tuple of (sorted_indices, local_ranks, node_ips):
+        - sorted_indices: List of bundle indices sorted by (node_ip, gpu_id)
+        - local_ranks: List of local GPU IDs (CUDA device) for each bundle
+        - node_ips: List of node IP addresses for each bundle
     """
     @ray.remote(num_cpus=0.01)
     class _InfoActor:
@@ -332,14 +312,15 @@ def _sort_by_node(pg: PlacementGroup, num_bundles: int) -> List[int]:
     for a in actors:
         ray.kill(a)
     
-    # Sort by (IP, GPU_ID)
+    # Build index list with (bundle_idx, ip, gpu_id)
     indexed = []
     for i in range(num_bundles):
         ip = infos[i][0]
         gpu_ids = infos[i][1]
-        gpu_id = gpu_ids[0] if gpu_ids else 0
+        gpu_id = int(gpu_ids[0]) if gpu_ids else 0
         indexed.append((i, ip, gpu_id))
     
+    # Sort by (IP as tuple of ints, GPU ID)
     def sort_key(x):
         idx, ip, gpu_id = x
         ip_parts = list(map(int, ip.split(".")))
@@ -347,4 +328,8 @@ def _sort_by_node(pg: PlacementGroup, num_bundles: int) -> List[int]:
     
     indexed.sort(key=sort_key)
     
-    return [x[0] for x in indexed]
+    sorted_indices = [x[0] for x in indexed]
+    local_ranks = [x[2] for x in indexed]  # GPU IDs as local ranks
+    node_ips = [x[1] for x in indexed]     # Node IPs for each bundle
+    
+    return sorted_indices, local_ranks, node_ips

@@ -58,6 +58,8 @@ class TrainerGroup:
         # GPU resources from allocate_resources()
         self.pg = gpu_resources.pg  # Ray placement group
         self.gpu_indices = gpu_resources.indices  # Allocated GPU bundle indices
+        self.local_ranks = gpu_resources.local_ranks  # Local GPU IDs for each bundle
+        self.node_ips = gpu_resources.node_ips  # Node IPs for each bundle
         self.num_gpus = gpu_resources.num_gpus  # Total GPUs for training
         self.is_shared = gpu_resources.is_shared  # Whether in colocated mode
 
@@ -81,15 +83,10 @@ class TrainerGroup:
         """
         Initialize trainers by creating Trainer instances and wrapping them as Ray Actors.
         Each Trainer manages its own actor, ref, and optionally critic models.
-        Uses GPU bundle indices from allocated GPUResources.
+        Uses GPU bundle indices and local_ranks from allocated GPUResources for precise GPU assignment.
         """
-        n_gpus_per_node = self.config.trainer.n_gpus_per_node
-
-        # Iterate over allocated GPU bundle indices
-        for rank, bundle_idx in enumerate(self.gpu_indices):
-            # Calculate local rank based on bundle index and GPUs per node
-            local_rank = bundle_idx % n_gpus_per_node
-
+        # Iterate over allocated GPU bundle indices and their local ranks
+        for rank, (bundle_idx, local_rank) in enumerate(zip(self.gpu_indices, self.local_ranks)):
             env_vars = {
                 DistributedEnv.WORLD_SIZE.value: str(self.num_gpus),
                 DistributedEnv.RANK.value: str(rank),
