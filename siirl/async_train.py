@@ -119,8 +119,7 @@ class MainRunner:
             logger.info("Starting async training loop...")
             rollout_manager.run_dataloader.remote()
             ray.get(rollout_manager.next_rollout.remote())
-            total_epochs = config.trainer.total_epochs
-            trainer_group.train(num_epochs=total_epochs)
+            trainer_group.train()
 
             # === 5. Wait for completion or failure ===
             self._wait_for_completion(coordinator, logger)
