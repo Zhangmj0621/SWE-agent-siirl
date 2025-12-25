@@ -15,6 +15,8 @@
 import ray
 import os
 from loguru import logger
+from typing import List, Optional
+from ray.actor import ActorHandle
 from typing import List
 
 from siirl.params.training_args import SiiRLArguments
@@ -42,6 +44,7 @@ class TrainerGroup:
         data_coordinator,
         rollout_manager=None,
         coordinator=None,
+        metric_worker: Optional[ActorHandle] = None,
     ) -> None:
         """
         Initialize TrainerGroup with configuration and resource handles.
@@ -52,11 +55,13 @@ class TrainerGroup:
             data_coordinator: Ray handle to DataCoordinator
             rollout_manager: Ray handle to RolloutManager for weight synchronization
             coordinator: Ray handle to TaskCoordinator for lifecycle management
+            metric_worker: Ray handle to MetricWorker for distributed metrics collection
         """
         self.config = config
         self.data_coordinator = data_coordinator
         self.rollout_manager = rollout_manager
         self.coordinator = coordinator
+        self.metric_worker = metric_worker
 
         # GPU resources from allocate_resources()
         self.pg = gpu_resources.pg  # Ray placement group
@@ -130,7 +135,8 @@ class TrainerGroup:
                 use_critic=self.use_critic,
                 data_coordinator=self.data_coordinator,
                 coordinator=self.coordinator,
-                rollout_manager = self.rollout_manager,
+                rollout_manager=self.rollout_manager,
+                metric_worker=self.metric_worker,
             )
 
             self.trainers.append(trainer_handle)
@@ -160,6 +166,8 @@ class TrainerGroup:
     def train(self):
         """
         Execute training loop.
+
+        MetricTracker is created inside each Trainer (only rank=0 creates one).
         """
         batch_size = self.config.data.train_batch_size * self.config.rollout.n 
         futures = [trainer.train.remote(batch_size) for trainer in self.trainers]
