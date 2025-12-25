@@ -80,6 +80,10 @@ class Trainer:
         self.critic_worker = None
         self.dp_rank = None
         self.dp_world_size = None
+        self.tp_rank = None
+        self.pp_rank = None
+        self.should_submit_metrics = False  # Will be set in init_models()
+
         self.checkpoint_manager = None
 
         # Training state
@@ -110,6 +114,13 @@ class Trainer:
 
         self.dp_rank = mpu.get_data_parallel_rank()
         self.dp_world_size = mpu.get_data_parallel_world_size()
+        self.tp_rank = mpu.get_tensor_model_parallel_rank()
+        self.pp_rank = mpu.get_pipeline_model_parallel_rank()
+
+        # Only TP rank 0 and PP rank 0 should submit metrics (same as siiRL-github)
+        # This avoids duplicate metrics submission from TP/PP groups
+        self.should_submit_metrics = (self.tp_rank == 0 and self.pp_rank == 0)
+
 
         self.checkpoint_manager = CheckpointManager(
             config=self.config,
@@ -127,9 +138,9 @@ class Trainer:
         # Initialize MetricTracker only on rank=0 (global rank, same as siiRL-github)
         if self.rank == 0:
             self._init_tracker()
-
-        logger.success(f"[Trainer.init_models] rank={self.rank} completed: dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}")
-
+        
+        logger.success(f"[Trainer.init_models] rank={self.rank} completed: dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}, tp_rank={self.tp_rank}, pp_rank={self.pp_rank}")
+    
     def _init_tracker(self):
         """
         Initialize MetricTracker for logging (only called on rank=0).
@@ -307,7 +318,8 @@ class Trainer:
         timing_raw = timers.to_dict()
         
         # Submit metrics to MetricWorker for aggregation
-        if self.metric_client is not None:
+        # Only TP rank 0 and PP rank 0 should submit to avoid duplicates (same as siiRL-github)
+        if self.metric_client is not None and self.should_submit_metrics:
             try:
                 from siirl.utils.metrics import (
                     compute_data_metric,
@@ -438,30 +450,33 @@ class Trainer:
                 last_step_end_time = current_step_end_time
 
                 # Wait for all metric submissions and aggregate (rank=0 does the logging)
-                if self.metric_client is not None:
+                # Only TP rank 0 and PP rank 0 submit metrics, so only they need to wait
+                if self.metric_client is not None and self.should_submit_metrics:
                     try:
                         self.metric_client.wait_submit()
+                    except Exception as e:
+                        logger.warning(f"[Trainer rank={self.rank}] Metric submission wait failed: {e}")
 
-                        # Barrier sync to ensure all dp_ranks have submitted their metrics to MetricWorker
-                        # This prevents race condition where rank 0 calls wait_final_res() before other ranks submit
-                        dist.barrier()
+                # Barrier sync to ensure all ranks are synchronized
+                dist.barrier()
 
-                        # Only rank=0 (global rank) aggregates and logs to tracker
-                        if self.rank == 0 and self.tracker is not None:
-                            aggregated_metrics = self.metric_client.wait_final_res()
-                            aggregated_metrics["training/global_step"] = self.global_step
-                            aggregated_metrics["perf/delta_time/weight_sync"] = weight_sync_timer.elapsed
-                            aggregated_metrics["perf/delta_time/get_batch"] = get_batch_timer.elapsed
+                # Only rank=0 (global rank) aggregates and logs to tracker
+                if self.rank == 0 and self.tracker is not None and self.metric_client is not None:
+                    try:
+                        aggregated_metrics = self.metric_client.wait_final_res()
+                        aggregated_metrics["training/global_step"] = self.global_step
+                        aggregated_metrics["perf/delta_time/weight_sync"] = weight_sync_timer.elapsed
+                        aggregated_metrics["perf/delta_time/get_batch"] = get_batch_timer.elapsed
 
-                            # Add step_interval for accurate throughput measurement
-                            if step_interval is not None:
-                                aggregated_metrics["perf/delta_time/step_interval"] = step_interval
-                                # Recalculate throughput using step_interval (system throughput)
-                                total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
-                                if step_interval > 0 and total_tokens > 0:
-                                    aggregated_metrics["perf/throughput"] = total_tokens / (step_interval * self.world_size)
+                        # Add step_interval for accurate throughput measurement
+                        if step_interval is not None:
+                            aggregated_metrics["perf/delta_time/step_interval"] = step_interval
+                            # Recalculate throughput using step_interval (system throughput)
+                            total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
+                            if step_interval > 0 and total_tokens > 0:
+                                aggregated_metrics["perf/throughput"] = total_tokens / (step_interval * self.world_size)
 
-                            self.tracker.log(aggregated_metrics, step=self.global_step)
+                        self.tracker.log(aggregated_metrics, step=self.global_step)
 
                     except Exception as e:
                         logger.warning(f"[Trainer rank={self.rank}] Metric aggregation failed: {e}")
@@ -484,7 +499,8 @@ class Trainer:
         
         finally:
             # Ensure all pending metrics are submitted before exiting
-            if self.metric_client is not None:
+            # Only ranks that submitted metrics need to wait
+            if self.metric_client is not None and self.should_submit_metrics:
                 try:
                     self.metric_client.wait_submit()
                 except Exception:
