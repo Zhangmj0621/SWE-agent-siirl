@@ -23,8 +23,10 @@ Can be extended as needed.
 import os
 import psutil
 import torch
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 from tensordict import TensorDict
+
+from .utils import StdStats
 
 
 def _compute_response_info(batch: TensorDict) -> Dict[str, Any]:
@@ -251,4 +253,55 @@ def compute_throughput_metrics(batch: TensorDict, timing_raw: Dict[str, float], 
         "perf/time_per_step": time,
         "perf/throughput": total_num_tokens / (time * n_gpus) if time > 0 and n_gpus > 0 else 0,
     }
+
+
+def compute_log_prob_diff_metrics(
+    data: TensorDict,
+) -> Tuple[Dict[str, float], Optional[StdStats]]:
+    """
+    Computes metrics for the difference between rollout log probs and recomputed log probs.
+    
+    This metric is important in RL to monitor the discrepancy between:
+    - rollout_log_probs: log probs from the inference engine during rollout
+    - old_log_probs: log probs recomputed by the training framework
+    
+    Args:
+        data: A TensorDict containing:
+            - rollout_log_probs: log probs from rollout inference engine
+            - old_log_probs: log probs recomputed by training framework
+            - response_mask: mask for valid response tokens
+            
+    Returns:
+        Tuple of:
+            - Dictionary with max and mean metrics
+            - StdStats object for distributed std calculation (None if no valid data)
+    """
+    metrics = {}
+    std_stats = None
+    
+    if "rollout_log_probs" not in data or "old_log_probs" not in data:
+        return metrics, std_stats
+    
+    # Convert log probs to probs for comparison (same as siiRL-github)
+    rollout_probs = torch.exp(data["rollout_log_probs"])
+    actor_probs = torch.exp(data["old_log_probs"])
+    
+    # Compute absolute difference
+    probs_diff = torch.abs(rollout_probs.cpu() - actor_probs.cpu())
+    
+    # Apply mask if available
+    if "response_mask" in data:
+        mask = data["response_mask"].bool().cpu()
+        valid_diff = torch.masked_select(probs_diff, mask)
+    else:
+        valid_diff = probs_diff.flatten()
+    
+    if valid_diff.numel() > 0:
+        metrics["training/rollout_probs_diff_max"] = torch.max(valid_diff).item()
+        metrics["training/rollout_probs_diff_mean"] = torch.mean(valid_diff).item()
+        
+        # Create StdStats for distributed std calculation
+        std_stats = StdStats.from_tensor(valid_diff)
+    
+    return metrics, std_stats
 

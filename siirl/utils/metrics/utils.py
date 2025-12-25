@@ -16,11 +16,15 @@
 Metric data structures and aggregation functions.
 
 Reused from siiRL-github/siirl/execution/metric_worker/utils.py
+
+Supports distributed aggregation including proper std calculation using
+the parallel variance formula: Var(X) = E[X²] - E[X]²
 """
 
+import math
 import torch
 from statistics import mean
-from typing import List, Any
+from typing import List, Any, Union, Dict
 from dataclasses import dataclass
 
 
@@ -28,8 +32,69 @@ from dataclasses import dataclass
 class Metric:
     """Single metric entry with name, value, and expected world_size."""
     name: str
-    value: Any  # Can be float or List[float]
+    value: Any  # Can be float, List[float], or StdStats
     world_size: int
+
+
+@dataclass
+class StdStats:
+    """
+    Statistics needed for distributed std calculation.
+    
+    For correct distributed std computation, each worker submits:
+    - sum: sum of values
+    - sum_sq: sum of squared values
+    - count: number of values
+    
+    The global std is then computed as:
+        std = sqrt(global_sum_sq/N - (global_sum/N)²)
+    
+    This is mathematically equivalent to computing std on all data combined.
+    
+    Proof of correctness:
+        Let X = {x_1, ..., x_N} be the global dataset split across K workers.
+        Worker k has subset X_k with n_k elements.
+        
+        Global mean: μ = (Σ_k sum_k) / N where N = Σ_k n_k
+        Global variance: σ² = E[X²] - E[X]² = (Σ_k sum_sq_k) / N - μ²
+        
+        This formula is exact because:
+        - E[X²] = (1/N) * Σ_{i=1}^{N} x_i² = (1/N) * Σ_k sum_sq_k
+        - E[X]² = μ² = ((1/N) * Σ_k sum_k)²
+        
+        No approximations are made; this is algebraically identical to
+        computing variance on the full dataset.
+    """
+    sum: float
+    sum_sq: float
+    count: int
+    
+    @classmethod
+    def from_tensor(cls, tensor: torch.Tensor) -> "StdStats":
+        """Create StdStats from a tensor."""
+        return cls(
+            sum=tensor.sum().item(),
+            sum_sq=(tensor ** 2).sum().item(),
+            count=tensor.numel()
+        )
+    
+    @classmethod
+    def from_values(cls, values: List[float]) -> "StdStats":
+        """Create StdStats from a list of values."""
+        return cls(
+            sum=sum(values),
+            sum_sq=sum(v ** 2 for v in values),
+            count=len(values)
+        )
+    
+    def to_dict(self) -> Dict[str, Union[float, int]]:
+        """Convert to dict for serialization."""
+        return {"sum": self.sum, "sum_sq": self.sum_sq, "count": self.count}
+    
+    @classmethod
+    def from_dict(cls, d: Dict[str, Union[float, int]]) -> "StdStats":
+        """Create from dict."""
+        return cls(sum=d["sum"], sum_sq=d["sum_sq"], count=d["count"])
 
 
 def MetricFunc(name: str):
@@ -37,6 +102,7 @@ def MetricFunc(name: str):
     Automatically select aggregation function based on metric name.
     
     Rules:
+    - "std" in name → StdMetric (distributed std calculation)
     - "min" in name → MinMetric
     - "max" in name → MaxMetric
     - "sum" or "total" in name → SumMetric
@@ -48,7 +114,9 @@ def MetricFunc(name: str):
     Returns:
         Aggregation function
     """
-    if "min" in name:
+    if "std" in name:
+        return StdMetric
+    elif "min" in name:
         return MinMetric
     elif "max" in name:
         return MaxMetric
@@ -87,4 +155,46 @@ def MinMetric(metrics: List[Metric]) -> float:
     """Aggregate metrics by min."""
     values = _flatten_values(metrics)
     return min(values)
+
+
+def StdMetric(metrics: List[Metric]) -> float:
+    """
+    Aggregate std from distributed StdStats using parallel variance formula.
+    
+    Formula: Var(X) = E[X²] - E[X]² = (Σx²/N) - (Σx/N)²
+    
+    This is mathematically exact for computing global std from distributed data.
+    
+    Args:
+        metrics: List of Metric objects where value is StdStats
+        
+    Returns:
+        Global standard deviation
+    """
+    total_sum = 0.0
+    total_sum_sq = 0.0
+    total_count = 0
+    
+    for metric in metrics:
+        if isinstance(metric.value, StdStats):
+            total_sum += metric.value.sum
+            total_sum_sq += metric.value.sum_sq
+            total_count += metric.value.count
+        elif isinstance(metric.value, dict):
+            # Support dict format for serialization
+            total_sum += metric.value.get("sum", 0)
+            total_sum_sq += metric.value.get("sum_sq", 0)
+            total_count += metric.value.get("count", 0)
+    
+    if total_count == 0:
+        return 0.0
+    
+    mean_val = total_sum / total_count
+    # Var(X) = E[X²] - E[X]²
+    variance = (total_sum_sq / total_count) - (mean_val ** 2)
+    
+    # Protect against numerical errors that could make variance slightly negative
+    variance = max(0.0, variance)
+    
+    return math.sqrt(variance)
 

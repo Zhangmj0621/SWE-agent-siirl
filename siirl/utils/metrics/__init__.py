@@ -34,9 +34,14 @@ Usage:
     final_metrics = client.wait_final_res()
 """
 
-from .utils import Metric, MetricFunc, MeanMetric, SumMetric, MaxMetric, MinMetric
+from .utils import Metric, MetricFunc, MeanMetric, SumMetric, MaxMetric, MinMetric, StdMetric, StdStats
 from .metric_worker import MetricWorker, MetricClient
-from .metric_utils import compute_data_metric, compute_timing_metrics, compute_throughput_metrics
+from .metric_utils import (
+    compute_data_metric,
+    compute_timing_metrics,
+    compute_throughput_metrics,
+    compute_log_prob_diff_metrics,
+)
 
 __all__ = [
     # Data structures and aggregation functions
@@ -46,6 +51,8 @@ __all__ = [
     "SumMetric",
     "MaxMetric",
     "MinMetric",
+    "StdMetric",
+    "StdStats",
     # Ray Actor and Client
     "MetricWorker",
     "MetricClient",
@@ -53,5 +60,6 @@ __all__ = [
     "compute_data_metric",
     "compute_timing_metrics",
     "compute_throughput_metrics",
+    "compute_log_prob_diff_metrics",
 ]
 

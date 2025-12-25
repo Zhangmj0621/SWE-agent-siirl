@@ -236,8 +236,7 @@ class Trainer:
         return Samples2Dict(batch_data_list)
 
     def train_step(self, batch_data):
-        step_start_time = time.time()
-        timing_raw = {}
+        timers = TimerCollection()
         logger.info(f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} starting")
 
         with timers["step"]:
@@ -310,7 +309,11 @@ class Trainer:
         # Submit metrics to MetricWorker for aggregation
         if self.metric_client is not None:
             try:
-                from siirl.utils.metrics import compute_data_metric, compute_throughput_metrics
+                from siirl.utils.metrics import (
+                    compute_data_metric,
+                    compute_throughput_metrics,
+                    compute_log_prob_diff_metrics,
+                )
                 
                 # Compute and submit data metrics
                 data_metrics = compute_data_metric(data_for_update)
@@ -333,6 +336,19 @@ class Trainer:
                             flat_metrics[f"{prefix}/{k}"] = v
                 if flat_metrics:
                     self.metric_client.submit_metric(flat_metrics, self.dp_world_size)
+
+                # Compute and submit log prob diff metrics (rollout vs training)
+                # max/mean can be aggregated normally, std needs special handling via StdStats
+                diff_metrics, std_stats = compute_log_prob_diff_metrics(data_for_update)
+                if diff_metrics:
+                    self.metric_client.submit_metric(diff_metrics, self.dp_world_size)
+
+                # Submit std stats separately for proper distributed std calculation
+                if std_stats is not None:
+                    self.metric_client.submit_metric(
+                        {"training/rollout_probs_diff_std": std_stats},
+                        self.dp_world_size
+                    )
 
             except Exception as e:
                 logger.warning(f"[Trainer rank={self.rank}] Failed to submit metrics: {e}")
@@ -401,6 +417,10 @@ class Trainer:
                 if self.metric_client is not None:
                     try:
                         self.metric_client.wait_submit()
+
+                        # Barrier sync to ensure all dp_ranks have submitted their metrics to MetricWorker
+                        # This prevents race condition where rank 0 calls wait_final_res() before other ranks submit
+                        dist.barrier()
 
                         # Only rank=0 (global rank) aggregates and logs to tracker
                         if self.rank == 0 and self.tracker is not None:
