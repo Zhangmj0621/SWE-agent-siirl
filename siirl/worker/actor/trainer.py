@@ -288,7 +288,7 @@ class Trainer:
 
             # Add entropy loss to actor metrics (computed earlier from compute_log_prob)
             if entropy_loss is not None:
-                actor_metrics["entropy_loss"] = entropy_loss.item()
+                actor_metrics["actor/entropy_loss"] = entropy_loss.item()
 
             if self.use_critic:
                 logger.info(f"[Trainer.train_step] step={self.global_step} updating critic")

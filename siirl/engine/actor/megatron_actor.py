@@ -248,14 +248,17 @@ class ActorWorker:
         delta_time = timer.elapsed
 
         # Calculate MFU (Model FLOPs Utilization)
+        # Note: flops_counter calculates FLOPs for the entire model, but with TP each GPU
+        # only computes 1/TP of the model FLOPs. So we need to divide by TP world size.
         if "global_token_num" in data:
             global_token_num = data["global_token_num"]
             if hasattr(global_token_num, 'data'):
                 global_token_num = global_token_num.data
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
             if promised_flops > 0:
-                metrics["perf/mfu/actor"] = estimated_flops / promised_flops
-
+                tp_world_size = mpu.get_tensor_model_parallel_world_size()
+                metrics["perf/mfu/actor"] = estimated_flops / promised_flops / tp_world_size
+        
         metrics["perf/delta_time/actor"] = delta_time
 
         # Add GPU memory metrics
@@ -667,14 +670,17 @@ class CriticWorker:
         delta_time = timer.elapsed
 
         # Calculate MFU (Model FLOPs Utilization)
+        # Note: flops_counter calculates FLOPs for the entire model, but with TP each GPU
+        # only computes 1/TP of the model FLOPs. So we need to divide by TP world size.
         if "global_token_num" in data:
             global_token_num = data["global_token_num"]
             if hasattr(global_token_num, 'data'):
                 global_token_num = global_token_num.data
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
             if promised_flops > 0:
-                metrics["perf/mfu/critic"] = estimated_flops / promised_flops
-
+                tp_world_size = mpu.get_tensor_model_parallel_world_size()
+                metrics["perf/mfu/critic"] = estimated_flops / promised_flops / tp_world_size
+        
         metrics["perf/delta_time/critic"] = delta_time
 
         data["metrics"] = NonTensorData(metrics)

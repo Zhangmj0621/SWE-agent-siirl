@@ -262,12 +262,12 @@ def compute_log_prob_diff_metrics(
     Computes metrics for the difference between rollout log probs and recomputed log probs.
     
     This metric is important in RL to monitor the discrepancy between:
-    - rollout_log_probs: log probs from the inference engine during rollout
+    - rollout_log_prob: log probs from the inference engine during rollout
     - old_log_probs: log probs recomputed by the training framework
     
     Args:
         data: A TensorDict containing:
-            - rollout_log_probs: log probs from rollout inference engine
+            - rollout_log_prob: log probs from rollout inference engine
             - old_log_probs: log probs recomputed by training framework
             - response_mask: mask for valid response tokens
             
@@ -279,11 +279,11 @@ def compute_log_prob_diff_metrics(
     metrics = {}
     std_stats = None
     
-    if "rollout_log_probs" not in data or "old_log_probs" not in data:
+    if "rollout_log_prob" not in data or "old_log_probs" not in data:
         return metrics, std_stats
     
     # Convert log probs to probs for comparison (same as siiRL-github)
-    rollout_probs = torch.exp(data["rollout_log_probs"])
+    rollout_probs = torch.exp(data["rollout_log_prob"])
     actor_probs = torch.exp(data["old_log_probs"])
     
     # Compute absolute difference
