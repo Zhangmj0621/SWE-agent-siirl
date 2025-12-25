@@ -45,6 +45,10 @@ class Trainer:
         coordinator=None,
         rollout_manager = None,
     ):
+        # Configure logging for this Ray actor process
+        from siirl.utils.logger.logging_utils import set_basic_config
+        set_basic_config()
+        
         self.config = config
         self.rank = rank
         self.local_rank = local_rank

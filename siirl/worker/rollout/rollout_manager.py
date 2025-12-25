@@ -60,6 +60,10 @@ class RolloutManager:
         """
         # Lazy imports to avoid serialization issues with file handles
         from siirl.worker.rollout.rollout_worker import RolloutWorker
+        from siirl.utils.logger.logging_utils import set_basic_config
+        
+        # Configure logging for this Ray actor process
+        set_basic_config()
         
         self.name_prefix: str = get_random_string(length=6)
         self.config = config
