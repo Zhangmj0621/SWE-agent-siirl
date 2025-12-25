@@ -13,18 +13,13 @@
 # limitations under the License.
 
 import asyncio
-from typing import Dict, List, Optional, Tuple, Callable, Any
-import heapq
-import random
+from typing import List, Optional, Tuple, Callable, Any
 import ray
 import loguru
-import time
-import threading
+import copy
 
 from collections import deque, defaultdict
 from loguru import logger
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-
 
 
 from siirl.data_coordinator.sample import SampleInfo
@@ -51,6 +46,7 @@ class DataCoordinator:
         # Use a deque to store tuples of metadata and references for efficient FIFO operations
         self._sample_queue: deque[Tuple[SampleInfo, ray.ObjectRef]] = deque()
         self._put_counter = 0  # Used for round-robin buffer selection
+        self._batch_wait_log_counter = 0  # Counter to throttle "waiting for samples" logs
         self.lock = asyncio.Lock()
         loguru.logger.info("Global DataCoordinator initialized.")
         self._cache = []
@@ -60,7 +56,7 @@ class DataCoordinator:
         self.dataloader = None
         self.dataloader_lock = asyncio.Lock()  
         
-    async def put(self, sample_info: SampleInfo, sample_ref: Any, caller_node_id: Optional[str] = None):
+    async def put(self, sample_info: SampleInfo, sample_ref: Any):
         """
         Called by a RolloutWorker to register a new sample reference and its metadata.
         This method automatically routes the ObjectRef to a DataBuffer on its local
@@ -69,8 +65,6 @@ class DataCoordinator:
         Args:
             sample_info: Metadata about the sample
             sample_ref: Ray ObjectRef or the actual sample data
-            caller_node_id: The node ID of the caller. If None, will try to get it from
-                          the runtime context (but this won't work correctly for remote calls)
         """
         # Due to Ray's small object optimization, an ObjectRef passed by the client
         # might be automatically resolved to its actual value. Here, we ensure that
@@ -78,25 +72,13 @@ class DataCoordinator:
         if not isinstance(sample_ref, ray.ObjectRef):
             sample_ref = ray.put(sample_ref)
 
-        # 1. Get the node ID of the caller
-        # Note: When called remotely, ray.get_runtime_context().get_node_id() returns
-        # the node ID of the DataCoordinator actor, not the caller. So we require the
-        # caller to pass their node_id explicitly.
-        if caller_node_id is None:
-            caller_node_id = ray.get_runtime_context().get_node_id()
-
-        # 2. Inject the node ID into SampleInfo for subsequent filtering
-        #    Only inject if node_id has not been manually set, to facilitate testing.
-        if sample_info.node_id is None:
-            sample_info.node_id = caller_node_id
-
-        # 4. Register the metadata and reference to the global queue
+        # Register the metadata and reference to the global queue
         async with self.lock:
             # More complex logic can be implemented here, such as inserting into a
             # priority queue based on priority
             self._sample_queue.append((sample_info, sample_ref))
 
-    async def put_batch(self, sample_infos: List[SampleInfo], sample_refs: List[ray.ObjectRef], caller_node_id: Optional[str] = None):
+    async def put_batch(self, sample_infos: List[SampleInfo], sample_refs: List[ray.ObjectRef]):
         """
         Called by a worker to register a batch of new sample references and their metadata.
         This method routes the ObjectRefs to DataBuffers on their local nodes.
@@ -109,17 +91,6 @@ class DataCoordinator:
         """
         if not sample_refs:
             return
-
-        # Get the node ID of the caller
-        # Note: When called remotely, ray.get_runtime_context().get_node_id() returns
-        # the node ID of the DataCoordinator actor, not the caller. So we require the
-        # caller to pass their node_id explicitly.
-        if caller_node_id is None:
-            caller_node_id = ray.get_runtime_context().get_node_id()
-
-        for i in range(len(sample_infos)):
-            if sample_infos[i].node_id is None:
-                sample_infos[i].node_id = caller_node_id
         
         async with self.lock:
             self._sample_queue.extend(zip(sample_infos, sample_refs))
@@ -150,12 +121,15 @@ class DataCoordinator:
         """
         async with self.lock:
             # No filter plugin, use efficient FIFO
+            global_batch_size = batch_size * balance_partitions
             if len(self._cache) > 0:
                 res = self._cache[dp_rank]
                 return res
             if not filter_plugin:
-                if len(self._sample_queue) < batch_size * balance_partitions:
-                    loguru.logger.warning(f"Coordinator queue size ({len(self._sample_queue)}) is less than requested batch size ({batch_size}). Returning empty list.")
+                if len(self._sample_queue) < global_batch_size:
+                    self._batch_wait_log_counter += 1
+                    if self._batch_wait_log_counter == 1 or self._batch_wait_log_counter % 100 == 0:
+                        loguru.logger.debug(f"Buffer has {len(self._sample_queue)} samples, waiting for {global_batch_size}... (checked {self._batch_wait_log_counter} times)")
                     return []
         
                 batch_items = []
@@ -163,15 +137,23 @@ class DataCoordinator:
                 while self._sample_queue:
                     item = self._sample_queue.popleft()
                     batch_items.append(item)
+                    if len(batch_items) >= global_batch_size:
+                        break
                 # Apply length balancing if requested
                 if balance_partitions and balance_partitions > 1:
                     batch_refs = self._apply_length_balancing(batch_items, balance_partitions)
                 else:
                     batch_refs = [item[1] for item in batch_items]
-                self._cache = batch_refs
-                get_refs = self._cache[:batch_size]
-                self._cache = self._cache[batch_size:] if len(self._cache) >= batch_size else None
-                return get_refs
+
+                # Build cache as list of lists, one for each dp_rank
+                self._cache = []
+                for rank in range(balance_partitions):
+                    self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
+
+                self._batch_wait_log_counter = 0  # Reset counter on successful batch
+                res = self._cache[dp_rank]
+                loguru.logger.info(f"Buffer return {global_batch_size} samples, {len(self._sample_queue)} samples left")
+                return res
             # With filter plugin, use O(N) filtering and reconstruction
             else:
                 # 1. The filtering process does not consume elements from the queue
@@ -184,9 +166,10 @@ class DataCoordinator:
                 else:
                     potential_items = [item for item in self._sample_queue if filter_plugin(item[0])]
                 # 2. Check if there are enough samples
-                global_batch_size = batch_size * balance_partitions
                 if len(potential_items) < global_batch_size:
-                    loguru.logger.warning(f"After filtering, {filter_plugin} coordinator has {len(potential_items)} samples, which is less than requested batch size ({global_batch_size}). Returning empty list.")
+                    self._batch_wait_log_counter += 1
+                    if self._batch_wait_log_counter == 1 or self._batch_wait_log_counter % 100 == 0:
+                        loguru.logger.debug(f"Buffer has {len(potential_items)} samples, waiting for {global_batch_size}... (checked {self._batch_wait_log_counter} times)")
                     return []
                 potential_items = potential_items[:global_batch_size]
                 # 4. Efficiently remove the selected items from the original queue
@@ -200,6 +183,7 @@ class DataCoordinator:
                     batch_refs = [item[1] for item in potential_items]
                 for rank in range(balance_partitions):
                     self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
+                self._batch_wait_log_counter = 0  # Reset counter on successful batch
                 res = self._cache[dp_rank]
                 
                 return res
@@ -399,12 +383,17 @@ class DataCoordinator:
                     if source_dp_size is not None:
                         return source_dp_size
             return None
-
+    
+    #TODO: supporty for async train
     def reset_cache(self):
         loguru.logger.warning("reset datacoordinator")
         self._sample_queue.clear()
         self._cache = []
 
+    def clear_cache(self):
+        loguru.logger.warning(f"clear cache of datacoordinator, {len(self._sample_queue)} left")
+        self._cache = []
+    
     def __repr__(self) -> str:
         return f"<DataCoordinator(total_samples={len(self._sample_queue)})>"
 
@@ -413,8 +402,11 @@ class DataCoordinator:
     # # dataloader function
     @ray.method(concurrency_group="dataloader")
     def init_dataloader(self, config: SiiRLArguments):
+        # set async factor
+        async_config = copy.deepcopy(config)
+        async_config.data.train_batch_size *= async_config.trainer.async_factor
         self.dataloader = DataLoaderNode(
-            global_config = config,
+            global_config = async_config,
             config={
                 "group_world_size": 1,
                 "group_rank": 0,

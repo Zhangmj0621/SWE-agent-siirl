@@ -1,0 +1,30 @@
+tools:
+  - class_name: "siirl.environment.tool_env.aio_search_env.AIOSearchEnv"
+    type: "uvicorn"
+    name: "search"
+    config:
+      url: "/retrieve"
+      suggest_port: 8000
+      type: native
+      index_file: /inspire/hdd/project/qianghuaxuexi/public/datasets/search/e5_HNSW64.index
+      corpus_file: /inspire/hdd/project/qianghuaxuexi/public/datasets/search/wiki-18.jsonl
+      retriever_name: e5
+      retriever_path: /inspire/hdd/project/qianghuaxuexi/public/models/e5-base-v2
+      topk: 3
+      faiss_gpu: false
+
+    tool_schema:
+      type: function
+      function:
+        name: search
+        description: Searches the web for relevant information based on the given query.
+        parameters:
+          type: object
+          properties:
+            query_list:
+              type: array
+              item:
+                type: string
+              description: A list of fully-formed semantic queries. The tool will return search results for each query.
+          required: 
+            - query_list

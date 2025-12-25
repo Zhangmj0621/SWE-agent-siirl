@@ -81,10 +81,10 @@ class DataLoaderNode():
         self.global_config = global_config
         self.config = config
         # Load tokenizer and processor
-        # tokenizer_module = load_tokenizer(path=global_config.actor_rollout_ref.model.path, model_args=global_config.actor_rollout_ref.model)
+        # tokenizer_module = load_tokenizer(path=global_config.actor_ref.model.path, model_args=global_config.actor_ref.model)
         # self.tokenizer = tokenizer_module["tokenizer"]
         # self.processor = tokenizer_module["processor"]
-        self.tokenizer = load_tokenizer(path=global_config.actor_rollout_ref.model.path, model_args=global_config.actor_rollout_ref.model)
+        self.tokenizer = load_tokenizer(path=global_config.actor_ref.model.path, model_args=global_config.actor_ref.model)
         self.processor = None # todo: support multi-model
         # force load in main process for vision language model
         self.num_loader_workers = config.get("num_loader_workers", 8)
@@ -189,7 +189,7 @@ class DataLoaderNode():
         self.total_training_steps = total_training_steps
 
         # Update total training steps in optimizer configs for actor and critic
-        self.global_config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+        self.global_config.actor_ref.actor.optim.total_training_steps = total_training_steps
         self.global_config.critic.optim.total_training_steps = total_training_steps
         
         # Indicates the samples for this rank has already been expand

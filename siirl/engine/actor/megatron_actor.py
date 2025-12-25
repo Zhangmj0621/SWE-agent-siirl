@@ -12,10 +12,9 @@ from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
 
-from siirl.engine.actor.utils import (
-    agg_loss, get_policy_loss_fn, kl_penalty, compute_value_loss,
-    append_to_dict, set_random_seed,
-)
+from siirl.engine.actor.utils import append_to_dict, set_random_seed
+from siirl.algorithm.loss import agg_loss, get_policy_loss_fn, compute_value_loss
+from siirl.algorithm.kl_penalty import kl_penalty
 from siirl.params.model_args import ActorRefArguments
 
 from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
@@ -35,7 +34,7 @@ from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_p
 
 def global_initialize_model_parallel(config: ActorRefArguments):
     """Initialize Megatron model parallel groups"""
-    megatron_config = config.actor.megatron
+    megatron_config = config.megatron
 
     rank = int(os.environ["LOCAL_RANK"])
     if not torch.distributed.is_initialized():
@@ -64,7 +63,6 @@ def global_initialize_model_parallel(config: ActorRefArguments):
 
 
 class ActorWorker:
-
     def __init__(self, config: DictConfig):
         assert isinstance(config, ActorRefArguments)
         self.rank = 0
@@ -77,7 +75,7 @@ class ActorWorker:
         self.share_embeddings_and_output_weights = False
 
         self.config = config
-        global_initialize_model_parallel(self.config)
+        global_initialize_model_parallel(self.config.actor)
 
         # Normalize config
         self.config.actor.ppo_mini_batch_size *= self.config.actor.n
@@ -148,9 +146,8 @@ class ActorWorker:
 
     def _build_actor_model_optimizer(self, model_path, optim_config, override_model_config,
                                      override_transformer_config, override_ddp_config):
-        from siirl.utils.megatron.megatron_utils import init_megatron_optim_config
         from siirl.utils.megatron.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
-        from siirl.utils.megatron.optimizer import get_megatron_optimizer, get_megatron_optimizer_param_scheduler
+        from siirl.engine.actor.optimizer import get_megatron_optimizer, get_megatron_optimizer_param_scheduler, init_megatron_optim_config
 
         self._init_hf_config_and_tf_config(
             model_path, model_path, self.dtype, override_model_config,
@@ -209,7 +206,6 @@ class ActorWorker:
 
         self.actor = MegatronPPOActor(
             config=self.config.actor,
-            model_config=self.actor_model_config,
             hf_config=self.hf_config,
             tf_config=self.tf_config,
             actor_module=self.actor_module,
@@ -259,8 +255,6 @@ class ActorWorker:
 
 
 class ReferenceWorker:
-    """Dedicated worker for reference policy"""
-
     def __init__(self, config: DictConfig):
         assert isinstance(config, ActorRefArguments)
         self.rank = 0
@@ -273,7 +267,7 @@ class ReferenceWorker:
         self.share_embeddings_and_output_weights = False
 
         self.config = config
-        global_initialize_model_parallel(self.config)
+        global_initialize_model_parallel(self.config.actor)
 
         # Normalize config
         if self.config.ref.log_prob_micro_batch_size:
@@ -391,7 +385,6 @@ class ReferenceWorker:
 
         self.ref_policy = MegatronPPOActor(
             config=self.config.ref,
-            model_config=self.ref_model_config,
             hf_config=self.hf_config,
             tf_config=self.tf_config,
             actor_module=self.ref_module,
@@ -409,7 +402,6 @@ class ReferenceWorker:
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
-        data["max_token_len"] = NonTensorData(self.config.ref.log_prob_max_token_len_per_gpu)
         data["temperature"] = NonTensorData(self.config.ref.temperature)
         data = data.to(get_device_id())
 
@@ -425,8 +417,6 @@ class ReferenceWorker:
 
 
 class CriticWorker:
-    """Dedicated worker for critic training"""
-
     def __init__(self, config):
         self.rank = 0
         self.hf_config = None
@@ -438,29 +428,8 @@ class CriticWorker:
         self.share_embeddings_and_output_weights = False
 
         self.config = config
-
-        if not torch.distributed.is_initialized():
-            rank = int(os.environ["LOCAL_RANK"])
-            torch.distributed.init_process_group(backend=get_nccl_backend())
-            get_torch_device().set_device(rank)
-
-            if self.config.megatron.sequence_parallel:
-                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-
-            mpu.initialize_model_parallel(
-                tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-                pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-                virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-                pipeline_model_parallel_split_rank=None,
-                use_sharp=False,
-                context_parallel_size=self.config.megatron.context_parallel_size,
-                expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-                expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-                nccl_communicator_config_path=None,
-            )
-
-            set_random_seed(seed=self.config.megatron.seed)
-
+        global_initialize_model_parallel(self.config)
+        
         self._is_offload_param = self.config.megatron.param_offload
         self._is_offload_optimizer = self.config.megatron.optimizer_offload
 
@@ -529,8 +498,8 @@ class CriticWorker:
 
     def _build_critic_model_optimizer(self, model_path, optim_config, override_model_config,
                                       override_transformer_config, override_ddp_config):
-        from siirl.utils.megatron.optimizer import get_megatron_optimizer, get_megatron_optimizer_param_scheduler
-        from siirl.utils.megatron.megatron_utils import init_megatron_optim_config, McoreModuleWrapperConfig, make_megatron_module
+        from siirl.engine.actor.optimizer import get_megatron_optimizer, get_megatron_optimizer_param_scheduler, init_megatron_optim_config
+        from siirl.utils.megatron.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
 
         self._init_hf_config_and_tf_config(
             model_path, model_path, self.dtype, override_model_config,
@@ -590,7 +559,6 @@ class CriticWorker:
 
         self.critic = MegatronPPOCritic(
             config=self.config,
-            model_config=self.critic_model_config,
             hf_config=self.hf_config,
             tf_config=self.tf_config,
             critic_module=self.critic_module,
@@ -638,18 +606,15 @@ class CriticWorker:
 class MegatronPPOActor():
     """Core PPO Actor implementation with Megatron backend"""
 
-    def __init__(self, config, model_config, hf_config, tf_config,
+    def __init__(self, config, hf_config, tf_config,
                  actor_module: nn.ModuleList, actor_optimizer: DistributedOptimizer):
         self._validate_config(config)
-        self.model_config = model_config
         self.hf_config = hf_config
         self.tf_config = tf_config
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
 
     def _validate_config(self, config):
-        if config.shuffle:
-            assert config.data_loader_seed is not None
         if config.megatron.tensor_model_parallel_size == 1:
             config.megatron.sequence_parallel = False
         self.config = config
@@ -720,7 +685,7 @@ class MegatronPPOActor():
         old_log_prob = data["old_log_probs"]
         advantages = data["advantages"]
         loss_agg_mode = self.config.loss_agg_mode
-        loss_mode = self.config.policy_loss.loss_mode
+        loss_mode = self.config.loss_mode
 
         # Policy gradient loss
         policy_loss_fn = get_policy_loss_fn(loss_mode)
@@ -899,11 +864,10 @@ class MegatronPPOActor():
 class MegatronPPOCritic():
     """Core PPO Critic implementation with Megatron backend"""
 
-    def __init__(self, config, model_config, hf_config, tf_config,
+    def __init__(self, config, hf_config, tf_config,
                  critic_module: nn.ModuleList, critic_optimizer: DistributedOptimizer,
                  critic_optimizer_config):
         self._validate_config(config)
-        self.model_config = model_config
         self.hf_config = hf_config
         self.tf_config = tf_config
         self.critic_module = critic_module
@@ -911,8 +875,6 @@ class MegatronPPOCritic():
         self.critic_optimizer_config = critic_optimizer_config
 
     def _validate_config(self, config):
-        if config.shuffle:
-            assert config.data_loader_seed is not None
         if config.megatron.tensor_model_parallel_size == 1:
             config.megatron.sequence_parallel = False
         self.config = config

@@ -17,28 +17,17 @@ We can subclass Protocol to define more detailed batch info with specific keys
 """
 
 import contextlib
-import copy
-import logging
 import os
-import pickle
-from copy import deepcopy
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
-import ray
 import tensordict
 import torch
 import torch.distributed
-import torch.nn.functional as F
-from packaging import version
 from tensordict import TensorDict
-from torch.utils.data import DataLoader
 
-# from siirl.utils.extras.device import get_device_id, get_torch_device
-# from siirl.utils.extras.py_functional import union_two_dict
-# from siirl.utils.model_utils.torch_functional import allgather_dict_tensors
+from siirl.utils.backend.device import get_device_id
+from siirl.utils.model_utils.torch_functional import allgather_dict_tensors
 
 __all__ = ["union_tensor_dict"]
 
@@ -111,10 +100,10 @@ def list_of_dict_to_dict_of_list(list_of_dict: list[dict]):
     return output
 
 
-def all_gather_data_proto(data: TensorDict, process_group):
+def all_gather_batch(data: TensorDict, process_group):
     # Note that this is an inplace operator just like torch.distributed.all_gather
     group_size = torch.distributed.get_world_size(group=process_group)
-    print(f"all gather dataproto process_group size:{group_size}")
+    print(f"all gather batch process_group size:{group_size}")
     assert isinstance(data, TensorDict)
     prev_device = data.device
     data = data.to(get_device_id())

@@ -31,8 +31,8 @@ class DataArguments:
     max_prompt_length: int = field(default=512, metadata={"help": "Max token length for prompts"})
     max_response_length: int = field(default=512, metadata={"help": "Max token length for responses"})
     train_batch_size: int = field(default=1024, metadata={"help": "Training batch size"})
+    val_batch_size: Optional[int] = field(default=None, metadata={"help": "Validation batch size. If None, uses entire validation set as one batch"})
     gen_batch_size: Optional[int] = field(default=None, metadata={"help": "Generation batch size for DAPO (typically 3x train_batch_size)"})
-    val_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Validation batch handling"})
     return_raw_chat: bool = field(default=True, metadata={"help": "Return unprocessed chat data"})
     filter_overlong_prompts: bool = field(default=False, metadata={"help": "For large-scale dataset, filtering overlong prompts could be timeconsuming."})
     shuffle: bool = field(default=True, metadata={"help": "Shuffle training data"})
@@ -89,7 +89,6 @@ class DataArguments:
         metadata={"help": "The cutoff length of the tokenized inputs in the dataset."},
     )
     reward_fn_key: str = field(default="data_source", metadata={"help": "reward data source key"})
-    multi_agent: bool = field(default=False, metadata={"help": "The DAG pipeline is multi agent or not"})
     auto_repeat: bool = field(default=False, metadata={"help": "Automatically repeats the training dataset. Recommended when the number of samples is smaller than the total training steps to prevent premature termination."})
     num_loader_workers: int = field(default=8, metadata={"help": "DataLoader worker number"})
     force_on_the_fly: bool = field(default=False, metadata={"help": "If True, the data will be loaded on-the-fly, which is useful for large datasets that cannot fit into memory."})

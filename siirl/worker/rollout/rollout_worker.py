@@ -61,23 +61,47 @@ class RolloutWorker:
         self.rollout_thread = None  # Thread for running the async rollout executor
         # Initial worker
     
-    def init_engine(self, rank: int, dist_init_addr:str, ip = None, port = None, nccl_port = None):
+    def init_engine(
+        self, 
+        rank: int, 
+        dist_init_addr: str, 
+        ip: str, 
+        port: int, 
+        nccl_port: int,
+        base_gpu_id: int,
+        node_rank: int,
+        nnodes: int,
+    ):
         """
-        Initialize the rollout engine (currently supports SglangEngine only).
+        Initialize the rollout engine with explicit GPU placement parameters.
         
         Args:
-            rank: Distributed training rank of the worker
-            dist_init_addr: Initialization address for distributed communication
-            ip: Optional IP address for the engine
-            port: Optional port number for the engine
-            nccl_port: Optional port for NCCL backend communication
+            rank: Global rank of this engine instance (TP0 rank within rollout workers).
+            dist_init_addr: Initialization address for distributed communication.
+                            Used for cross-node TP communication (ip:port format).
+            ip: IP address for the engine HTTP server.
+            port: Port number for the engine HTTP server.
+            nccl_port: Port for NCCL backend communication.
+            base_gpu_id: Starting CUDA device ID for this TP group.
+            node_rank: Rank of this node within the TP group.
+            nnodes: Number of nodes participating in this TP group.
         
         Todo:
             Add support for vLLM engine
         """
-        # todo: support vllm
+        # TODO: Support vLLM engine
         if self.config.rollout.name == 'sglang':
-            self.engine = SglangEngine(rank, self.config, dist_init_addr, ip, port, nccl_port)
+            self.engine = SglangEngine(
+                rank=rank,
+                config=self.config,
+                dist_init_addr=dist_init_addr,
+                ip=ip,
+                port=port,
+                nccl_port=nccl_port,
+                base_gpu_id=base_gpu_id,
+                node_rank=node_rank,
+                nnodes=nnodes,
+            )
             self.ip = ip
             self.port = port
     
@@ -106,7 +130,7 @@ class RolloutWorker:
             module_path, name = executor_path.rsplit('.', 1)
             mod = importlib.import_module(module_path)
             Executor = getattr(mod, name)
-        executor = Executor(self.config, router_address, data_coordinator, self.engine, self.config.data.train_batch_size // num_engine)
+        executor = Executor(self.config, data_coordinator, self.engine, self.config.data.train_batch_size // num_engine)
         self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(executor,), daemon=True)
         self.rollout_thread.start()
 
@@ -155,3 +179,23 @@ class RolloutWorker:
         """
         host = get_net_interface_ip()
         return get_free_port(host)
+    
+    def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+        return self.engine.init_param_sync_group(master_address, master_port, rank_offset, world_size, group_name, backend)
+
+    def param_sync_from_distributed(
+        self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
+    ):
+        return self.engine.sync_param_from_distributed(names, dtypes, shapes, group_name, flush_cache, weight_version)
+    
+    def destroy_weights_update_group(self, group_name):
+        return self.engine.destroy_weights_update_group(group_name)
+    
+    def flush_cache(self):
+        self.engine.flush_cache()
+
+    def pause_generation(self):
+        self.engine.pause_generation()
+
+    def continue_generation(self):
+        return self.engine.continue_generation()
