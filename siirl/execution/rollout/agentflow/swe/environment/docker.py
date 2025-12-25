@@ -3,7 +3,7 @@ import os
 import logging
 import uuid
 from typing import Optional, BinaryIO
-
+from loguru import logger
 from siirl.execution.rollout.agentflow.swe.environment.base import ContainerBuildArgs
 
 from .base import ContainerEnv, ContainerEnvBuilder, ContainerStartArgs, ContainerOutput
@@ -19,14 +19,12 @@ class DockerEnv(ContainerEnv):
         default_cwd: Optional[str] = None,
         default_env: Optional[dict[str, str]] = None,
         default_forward_env: Optional[list[str]] = None,
-        logger: logging.Logger = logging.root,
     ):
         self.container_id = container_id
         self.image = image
         self.default_cwd = default_cwd
         self.default_env = default_env or {}
         self.default_forward_env = default_forward_env or []
-        self.logger = logger
         self._closed = False
 
     def _merge_env(self, env: dict[str, str], forward_env: list[str]) -> dict[str, str]:
@@ -86,12 +84,9 @@ class DockerEnv(ContainerEnv):
             self.container_id, effective_cwd, merged_env
         )
         docker_args += ["/bin/sh", "-c", cmd]
-        print("running", docker_args)
+        logger.debug("[DockerEnv] running", docker_args)
 
         try:
-            self.logger.debug(
-                f"Executing in container {self.container_id}: {cmd[:100]}..."
-            )
             process = await asyncio.create_subprocess_exec(
                 "docker",
                 *docker_args,
@@ -112,8 +107,8 @@ class DockerEnv(ContainerEnv):
 
             returncode = process.returncode if process.returncode is not None else 127
 
-            self.logger.debug(
-                f"Command completed with exit code {returncode}, output length: {len(stdout)}"
+            logger.debug(
+                f"[Dockerenv] Command completed with exit code {returncode}, output length: {len(stdout)}"
             )
 
             if check and returncode != 0:
@@ -124,12 +119,20 @@ class DockerEnv(ContainerEnv):
             return ContainerOutput(output=stdout, returncode=returncode)
 
         except asyncio.TimeoutError as e:
-            self.logger.error(
-                f"Command execution timed out after {timeout}s: {cmd[:100]}"
+            logger.debug(
+                f"[Dockerenv] Command execution timed out after {timeout}s",
+                "cmd",
+                cmd,
+                "container",
+                self.container_id,
             )
             raise e
         except Exception as e:
-            self.logger.error(f"Command `docker {docker_args}` execution failed: {e}")
+            logger.debug(
+                f"[Dockerenv] Command `docker {docker_args}` execution failed: {e}",
+                "container",
+                self.container_id,
+            )
             raise e
 
     async def copy(
@@ -142,7 +145,17 @@ class DockerEnv(ContainerEnv):
     ):
         if self._closed:
             raise RuntimeError("Container environment is closed")
-        print("copying", src, "to", dst, ", upload=", upload)
+        logger.debug(
+            "[Dockerenv] Copying",
+            "src",
+            src,
+            "dst",
+            dst,
+            ", upload",
+            upload,
+            "container",
+            self.container_id,
+        )
 
         effective_cwd = cwd or self.default_cwd or "/"
 
@@ -159,9 +172,6 @@ class DockerEnv(ContainerEnv):
                     src,
                     f"{self.container_id}:{container_dst}",
                 ]
-                self.logger.info(
-                    f"Uploading {src} to {self.container_id}:{container_dst}"
-                )
             else:
                 # Container to host
                 container_src = src
@@ -172,9 +182,6 @@ class DockerEnv(ContainerEnv):
                     f"{self.container_id}:{container_src}",
                     dst,
                 ]
-                self.logger.info(
-                    f"Downloading {self.container_id}:{container_src} to {dst}"
-                )
 
             process = await asyncio.create_subprocess_exec(
                 "docker",
@@ -192,20 +199,14 @@ class DockerEnv(ContainerEnv):
                     f"docker cp failed (exit code {returncode}): {error_msg}"
                 )
 
-            self.logger.info("Copy operation completed successfully")
-
         except asyncio.TimeoutError:
-            self.logger.error("Copy operation timed out")
             raise TimeoutError("Copy operation timed out after 180s")
-        except Exception as e:
-            self.logger.error(f"Copy operation failed: {e}")
-            raise
 
     async def cleanup(self):
         if self._closed:
             return
         try:
-            self.logger.info(f"Cleaning up container {self.container_id}")
+            logger.info(f"[DockerEnv] Cleaning up container {self.container_id}")
             process = await asyncio.create_subprocess_exec(
                 "docker",
                 "rm",
@@ -215,9 +216,10 @@ class DockerEnv(ContainerEnv):
                 stderr=asyncio.subprocess.PIPE,
             )
             await asyncio.wait_for(process.communicate(), timeout=30.0)
-            self.logger.debug(f"Container {self.container_id} deleted")
         except Exception as e:
-            self.logger.error(f"Failed to delete container {self.container_id}: {e}")
+            logger.debug(
+                f"[DockerEnv] Failed to delete container {self.container_id}: {e}"
+            )
         finally:
             self._closed = True
 
@@ -231,17 +233,20 @@ class DockerEnvBuilder(ContainerEnvBuilder):
 
     def __init__(self, conf: dict):
         self.config = conf
-        self.logger = logging.Logger("SWE Docker EnvBuilder")
 
     async def build(self, args: ContainerBuildArgs):
         """
         Build a Docker image using the provided build arguments.
         """
-        dockerfile_path = args.dockerfile_path or os.path.join(args.build_dir, "Dockerfile")
+        dockerfile_path = args.dockerfile_path or os.path.join(
+            args.build_dir, "Dockerfile"
+        )
         build_args = [
             "build",
-            "-t", args.tag,
-            "-f", dockerfile_path,
+            "-t",
+            args.tag,
+            "-f",
+            dockerfile_path,
             args.build_dir,
         ]
         if args.nocache:
@@ -255,7 +260,9 @@ class DockerEnvBuilder(ContainerEnvBuilder):
             if "cpus" in args.resource_limits:
                 build_args.extend(["--cpus", str(args.resource_limits["cpus"])])
 
-        self.logger.info(f"Building Docker image {args.tag} from {args.build_dir} with Dockerfile {dockerfile_path}")
+        logger.debug(
+            f"[DockerEnvBuilder] Building Docker image {args.tag} from {args.build_dir} with Dockerfile {dockerfile_path}"
+        )
 
         timeout = args.timeout if args.timeout > 0 else None
 
@@ -269,14 +276,14 @@ class DockerEnvBuilder(ContainerEnvBuilder):
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
             returncode = process.returncode if process.returncode is not None else 127
 
-            self.logger.info(f"Docker build completed with exit code {returncode}")
-
             if returncode != 0:
-                raise Exception(f"Docker build failed (exit code {returncode}): {stdout.decode(errors='replace')[:200]}")
+                raise Exception(
+                    f"Docker build failed (exit code {returncode}): {stdout.decode(errors='replace')[:200]}"
+                )
 
             # Optionally push the image
             if args.push:
-                self.logger.info(f"Pushing Docker image {args.tag}")
+                logger.debug(f"[DockerEnvBuilder] Pushing Docker image {args.tag}")
                 push_process = await asyncio.create_subprocess_exec(
                     "docker",
                     "push",
@@ -284,26 +291,31 @@ class DockerEnvBuilder(ContainerEnvBuilder):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                 )
-                push_stdout, _ = await asyncio.wait_for(push_process.communicate(), timeout=timeout)
-                push_returncode = push_process.returncode if push_process.returncode is not None else 127
+                push_stdout, _ = await asyncio.wait_for(
+                    push_process.communicate(), timeout=timeout
+                )
+                push_returncode = (
+                    push_process.returncode
+                    if push_process.returncode is not None
+                    else 127
+                )
                 if push_returncode != 0:
-                    raise Exception(f"Docker push failed (exit code {push_returncode}): {push_stdout.decode(errors='replace')[:200]}")
-                self.logger.info(f"Docker image {args.tag} pushed successfully")
+                    raise Exception(
+                        f"Docker push failed (exit code {push_returncode}): {push_stdout.decode(errors='replace')[:200]}"
+                    )
                 return {"output": stdout + push_stdout, "returncode": 0, "pushed": True}
             else:
                 return {"output": stdout, "returncode": 0, "pushed": False}
 
         except asyncio.TimeoutError:
-            self.logger.error(f"Docker build timed out after {timeout}s")
             raise TimeoutError(f"Docker build timed out after {timeout}s")
-        except Exception as e:
-            self.logger.error(f"Docker build failed: {e}")
-            raise
 
     async def start(self, args: ContainerStartArgs) -> DockerEnv:
         # Generate unique container name
         container_name = f"swebench-{uuid.uuid4().hex[:8]}"
-        print(f"Creating container {container_name} with image {args.image}")
+        logger.info(
+            f"[DockerEnvBuilder] Creating container {container_name} with image {args.image}"
+        )
         env_args = []
         for env_key in args.forward_env:
             if env_key in os.environ:
@@ -327,9 +339,6 @@ class DockerEnvBuilder(ContainerEnvBuilder):
             docker_run_args.extend(["/bin/sh", "-c", f"sleep {args.container_timeout}"])
 
         try:
-            self.logger.info(
-                f"Creating container {container_name} with image {args.image}"
-            )
             process = await asyncio.create_subprocess_exec(
                 "docker",
                 *docker_run_args,
@@ -349,5 +358,5 @@ class DockerEnvBuilder(ContainerEnvBuilder):
                 default_forward_env=args.forward_env,
             )
         except Exception as e:
-            self.logger.error(f"Failed to start container {container_name}: {e}")
+            logger.debug(f"Failed to start container {container_name}: {e}")
             raise
