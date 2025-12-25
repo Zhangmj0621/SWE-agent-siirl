@@ -134,7 +134,7 @@ class Trainer:
 
         batch_data_list = ray.get(batch_ref)
 
-        ray.get(self.data_coordinator.reset_cache.remote()) if self.rank == 0 else None
+        ray.get(self.data_coordinator.clear_cache.remote()) if self.rank == 0 else None
         dist.barrier()
 
         return Samples2Dict(batch_data_list)
@@ -231,7 +231,7 @@ class Trainer:
 
                 self.train_step(batch_data)
                 self.update_rollout_weight()
-
+                ray.get(self.rollout_manager.next_rollout.remote())
                 self.global_step += 1
 
                 time.sleep(0.01)

@@ -121,14 +121,15 @@ class DataCoordinator:
         """
         async with self.lock:
             # No filter plugin, use efficient FIFO
+            global_batch_size = batch_size * balance_partitions
             if len(self._cache) > 0:
                 res = self._cache[dp_rank]
                 return res
             if not filter_plugin:
-                if len(self._sample_queue) < batch_size * balance_partitions:
+                if len(self._sample_queue) < global_batch_size:
                     self._batch_wait_log_counter += 1
                     if self._batch_wait_log_counter == 1 or self._batch_wait_log_counter % 100 == 0:
-                        loguru.logger.debug(f"Buffer has {len(self._sample_queue)} samples, waiting for {batch_size * balance_partitions}... (checked {self._batch_wait_log_counter} times)")
+                        loguru.logger.debug(f"Buffer has {len(self._sample_queue)} samples, waiting for {global_batch_size}... (checked {self._batch_wait_log_counter} times)")
                     return []
         
                 batch_items = []
@@ -136,6 +137,8 @@ class DataCoordinator:
                 while self._sample_queue:
                     item = self._sample_queue.popleft()
                     batch_items.append(item)
+                    if len(batch_items) >= global_batch_size:
+                        break
                 # Apply length balancing if requested
                 if balance_partitions and balance_partitions > 1:
                     batch_refs = self._apply_length_balancing(batch_items, balance_partitions)
@@ -149,6 +152,7 @@ class DataCoordinator:
 
                 self._batch_wait_log_counter = 0  # Reset counter on successful batch
                 res = self._cache[dp_rank]
+                loguru.logger.info(f"Buffer return {global_batch_size} samples, {len(self._sample_queue)} samples left")
                 return res
             # With filter plugin, use O(N) filtering and reconstruction
             else:
@@ -162,7 +166,6 @@ class DataCoordinator:
                 else:
                     potential_items = [item for item in self._sample_queue if filter_plugin(item[0])]
                 # 2. Check if there are enough samples
-                global_batch_size = batch_size * balance_partitions
                 if len(potential_items) < global_batch_size:
                     self._batch_wait_log_counter += 1
                     if self._batch_wait_log_counter == 1 or self._batch_wait_log_counter % 100 == 0:
@@ -301,6 +304,10 @@ class DataCoordinator:
         self._sample_queue.clear()
         self._cache = []
 
+    def clear_cache(self):
+        loguru.logger.warning(f"clear cache of datacoordinator, {len(self._sample_queue)} left")
+        self._cache = []
+    
     def __repr__(self) -> str:
         return f"<DataCoordinator(total_samples={len(self._sample_queue)})>"
 

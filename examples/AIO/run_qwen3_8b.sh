@@ -15,9 +15,10 @@ export MODEL_NAME=qwen3-8b
 
 # --- Path Definitions ---
 # Modify these paths according to your environment
-export TRAIN_DATA_PATH=/inspire/hdd/global_user/hujiarui-25046/data/datasets/DeepScaleR/train.parquet
-export TEST_DATA_PATH=/inspire/hdd/global_user/hujiarui-25046/data/datasets/DeepScaleR/test.parquet
-export MODEL_PATH=/inspire/hdd/global_user/hujiarui-25046/data/models/Qwen/Qwen2.5-7B-Instruct
+export HOME_DIR=${HOME_DIR:-{your-home-dir}}
+export TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/train.parquet}
+export TEST_DATA_PATH=${TEST_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/test.parquet}
+export MODEL_PATH=${MODEL_PATH:-$HOME_DIR/data/models/Qwen3-8B}
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
@@ -95,7 +96,7 @@ TRAINING_CMD=(
     rollout.trust_remote_code=True
     # === MultiTurn Env Settings ===
     rollout.multiturn.env_type='tool_env'
-    rollout.multiturn.env_path='/inspire/hdd/global_user/hujiarui-25046/workspace/siirl-async/examples/AIO/config/tools_config_search.yaml'
+    rollout.multiturn.env_path='examples/AIO/config/tools_config_search.yaml'
     rollout.multiturn.max_env_turns=2
     rollout.multiturn.max_assistant_turns=2
     rollout.multiturn.max_env_response_length=512

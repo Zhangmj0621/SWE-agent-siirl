@@ -44,15 +44,15 @@ export NNODES=${PET_NNODES:-1}
 export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-29500}
-export ACTOR_GPUS=2                    # 2 GPUs for training (Actor/Ref)
-export ROLLOUT_GPUS=6                  # 6 GPUs for inference (SGLang)
+export ACTOR_GPUS=4                    # 2 GPUs for training (Actor/Ref)
+export ROLLOUT_GPUS=4                  # 6 GPUs for inference (SGLang)
 
 # --- Actor Parallelism Configuration ---
 # TP (Tensor Parallel): Model sharding across GPUs within a group
 # PP (Pipeline Parallel): Model layer sharding across pipeline stages
 # CP (Context Parallel): Sequence parallelism for long context
 # DP (Data Parallel): Automatically computed as ACTOR_GPUS / (TP * PP * CP)
-export ACTOR_TP=1                      # Actor tensor parallelism (default: 1)
+export ACTOR_TP=4                      # Actor tensor parallelism (default: 1)
 export ACTOR_PP=1                      # Actor pipeline parallelism (default: 1)
 export ACTOR_CP=1                      # Actor context parallelism (default: 1)
 # With ACTOR_GPUS=2, TP=1, PP=1, CP=1 -> DP=2 (2 data parallel trainers)
@@ -107,6 +107,7 @@ TRAINING_CMD=(
     actor_ref.ref.megatron.tensor_model_parallel_size=$ACTOR_TP
     actor_ref.ref.megatron.pipeline_model_parallel_size=$ACTOR_PP
     actor_ref.ref.megatron.context_parallel_size=$ACTOR_CP
+    actor_ref.actor.megatron.use_mbridge=True
     # === Rollout Settings (SGLang) ===
     rollout.name=sglang
     rollout.tensor_model_parallel_size=$ROLLOUT_TP
@@ -240,4 +241,3 @@ except:
 
 # --- Script Entrypoint ---
 main "$@"
-

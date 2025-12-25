@@ -78,7 +78,6 @@ class NaiveFlow():
                 agent_data.state = await self._handle_pending_state(agent_data, engine, loop)
             elif agent_data.state == AgentState.GENERATING:
                 agent_data.state = await self._handle_generating_state(agent_data, sampling_params, engine)
-                print(f"state : {agent_data.state} {AgentState.TERMINATED} {agent_data.state != AgentState.TERMINATED}")
             elif agent_data.state == AgentState.PROCESSING_ENV:
                 agent_data.state = await self._handle_processing_envs_state(agent_data, engine, loop)
             else:
