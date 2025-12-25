@@ -7,13 +7,14 @@ from typing import Optional, BinaryIO
 import kr8s
 from kr8s.asyncio.objects import Pod
 from kr8s._exec import Exec
+from siirl.execution.rollout.agentflow.swe.environment.base import ContainerBuildArgs
 
 from .base import ContainerEnv, ContainerEnvBuilder, ContainerStartArgs, ContainerOutput
 
 logger = logging.getLogger(__name__)
 
 
-class K8rsEnv(ContainerEnv):
+class Kr8sEnv(ContainerEnv):
     """Kubernetes Pod-based container environment."""
 
     def __init__(
@@ -428,7 +429,7 @@ class K8rsEnv(ContainerEnv):
         return not self._closed
 
 
-class K8rsEnvBuilder(ContainerEnvBuilder):
+class Kr8sEnvBuilder(ContainerEnvBuilder):
     """Builder for creating Kubernetes-based container environments."""
 
     def __init__(self, conf: dict):
@@ -456,7 +457,10 @@ class K8rsEnvBuilder(ContainerEnvBuilder):
             )
         return self._api
 
-    async def start(self, args: ContainerStartArgs) -> K8rsEnv:
+    async def build(self, args: ContainerBuildArgs):
+        raise NotImplementedError("K8s does not support container building")
+
+    async def start(self, args: ContainerStartArgs) -> Kr8sEnv:
         """Start a Kubernetes pod from the given configuration.
 
         Args:
@@ -576,7 +580,7 @@ class K8rsEnvBuilder(ContainerEnvBuilder):
                 # Wait before checking again
                 await asyncio.sleep(1)
 
-            return K8rsEnv(
+            return Kr8sEnv(
                 pod=pod,
                 container_name="main",
                 namespace=self.namespace,

@@ -81,17 +81,21 @@ class Model(Protocol):
         raise NotImplementedError
 
 
+class DummyTokenizer:
+    def __getattribute__(self, name: str) -> Any:
+        def call(self, *args, **kargs):
+            return [1]
+
+        return MethodType(call, self)
+
+    def __call__(self, *args, **kargs):
+        return [1]
+
+
 class DummyModel:
     """dumb model used for unit test; its tokenizer always returns [1]"""
 
     def __init__(self, responses: list[str] = []):
-        class DummyTokenizer:
-            def __getattribute__(self, name: str) -> Any:
-                def call(self, *args, **kargs):
-                    return [1]
-
-                return MethodType(call, self)
-
         self.tokenizer = DummyTokenizer()
         self.responses = responses
         self.cursor = 0
@@ -169,8 +173,10 @@ class Sample(Generic[AgentMeta]):
         if isinstance(content, ModelResponse):
             assert role == "assistant"
             self.append_output(content)
+            content = content.output
         else:
             assert role != "assistant"
             tokens: list[int] = self.model.tokenizer(content)
             self.append_input_tokens(tokens)
+        # print(f"message {len(self.conversations)}: role={role}, content:\n{content}\n")
         self.conversations.append({"role": role, "content": content, **kwargs})
