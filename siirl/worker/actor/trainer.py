@@ -115,17 +115,38 @@ class Trainer:
     def has_critic(self):
         return self.critic_worker is not None
 
+    def get_current_weight_version(self) -> int:
+        """Get current weight version from param_sync."""
+        if hasattr(self, 'param_sync') and self.param_sync is not None:
+            return self.param_sync.weight_version
+        return 0
+
+    def _compute_min_version(self) -> int:
+        """
+        Compute minimum acceptable weight version based on off-policy config.
+        
+        off_policy_step controls version staleness tolerance:
+        - 0: strict on-policy, only accept current version
+        - 1: accept data up to 1 version behind
+        - 2: accept data up to 2 versions behind
+        """
+        current_version = self.get_current_weight_version()
+        off_policy_step = self.config.trainer.off_policy_step
+        return max(0, current_version - off_policy_step)
+
     def get_batch(self, batch_size: int):
         if self.data_coordinator is None:
             raise RuntimeError("DataCoordinator not available")
 
-        batch_size = batch_size // self.dp_world_size 
+        batch_size = batch_size // self.dp_world_size
+        min_version = self._compute_min_version()
 
         batch_ref = ray.get(
             self.data_coordinator.get_batch.remote(
                 batch_size=batch_size,
                 dp_rank=self.dp_rank,
                 balance_partitions=self.dp_world_size,
+                min_version=min_version,
             )
         )
 
