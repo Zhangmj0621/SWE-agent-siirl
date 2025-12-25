@@ -76,7 +76,7 @@ class SglangEngine:
         self.port = port
         self.nccl_port = nccl_port
         self.ip = ip
-        self.weights_version = 0
+        self.weight_version = 0
         # GPU placement parameters (directly passed, not calculated)
         self.base_gpu_id = base_gpu_id
         self.node_rank = node_rank
@@ -260,9 +260,9 @@ class SglangEngine:
             payload,
         )
         if weight_version:
-            self.weights_version = int(weight_version)
+            self.weight_version = int(weight_version)
         else:
-            self.weights_version += 1
+            self.weight_version += 1
         return result
 
     def destroy_weights_update_group(self, group_name):

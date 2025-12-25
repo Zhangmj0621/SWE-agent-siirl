@@ -21,7 +21,6 @@ import importlib
 from collections import deque
 from loguru import logger
 from typing import List, Set, Dict, Any
-from loguru import logger
 from siirl.params.training_args import SiiRLArguments
 from siirl.data_coordinator.sample import Sample, SampleInfo, Samples2Dict
 
@@ -304,6 +303,7 @@ class NaiveExecutor:
         self.running = True
         stats_task = None
         rank = int(os.environ.get("RANK"))
+        print(f"[hujr rank] {rank} {rank == 0}")
         if rank == 0:
             stats_task = asyncio.create_task(self.rollout_status(rank))
         
@@ -336,12 +336,13 @@ class NaiveExecutor:
             await asyncio.gather(stats_task, return_exceptions=True)
         
     async def rollout_status(self, rank:int = 0, interval: float = 10.0):
+        last_status = len(self.tasks)
         while True:
             await asyncio.sleep(interval)
-            active = len(self.tasks)
-            if active:
-                logger.info(f"rank_{rank} active generate tasks: {active}, {len(self.pending_queue)} left in pending_queue")
-    
+            current_status = len(self.tasks)
+            # if last_status != current_status:
+            logger.info(f"rank_{rank} active generate tasks: {current_status} {last_status}, {len(self.pending_queue)} left in pending_queue")
+                # last_status = current_status
           
     async def stop(self):
         """

@@ -77,7 +77,7 @@ class RolloutManager:
         # GPUs managed by each actor (capped at node boundary)
         self.gpus_per_actor = min(self.tp_size, self.n_gpus_per_node)
         # Total number of RolloutWorker actors to create
-        self.num_actors = self.rollout_gpu // self.gpus_per_actor
+        self.num_workers = self.rollout_gpu // self.gpus_per_actor
         # Number of TP groups (logical inference engines)
         self.num_tp_groups = self.rollout_gpu // self.tp_size
         # Number of actors per TP group (>1 for cross-node TP)
@@ -125,18 +125,18 @@ class RolloutManager:
         
         logger.info(f"[RolloutManager.init_worker] Configuration:")
         logger.info(f"  rollout_gpu={self.rollout_gpu}, tp_size={self.tp_size}, n_gpus_per_node={self.n_gpus_per_node}")
-        logger.info(f"  gpus_per_actor={self.gpus_per_actor}, num_actors={self.num_actors}")
+        logger.info(f"  gpus_per_actor={self.gpus_per_actor}, num_actors={self.num_workers}")
         logger.info(f"  num_tp_groups={self.num_tp_groups}, actors_per_tp_group={self.actors_per_tp_group}")
         logger.info(f"  GPU indices: {res.indices}, local_ranks: {res.local_ranks}")
         
-        for actor_idx in range(self.num_actors):
+        for worker_idx in range(self.num_workers):
             # Calculate the first GPU index this actor manages
-            first_gpu_idx = actor_idx * self.gpus_per_actor
+            first_gpu_idx = worker_idx * self.gpus_per_actor
             bundle_idx = res.indices[first_gpu_idx]
             local_rank = res.local_ranks[first_gpu_idx]
             
             worker = self._create_worker(
-                rank=actor_idx,
+                rank=worker_idx,
                 local_rank=local_rank,
                 bundle_idx=bundle_idx,
                 num_gpus=0.2,  # Fractional GPU for Ray scheduling
@@ -144,7 +144,7 @@ class RolloutManager:
             )
             self.worker_handle.append(worker)
             
-            logger.debug(f"Actor {actor_idx}: bundle_idx={bundle_idx}, "
+            logger.debug(f"Actor {worker_idx}: bundle_idx={bundle_idx}, "
                          f"local_rank={local_rank}, manages GPUs [{first_gpu_idx}:{first_gpu_idx + self.gpus_per_actor}]")
         
     def _create_worker(self, rank, local_rank, bundle_idx, num_gpus, device_name):
@@ -163,7 +163,7 @@ class RolloutManager:
         """
         # Set distributed environment variables
         env_vars = {
-            DistributedEnv.WORLD_SIZE.value: str(self.num_actors),
+            DistributedEnv.WORLD_SIZE.value: str(self.num_workers),
             DistributedEnv.RANK.value: str(rank),
             DistributedEnv.LOCAL_RANK.value: str(local_rank),
             DistributedEnv.WG_PREFIX.value: self.name_prefix,
@@ -204,7 +204,7 @@ class RolloutManager:
         Returns:
             List of dicts, one per actor:
             {
-                "actor_idx": int,
+                "worker_idx": int,
                 "tp_group_idx": int,
                 "base_gpu_id": int,
                 "node_rank": int,
@@ -218,22 +218,22 @@ class RolloutManager:
         configs = []
         res = self.gpu_resources
         
-        for actor_idx in range(self.num_actors):
+        for worker_idx in range(self.num_workers):
             # Determine which TP group this actor belongs to
-            tp_group_idx = actor_idx // self.actors_per_tp_group
+            tp_group_idx = worker_idx // self.actors_per_tp_group
             # Determine node_rank within the TP group
-            node_rank = actor_idx % self.actors_per_tp_group
+            node_rank = worker_idx % self.actors_per_tp_group
             nnodes = self.actors_per_tp_group
             
             # Get base_gpu_id from GPUResources
-            first_gpu_idx = actor_idx * self.gpus_per_actor
+            first_gpu_idx = worker_idx * self.gpus_per_actor
             base_gpu_id = res.local_ranks[first_gpu_idx]
             
             # Handle dist_init_addr for cross-node TP
             if nnodes > 1:
                 if node_rank == 0:
                     # First actor in TP group: generate and cache dist_init_addr
-                    dist_init_addr = ray.get(self.worker_handle[actor_idx].get_ip_port.remote())
+                    dist_init_addr = ray.get(self.worker_handle[worker_idx].get_ip_port.remote())
                     self._dist_init_addrs[tp_group_idx] = dist_init_addr
                     logger.info(f"TP Group {tp_group_idx}: Cross-node TP with {nnodes} nodes, "
                                 f"dist_init_addr={dist_init_addr}")
@@ -244,7 +244,7 @@ class RolloutManager:
                 dist_init_addr = None
             
             configs.append({
-                "actor_idx": actor_idx,
+                "worker_idx": worker_idx,
                 "tp_group_idx": tp_group_idx,
                 "base_gpu_id": base_gpu_id,
                 "node_rank": node_rank,
@@ -253,7 +253,7 @@ class RolloutManager:
                 "is_tp0": (node_rank == 0),  # Only node_rank=0 registers with router
             })
             
-            logger.debug(f"Actor {actor_idx}: tp_group={tp_group_idx}, node_rank={node_rank}, "
+            logger.debug(f"Actor {worker_idx}: tp_group={tp_group_idx}, node_rank={node_rank}, "
                          f"nnodes={nnodes}, base_gpu_id={base_gpu_id}, is_tp0={node_rank == 0}")
         
         return configs
@@ -273,14 +273,14 @@ class RolloutManager:
         
         logger.info(f"  Built {len(engine_configs)} engine configs:")
         for cfg in engine_configs:
-            logger.info(f"    Actor {cfg['actor_idx']}: tp_group={cfg['tp_group_idx']}, "
+            logger.info(f"    Actor {cfg['worker_idx']}: tp_group={cfg['tp_group_idx']}, "
                        f"node_rank={cfg['node_rank']}/{cfg['nnodes']}, "
                        f"base_gpu_id={cfg['base_gpu_id']}, is_tp0={cfg['is_tp0']}, "
                        f"dist_init_addr={cfg['dist_init_addr']}")
         
         futures = []
         for cfg in engine_configs:
-            worker = self.worker_handle[cfg["actor_idx"]]
+            worker = self.worker_handle[cfg["worker_idx"]]
             
             # Get network configuration from worker
             ip = ray.get(worker.get_ip.remote())
@@ -288,7 +288,7 @@ class RolloutManager:
             nccl_port = ray.get(worker.get_free_port.remote())
             
             future = worker.init_engine.remote(
-                rank=cfg["actor_idx"],
+                rank=cfg["worker_idx"],
                 dist_init_addr=cfg["dist_init_addr"],
                 ip=ip,
                 port=port,
@@ -304,7 +304,7 @@ class RolloutManager:
                 self.worker_urls.append(f"http://{ip}:{port}")
         
         ray.get(futures)
-        logger.info(f"Initialized {self.num_actors} SGLang processes "
+        logger.info(f"Initialized {self.num_workers} SGLang processes "
                     f"({self.num_tp_groups} TP groups, {len(self.worker_urls)} router endpoints)")
 
     def get_rollout_worker_on_tp0(self):
@@ -318,10 +318,10 @@ class RolloutManager:
             List of Ray actor handles for TP0 RolloutWorkers.
         """
         result = []
-        for actor_idx in range(self.num_actors):
-            # TP0 actors have actor_idx divisible by actors_per_tp_group
-            if actor_idx % self.actors_per_tp_group == 0:
-                result.append(self.worker_handle[actor_idx])
+        for worker_idx in range(self.num_workers):
+            # TP0 actors have worker_idx divisible by actors_per_tp_group
+            if worker_idx % self.actors_per_tp_group == 0:
+                result.append(self.worker_handle[worker_idx])
         return result
 
     def start_rollout(self):
@@ -330,10 +330,10 @@ class RolloutManager:
         Only TP0 actors run the executor; other actors only participate in TP communication.
         """
         futures = []
-        for actor_idx in range(self.num_actors):
-            if actor_idx % self.actors_per_tp_group == 0:
+        for worker_idx in range(self.num_workers):
+            if worker_idx % self.actors_per_tp_group == 0:
                 futures.append(
-                    self.worker_handle[actor_idx].start_rollout.remote(
+                    self.worker_handle[worker_idx].start_rollout.remote(
                         self.router_address, self.data_coordinator, self.num_tp_groups
                     )
                 )
@@ -372,10 +372,10 @@ class RolloutManager:
         
         # Update TP0 workers with router address
         futures = []
-        for actor_idx in range(self.num_actors):
-            if actor_idx % self.actors_per_tp_group == 0:
+        for worker_idx in range(self.num_workers):
+            if worker_idx % self.actors_per_tp_group == 0:
                 futures.append(
-                    self.worker_handle[actor_idx].set_router.remote(self.router_address)
+                    self.worker_handle[worker_idx].set_router.remote(self.router_address)
                 )
         ray.get(futures)
 
