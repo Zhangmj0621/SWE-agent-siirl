@@ -95,6 +95,7 @@ class NaiveFlow():
         sample.responses = response_ids
         sample.prompts = prompt_ids
         sample.response_mask = agent_data.response_mask
+        sample.rollout_log_prob = agent_data.rollout_log_prob
         
         # Track reward computation time
         reward_start = time.time()
