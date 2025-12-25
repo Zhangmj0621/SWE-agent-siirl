@@ -153,7 +153,7 @@ class TrainerGroup:
         """
         Execute training loop.
         """
-        batch_size = self.config.data.train_batch_size
+        batch_size = self.config.data.train_batch_size * self.config.rollout.n 
         futures = [trainer.train.remote(batch_size) for trainer in self.trainers]
         ray.get(futures)
 

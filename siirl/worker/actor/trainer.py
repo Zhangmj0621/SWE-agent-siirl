@@ -118,6 +118,8 @@ class Trainer:
         if self.data_coordinator is None:
             raise RuntimeError("DataCoordinator not available")
 
+        batch_size = batch_size // self.dp_world_size 
+
         batch_ref = ray.get(
             self.data_coordinator.get_batch.remote(
                 batch_size=batch_size,
@@ -221,18 +223,13 @@ class Trainer:
                     logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
                     break
 
-                # Get batch data
                 batch_data = self.get_batch(batch_size)
                 if batch_data is None:
                     time.sleep(0.1)
                     continue
 
-                # Execute training step
                 self.train_step(batch_data)
                 self.global_step += 1
-                
-                if self.global_step % 100 == 0:
-                    logger.info(f"[Trainer rank={self.rank}] Completed step {self.global_step}")
 
                 time.sleep(0.01)
 
