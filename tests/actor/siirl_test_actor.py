@@ -73,9 +73,9 @@ def create_grpo_config(tp, pp, model_path):
                 param_dtype="bfloat16",
                 seed=1,
                 param_offload=True,
-                grad_offload=False,
-                optimizer_offload=False,
-                use_mbridge=True,
+                grad_offload=True,
+                optimizer_offload=True,
+                use_mbridge=False,
             ),
             optim=OptimizerArguments(
                 lr=1e-6,
@@ -125,8 +125,8 @@ def create_ppo_config(tp, pp, model_path):
                 param_dtype="bfloat16",
                 seed=1,
                 param_offload=True,
-                grad_offload=False,
-                optimizer_offload=False,
+                grad_offload=True,
+                optimizer_offload=True,
                 use_mbridge=True,
             ),
             optim=OptimizerArguments(
@@ -145,7 +145,7 @@ def create_ppo_config(tp, pp, model_path):
     )
     critci_config = CriticArguments(
         ppo_mini_batch_size=32,
-        ppo_micro_batch_size_per_gpu=8,
+        ppo_micro_batch_size_per_gpu=32,
         ppo_epochs=1,
         ppo_max_token_len_per_gpu=98304,
         load_weight=True,
@@ -159,12 +159,13 @@ def create_ppo_config(tp, pp, model_path):
                 context_parallel_size=1,
                 virtual_pipeline_model_parallel_size=None,
                 sequence_parallel=False,
-                use_distributed_optimizer=False,
+                use_distributed_optimizer=True,
                 param_dtype="bfloat16",
                 seed=1,
-                param_offload=False,
-                optimizer_offload=False,
-                use_mbridge=True,
+                param_offload=True,
+                grad_offload=True,
+                optimizer_offload=True,
+                use_mbridge=False,
             ),
             optim=OptimizerArguments(
                 lr=1e-5,
@@ -362,17 +363,17 @@ class PPOTrainer(BaseTrainer):
         compute_values = self.critic.compute_values(data)
         compare_matrix(compute_values,baseline,"values")
 
-        # data,baseline = get_data_and_baseline(self.loader,current_step,"reference_log_prob")
-        # ref_log_prob = self.ref_worker.compute_ref_log_prob(data)
-        # compare_matrix(ref_log_prob,baseline,"ref_log_prob")
+        data,baseline = get_data_and_baseline(self.loader,current_step,"reference_log_prob")
+        ref_log_prob = self.ref_worker.compute_ref_log_prob(data)
+        compare_matrix(ref_log_prob,baseline,"ref_log_prob")
 
-        # data,baseline = get_data_and_baseline(self.loader,current_step,"actor_old_log_prob")
-        # old_log_prob = self.actor_worker.compute_log_prob(data)
-        # compare_matrix(old_log_prob,baseline,"old_log_probs")
+        data,baseline = get_data_and_baseline(self.loader,current_step,"actor_old_log_prob")
+        old_log_prob = self.actor_worker.compute_log_prob(data)
+        compare_matrix(old_log_prob,baseline,"old_log_probs")
 
-        # data,baseline = get_data_and_baseline(self.loader,current_step,"actor_train")
-        # result = self.actor_worker.update_actor(data)
-        # compare_matrix(result["metrics"],baseline["metrics"],["actor/pg_loss","actor/ppo_kl"])
+        data,baseline = get_data_and_baseline(self.loader,current_step,"actor_train")
+        result = self.actor_worker.update_actor(data)
+        compare_matrix(result["metrics"],baseline["metrics"],["actor/pg_loss","actor/ppo_kl"])
 
         data,baseline = get_data_and_baseline(self.loader,current_step,"critic_train")
         result = self.critic.update_critic(data)

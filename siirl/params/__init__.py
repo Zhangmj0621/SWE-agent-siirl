@@ -7,6 +7,7 @@ from .model_args import (
     ActorArguments,
     RolloutArguments,
     RefArguments,
+    MultiturnArguments
 )
 from .training_args import TrainingArguments, SiiRLArguments
 from .parser import parse_config
@@ -25,4 +26,5 @@ __all__ = [
     "RolloutArguments",
     "parse_config",
     "log_dict_formatted",
+    "MultiturnArguments"
 ]

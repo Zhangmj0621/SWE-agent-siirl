@@ -15,8 +15,8 @@ class SampleInfo(BaseModel):
     prompt_length: int = Field(default=0)
     response_length: int = Field(default=0)
     dict_info: Dict[str, Any] = Field(default_factory=dict)
+    weight_version: int = Field()
     uid: Optional[str] = Field(default=None)
-
 
 class Sample(BaseModel):
     # from tensordict of Dataproto
@@ -39,7 +39,7 @@ class Sample(BaseModel):
     ref_log_prob: Optional[np.ndarray] = Field(default=None)
     rollout_log_prob: Optional[np.ndarray] = Field(default=None)
     # from  non_tensor_batch of Dataproto
-    raw_prompt: str = Field(default="")
+    raw_prompt: List[str] = Field(default_factory=list)
     raw_prompt_ids: List[int] = Field(default_factory=list)
     prompt_texts: str = Field(
         default="",
@@ -59,21 +59,9 @@ class Sample(BaseModel):
         default_factory=dict,
         metadata={"help": "used in multi-turn, may not need to be sample dimension"}
     )
-    request_id: str = Field(
-        default="",
-        metadata={"help": "used in multi-agent"}
-    )
-    traj_len: int = Field(
-        default=None,
-        metadata={"help": "used in multi-agent"}
-    )
     rewards: float = Field(
         default=None,
         metadata={"help": "Rewards"}
-    )
-    traj_step: int = Field(
-        default=None,
-        metadata={"help": "used in multi-agent"}
     )
     seq_final_reward: float = Field(
         default=None,
@@ -92,15 +80,6 @@ class Sample(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
-
-
-class SampleManager(BaseModel):
-    sample_info: Optional[SampleInfo] = Field(default=None)
-    sample: Optional[Union[Sample, ray.ObjectRef]] = Field(default=None)
-
-    class Config:
-        arbitrary_types_allowed = True
-
 
 
 def preprocess_dataloader(data:Dict, n:int = 1):
@@ -155,7 +134,7 @@ def Dict2Samples(data: TensorDict, async_mode: bool = False) -> Union[List[Sampl
         local_sample.extra_info = data['extra_info'][index] if 'extra_info' in data else None
         if 'multi_modal_inputs' in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
-        local_sample.uid = data['uid'][index]
+        local_sample.uid = data['uid'][index].item() if isinstance(data['uid'][index], torch.Tensor) else data['uid'][index]
         return local_sample
 
     async def async_wrapper(data):
@@ -189,7 +168,10 @@ def Samples2Dict(samples: List[Sample]) -> TensorDict:
                         aggregated[field] = []
                     aggregated[field].append(val)
                 elif isinstance(val, (int, float, bool)):
-                    aggregated[field] = val
+                    # Collect scalar values in a list for batching
+                    if field not in aggregated:
+                        aggregated[field] = []
+                    aggregated[field].append(val)
                 else:
                     print(f"key {field} type{type(val)} not support")       
     tensordict_data: Dict[str, Any] = {}
@@ -198,21 +180,24 @@ def Samples2Dict(samples: List[Sample]) -> TensorDict:
     for key, values in aggregated.items():
         if isinstance(values, list):
             first_val = values[0]
-            
+
             # if internal val is not ""/ {} ...
             if isinstance(first_val, np.ndarray):
                 tensordict_data[key] = np.stack(values, axis=0) if first_val.ndim >= 1 else np.concatenate(values, axis=0)
                 default_type = fields[key].annotation
                 if get_origin(default_type) is Union:
-                    args = get_args(default_type)       
+                    args = get_args(default_type)
                     actual_type = next((arg for arg in args if arg is not type(None)), None)
                     if actual_type is np.ndarray:
-                        tensordict_data[key] = torch.tensor(tensordict_data[key]) 
+                        tensordict_data[key] = torch.tensor(tensordict_data[key])
                 elif default_type is np.ndarray:
                     tensordict_data[key] = torch.tensor(tensordict_data[key])
             elif isinstance(first_val, str):
                 if first_val:
                     tensordict_data[key] = values
+            elif isinstance(first_val, (int, float, bool)):
+                # Convert scalar values to tensor
+                tensordict_data[key] = torch.tensor(values)
             else:
                 if first_val:
                     tensordict_data[key] = NonTensorData(

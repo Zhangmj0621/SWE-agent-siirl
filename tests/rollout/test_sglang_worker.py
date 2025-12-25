@@ -21,7 +21,7 @@ import ray
 from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.data_coordinator.data_buffer import init_data_coordinator
-from siirl.worker.ray_utils import create_placement_groups
+from siirl.worker.ray_utils import allocate_resources
 from siirl.worker.rollout.rollout_manager import RolloutManager
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
@@ -66,13 +66,15 @@ class MainRunner:
             world_size=siirl_args.trainer.nnodes * siirl_args.trainer.n_gpus_per_node
         )
         dataloader_fut = data_coordinator_handle.init_dataloader.remote(siirl_args)
-        # 2. initialize pg
-        pgs = create_placement_groups(siirl_args)
-        print(f"[pgs] {pgs}")
+        # 2. Allocate GPU resources
+        resources = allocate_resources(siirl_args)
+        rollout_resources = resources["rollout"]
+        logger.info(f"Allocated rollout resources: {rollout_resources}")
+        
         # 3. Initialize rollout worker
-        rollout_pgs = pgs
-        rollout_worker = RolloutManager(siirl_args, rollout_pgs, data_coordinator_handle)
         ray.get(dataloader_fut)
+        rollout_worker = RolloutManager.remote(siirl_args, rollout_resources, data_coordinator_handle)
+        logger.info("RolloutManager initialized")
         total_training_steps, num_train_batches = ray.get(data_coordinator_handle.epoch_info.remote())
         global_steps = 0
         
@@ -81,10 +83,9 @@ class MainRunner:
             batches_to_skip = global_steps % num_train_batches
         for epoch in range(start_epoch, siirl_args.trainer.total_epochs):
             for batch_idx in range(num_train_batches):
-                for _ in range(siirl_args.trainer.async_factor):
-                    ray.get(data_coordinator_handle.run_dataloader.remote(epoch))
-                batch_idx += siirl_args.trainer.async_factor
-                time.sleep(10)
+                ray.get(data_coordinator_handle.run_dataloader.remote(epoch))
+                while True:
+                    pass
         # 4. Initialize Actor worker
         
         
@@ -110,9 +111,13 @@ def main() -> None:
     start_time = time.time()
 
     # Initialize Ray cluster if not already running
-    if not ray.is_initialized():
-        logger.info("Initializing local Ray cluster...")
-        ray.init(runtime_env={"env_vars": RAY_RUNTIME_ENV_VARS}, num_cpus=None)
+    logger.info("Initializing local Ray cluster...")
+    # 显式告诉 ray：我要本地起头节点，别去连外部
+    ray.init(
+        address="local",                      # 关键
+        runtime_env={"env_vars": RAY_RUNTIME_ENV_VARS},
+        num_cpus=None
+    )
     logger.success(f"Ray is initialized. Time cost: {(time.time() - start_time) * 1000:.2f} ms")
 
     # Parse the complete configuration into a structured object
@@ -122,9 +127,15 @@ def main() -> None:
     siirl_args.data.train_files = ['/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/train.parquet']
     siirl_args.data.val_files = ['/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/test.parquet']
     siirl_args.data.max_prompt_length=2048
-    siirl_args.data.max_response_length=4096
+    siirl_args.data.max_response_length=2048
     siirl_args.data.filter_overlong_prompts=True
-    siirl_args.rollout.n=8
+    siirl_args.rollout.n=2
+    siirl_args.rollout.multiturn.env_type='tool_env'
+    siirl_args.rollout.multiturn.env_path='/inspire/hdd/global_user/hujiarui-25046/workspace/siirl-async/examples/AIO/tools_config_search.yaml'
+    siirl_args.rollout.multiturn.max_env_turns = 2
+    siirl_args.rollout.multiturn.max_assistant_turns = 2
+    siirl_args.rollout.multiturn.max_env_response_length = 512
+    siirl_args.rollout.max_model_len = 10 * 1024
     # siirl_args.data.train_batch_size = siirl_args.data.train_batch_size // 2
     log_dict_formatted(siirl_args.to_dict(), "SiiRLArguments")
 

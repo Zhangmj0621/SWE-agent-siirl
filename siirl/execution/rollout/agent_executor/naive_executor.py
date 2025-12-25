@@ -21,7 +21,6 @@ import importlib
 from collections import deque
 from loguru import logger
 from typing import List, Set, Dict, Any
-from loguru import logger
 from siirl.params.training_args import SiiRLArguments
 from siirl.data_coordinator.sample import Sample, SampleInfo, Samples2Dict
 
@@ -49,14 +48,13 @@ class NaiveExecutor:
         self.max_concurrency_size = train_batch_size * config.rollout.n
         self.tasks:Set[asyncio.Task] = set()  # Track active generation tasks for cleanup
         self.finish_group_samples:Dict[str, List[Any]] = {} # Save result of finish samples until reach n group
-        self.waiting_samples = deque()
+        self.pending_queue = deque()
         self.rollout_n = config.rollout.n
         # Sampling parameters for text generation (LLM inference config)
         self.sampling_params =  dict(
             temperature=config.rollout.temperature,  # Randomness control for generation
             top_p=config.rollout.top_p,  # Nucleus sampling threshold
             repetition_penalty=1.0,  # Penalty for repetitive text generation
-            max_new_tokens=config.data.max_response_length  # Maximum generated tokens
         )
         
         # Semaphore to control concurrent generation tasks (limit to batch size)
@@ -67,16 +65,13 @@ class NaiveExecutor:
         # Load custom reward function if configured
         if config.custom_reward_function.path:
             from siirl.utils.reward_score.custom_reward import load_custom_reward_function
-            self.reward_fn = load_custom_reward_function(config = config)
+            self.reward_fn = load_custom_reward_function(config=config)
         
         # Load rollout flow function (naive or custom)
         flow_path = config.rollout.flow_function
         if flow_path == "naive":
-            from siirl.execution.rollout.agent_flow.naive_flow import naive_flow
-            self.rollout_flow = naive_flow
-        elif flow_path == "aio":
-            from siirl.execution.rollout.agent_flow.aio_flow import aio_flow
-            self.aio_flow = aio_flow
+            from siirl.execution.rollout.agent_flow.naive_flow import NaiveFlow
+            self.rollout_flow = NaiveFlow(self.config, self.engine)
         elif flow_path == "agent":
             from siirl.execution.rollout.agent_flow.agent_flow import build_agentflow
             self.rollout_flow = build_agentflow(config.rollout.flow_config, engine)
@@ -85,8 +80,12 @@ class NaiveExecutor:
             module_path, name = flow_path.rsplit('.', 1)
             mod = importlib.import_module(module_path)
             self.rollout_flow = getattr(mod, name)
-        
-        
+
+    async def init_sample(self):
+        need_replenish = self.max_concurrency_size
+
+    
+
     async def get_sample(self):
         """
         Get new samples from data coordinator to replenish the batch.
@@ -100,19 +99,20 @@ class NaiveExecutor:
         if need_replenish == 0:
             return []
         # Request new samples from data coordinator (Ray remote call)
-        if len(self.waiting_samples) < need_replenish:
-            diff = need_replenish - len(self.waiting_samples)
+        if len(self.pending_queue) < need_replenish:
+            diff = need_replenish - len(self.pending_queue)
             pull_size = (diff + self.rollout_n - 1) // self.rollout_n
             
             pull_samples = await self.data_coordinator.get_dataloader.remote(pull_size)
             
             for sample in pull_samples:
                 samples = [copy.deepcopy(sample) for _ in range(self.rollout_n)]
-                self.waiting_samples.extend(samples)
+                self.pending_queue.extend(samples)
         new_samples = []
-        if len(self.waiting_samples):
-            for _ in range(need_replenish):
-                new_samples.append(self.waiting_samples.popleft())
+
+        for _ in range(need_replenish): 
+            if len(self.pending_queue):
+                new_samples.append(self.pending_queue.popleft())
         return new_samples
     
     
@@ -167,7 +167,7 @@ class NaiveExecutor:
         sample.prompts = sample.raw_prompt_ids
         return sample
     
-    def _post_process(self, sample):
+    def _post_process(self, sample:Sample):
         """
         Postprocess generated sample with padding, sequence concatenation, and reward formatting.
         Standardizes prompt/response lengths, creates attention masks, and formats reward tensors.
@@ -244,6 +244,7 @@ class NaiveExecutor:
             prompt_length=getattr(sample, 'prompt_length', 0),
             response_length=getattr(sample, 'response_length', 0),
             uid=str(sample.uid),
+            weight_version=self.engine.weight_version,
             dict_info={
                 'key': "Actor",
             })
@@ -272,7 +273,6 @@ class NaiveExecutor:
         """
         async with self.semaphore:  # Limit concurrent generations to batch size
             loop = asyncio.get_running_loop()
-            
             # 1. Preprocess sample (CPU-bound, offload to executor)
             sample = await loop.run_in_executor(
                         None, 
@@ -301,10 +301,15 @@ class NaiveExecutor:
         Runs until self.running is set to False.
         """
         self.running = True
+        stats_task = None
+        rank = int(os.environ.get("RANK"))
+        print(f"[hujr rank] {rank} {rank == 0}")
+        if rank == 0:
+            stats_task = asyncio.create_task(self.rollout_status(rank))
+        
         while self.running:
             # Get new samples to replenish batch
             samples = await self.get_sample()
-            
             if not samples:
                 # No new samples - short sleep to avoid busy waiting
                 await asyncio.sleep(0.001)
@@ -326,7 +331,19 @@ class NaiveExecutor:
                 
                 # Yield control to event loop (non-blocking sleep)
                 await asyncio.sleep(0)  
-                
+        if rank == 0:
+            stats_task.cancel()
+            await asyncio.gather(stats_task, return_exceptions=True)
+        
+    async def rollout_status(self, rank:int = 0, interval: float = 10.0):
+        last_status = len(self.tasks)
+        while True:
+            await asyncio.sleep(interval)
+            current_status = len(self.tasks)
+            # if last_status != current_status:
+            logger.info(f"rank_{rank} active generate tasks: {current_status} {last_status}, {len(self.pending_queue)} left in pending_queue")
+                # last_status = current_status
+          
     async def stop(self):
         """
         Stop executor and clean up active tasks.

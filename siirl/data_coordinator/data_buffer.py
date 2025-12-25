@@ -13,18 +13,13 @@
 # limitations under the License.
 
 import asyncio
-from typing import Dict, List, Optional, Tuple, Callable, Any
-import heapq
-import random
+from typing import List, Optional, Tuple, Callable, Any
 import ray
 import loguru
-import time
-import threading
+import copy
 
-from collections import deque
+from collections import deque, defaultdict
 from loguru import logger
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-
 
 
 from siirl.data_coordinator.sample import SampleInfo
@@ -51,6 +46,7 @@ class DataCoordinator:
         # Use a deque to store tuples of metadata and references for efficient FIFO operations
         self._sample_queue: deque[Tuple[SampleInfo, ray.ObjectRef]] = deque()
         self._put_counter = 0  # Used for round-robin buffer selection
+        self._batch_wait_log_counter = 0  # Counter to throttle "waiting for samples" logs
         self.lock = asyncio.Lock()
         loguru.logger.info("Global DataCoordinator initialized.")
         self._cache = []
@@ -125,12 +121,15 @@ class DataCoordinator:
         """
         async with self.lock:
             # No filter plugin, use efficient FIFO
+            global_batch_size = batch_size * balance_partitions
             if len(self._cache) > 0:
                 res = self._cache[dp_rank]
                 return res
             if not filter_plugin:
-                if len(self._sample_queue) < batch_size * balance_partitions:
-                    loguru.logger.warning(f"Coordinator queue size ({len(self._sample_queue)}) is less than requested batch size ({batch_size}). Returning empty list.")
+                if len(self._sample_queue) < global_batch_size:
+                    self._batch_wait_log_counter += 1
+                    if self._batch_wait_log_counter == 1 or self._batch_wait_log_counter % 100 == 0:
+                        loguru.logger.debug(f"Buffer has {len(self._sample_queue)} samples, waiting for {global_batch_size}... (checked {self._batch_wait_log_counter} times)")
                     return []
         
                 batch_items = []
@@ -138,15 +137,23 @@ class DataCoordinator:
                 while self._sample_queue:
                     item = self._sample_queue.popleft()
                     batch_items.append(item)
+                    if len(batch_items) >= global_batch_size:
+                        break
                 # Apply length balancing if requested
                 if balance_partitions and balance_partitions > 1:
                     batch_refs = self._apply_length_balancing(batch_items, balance_partitions)
                 else:
                     batch_refs = [item[1] for item in batch_items]
-                self._cache = batch_refs
-                get_refs = self._cache[:batch_size]
-                self._cache = self._cache[batch_size:] if len(self._cache) >= batch_size else None
-                return get_refs
+
+                # Build cache as list of lists, one for each dp_rank
+                self._cache = []
+                for rank in range(balance_partitions):
+                    self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
+
+                self._batch_wait_log_counter = 0  # Reset counter on successful batch
+                res = self._cache[dp_rank]
+                loguru.logger.info(f"Buffer return {global_batch_size} samples, {len(self._sample_queue)} samples left")
+                return res
             # With filter plugin, use O(N) filtering and reconstruction
             else:
                 # 1. The filtering process does not consume elements from the queue
@@ -159,9 +166,10 @@ class DataCoordinator:
                 else:
                     potential_items = [item for item in self._sample_queue if filter_plugin(item[0])]
                 # 2. Check if there are enough samples
-                global_batch_size = batch_size * balance_partitions
                 if len(potential_items) < global_batch_size:
-                    loguru.logger.warning(f"After filtering, {filter_plugin} coordinator has {len(potential_items)} samples, which is less than requested batch size ({global_batch_size}). Returning empty list.")
+                    self._batch_wait_log_counter += 1
+                    if self._batch_wait_log_counter == 1 or self._batch_wait_log_counter % 100 == 0:
+                        loguru.logger.debug(f"Buffer has {len(potential_items)} samples, waiting for {global_batch_size}... (checked {self._batch_wait_log_counter} times)")
                     return []
                 potential_items = potential_items[:global_batch_size]
                 # 4. Efficiently remove the selected items from the original queue
@@ -175,6 +183,7 @@ class DataCoordinator:
                     batch_refs = [item[1] for item in potential_items]
                 for rank in range(balance_partitions):
                     self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
+                self._batch_wait_log_counter = 0  # Reset counter on successful batch
                 res = self._cache[dp_rank]
                 
                 return res
@@ -187,14 +196,100 @@ class DataCoordinator:
         keep_mini_batch = False
     ) -> List[ray.ObjectRef]:
         """Applies the length balancing algorithm to reorder samples.
-        
         Uses the LPT (Longest Processing Time) algorithm to reorder samples so that
         if they are evenly distributed among k_partitions workers, the sum of
         sample lengths for each worker is as balanced as possible.
         
+        Supports Group N: samples with the same uid will be assigned to the same partition,
+        ensuring correct group-relative advantage computation for GRPO and similar algorithms.
+        
         Args:
             batch_items: A list of (SampleInfo, ObjectRef) tuples.
             k_partitions: The number of partitions (typically the DP size).
+            keep_mini_batch: Whether to keep mini-batch structure during balancing.
+            
+        Returns:
+            A reordered list of ObjectRefs.
+        """
+        # ========== Step 1: Group samples by uid ==========
+        uid_to_indices = defaultdict(list)
+        for idx, (sample_info, _) in enumerate(batch_items):
+            uid = sample_info.uid if sample_info.uid is not None else str(idx)
+            uid_to_indices[uid].append(idx)
+        
+        # Check if grouping is needed (max_group_size > 1 means we have Group N)
+        max_group_size = max(len(indices) for indices in uid_to_indices.values()) if uid_to_indices else 1
+        
+        if max_group_size == 1:
+            # No grouping needed, use original single-sample balancing logic
+            return self._apply_length_balancing_single_sample(batch_items, k_partitions, keep_mini_batch)
+        
+        # ========== Step 2: Calculate workload for each Group ==========
+        group_list = list(uid_to_indices.keys())  # All unique uids
+        group_workloads = []
+        for uid in group_list:
+            indices = uid_to_indices[uid]
+            # Group workload = sum of all samples' sum_tokens in the group
+            total_tokens = sum(batch_items[i][0].sum_tokens for i in indices)
+            group_workloads.append(total_tokens)
+        
+        # ========== Step 3: Balance Groups across partitions ==========
+        workload_lst = calculate_workload(group_workloads)
+        
+        # Check if number of groups is divisible by k_partitions
+        num_groups = len(group_list)
+        if num_groups < k_partitions:
+            loguru.logger.warning(
+                f"Number of groups ({num_groups}) is less than partitions ({k_partitions}). "
+                f"Some partitions will be empty. Falling back to single-sample balancing."
+            )
+            return self._apply_length_balancing_single_sample(batch_items, k_partitions, keep_mini_batch)
+        
+        equal_size = (num_groups % k_partitions == 0)
+        if not equal_size:
+            loguru.logger.warning(
+                f"Number of groups ({num_groups}) is not divisible by partitions ({k_partitions}). "
+                f"Some partitions may have uneven group counts."
+            )
+        
+        # Partition groups across workers
+        group_partitions = get_seqlen_balanced_partitions(
+            workload_lst, 
+            k_partitions=k_partitions, 
+            equal_size=equal_size
+        )
+        
+        # ========== Step 4: Expand groups to samples, keeping group integrity ==========
+        reordered_refs = []
+        for partition_group_indices in group_partitions:
+            for group_idx in partition_group_indices:
+                uid = group_list[group_idx]
+                sample_indices = uid_to_indices[uid]
+                # Add all samples of the same group together, preserving original order within group
+                for sample_idx in sample_indices:
+                    reordered_refs.append(batch_items[sample_idx][1])
+        
+        loguru.logger.debug(
+            f"Applied GROUP-aware length balancing: "
+            f"{len(batch_items)} samples in {num_groups} groups (group_size={max_group_size}) "
+            f"reordered into {k_partitions} partitions"
+        )
+        
+        return reordered_refs
+
+    def _apply_length_balancing_single_sample(
+        self, 
+        batch_items: List[Tuple[SampleInfo, ray.ObjectRef]], 
+        k_partitions: int,
+        keep_mini_batch = False
+    ) -> List[ray.ObjectRef]:
+        """
+        This is used when there's no Group N (each uid has only one sample).
+        
+        Args:
+            batch_items: A list of (SampleInfo, ObjectRef) tuples.
+            k_partitions: The number of partitions (typically the DP size).
+            keep_mini_batch: Whether to keep mini-batch structure during balancing.
             
         Returns:
             A reordered list of ObjectRefs.
@@ -288,12 +383,17 @@ class DataCoordinator:
                     if source_dp_size is not None:
                         return source_dp_size
             return None
-
+    
+    #TODO: supporty for async train
     def reset_cache(self):
         loguru.logger.warning("reset datacoordinator")
         self._sample_queue.clear()
         self._cache = []
 
+    def clear_cache(self):
+        loguru.logger.warning(f"clear cache of datacoordinator, {len(self._sample_queue)} left")
+        self._cache = []
+    
     def __repr__(self) -> str:
         return f"<DataCoordinator(total_samples={len(self._sample_queue)})>"
 
@@ -302,8 +402,11 @@ class DataCoordinator:
     # # dataloader function
     @ray.method(concurrency_group="dataloader")
     def init_dataloader(self, config: SiiRLArguments):
+        # set async factor
+        async_config = copy.deepcopy(config)
+        async_config.data.train_batch_size *= async_config.trainer.async_factor
         self.dataloader = DataLoaderNode(
-            global_config = config,
+            global_config = async_config,
             config={
                 "group_world_size": 1,
                 "group_rank": 0,

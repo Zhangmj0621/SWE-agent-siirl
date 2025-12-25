@@ -12,10 +12,35 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import torch
+from typing import Dict
 
+from siirl.utils.megatron.megatron_utils import print_rank_0
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+
+def init_megatron_optim_config(optim_config: Dict) -> OptimizerConfig:
+    optim_args = {
+        "optimizer": "adam",
+        "lr": optim_config.lr,
+        "min_lr": optim_config.min_lr,
+        "clip_grad": optim_config.clip_grad,
+        "weight_decay": optim_config.weight_decay,
+        "bf16": True,
+        "params_dtype": torch.bfloat16,
+        "use_distributed_optimizer": True,
+    }
+
+    override_config = optim_config.override_optimizer_config
+    if override_config:
+        for k, v in override_config.items():
+            optim_args[k] = v
+
+    print_rank_0(f"optimizer config after override: {optim_args}")
+
+    config = OptimizerConfig(**optim_args)
+    return config
 
 
 def get_megatron_optimizer(

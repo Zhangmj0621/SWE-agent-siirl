@@ -21,7 +21,9 @@ from loguru import logger
 from typing import Optional, Dict, Any, Literal
 from requests.exceptions import RequestException
 import httpx
-    
+import logging
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 def wait_until_ok(
     url: str,
     *,

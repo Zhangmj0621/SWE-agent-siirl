@@ -28,6 +28,8 @@ def get_master_info() -> Tuple[str, str]:
     Priority:
     1. Use environment variables if already set (MASTER_ADDR, MASTER_PORT)
     2. Otherwise, get host IP and find a free port
+    
+    Note: If MASTER_ADDR is a hostname, it will be resolved to an IP address.
 
     Returns:
         A tuple containing (master_addr, master_port)
@@ -45,6 +47,20 @@ def get_master_info() -> Tuple[str, str]:
             s.close()
         except Exception:
             master_addr = "127.0.0.1"
+    else:
+        # Resolve hostname to IP if necessary
+        from loguru import logger
+        try:
+            socket.inet_aton(master_addr)
+            # It's already a valid IP address
+        except socket.error:
+            # It's a hostname, resolve it to IP
+            try:
+                resolved_ip = socket.gethostbyname(master_addr)
+                logger.info(f"Resolved MASTER_ADDR '{master_addr}' -> '{resolved_ip}'")
+                master_addr = resolved_ip
+            except socket.gaierror as e:
+                logger.warning(f"Failed to resolve hostname '{master_addr}': {e}")
 
     if master_port is None:
         # Find a free port
