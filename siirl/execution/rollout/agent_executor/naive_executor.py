@@ -15,6 +15,7 @@ import os
 import copy
 import asyncio
 import ray
+import time
 import torch
 import importlib
 
@@ -271,6 +272,11 @@ class NaiveExecutor:
         Returns:
             Postprocessed sample with generated response and formatted tensors
         """
+        # Record timing information for performance analysis
+        timing_info = {
+            "rollout_start_at": time.time(),
+        }
+        
         async with self.semaphore:  # Limit concurrent generations to batch size
             loop = asyncio.get_running_loop()
             # 1. Preprocess sample (CPU-bound, offload to executor)
@@ -290,7 +296,14 @@ class NaiveExecutor:
                         sample
                     )
             
-            # 4. Store processed sample in Ray object store and notify data coordinator
+            # 4. Collect timing information from rollout flow
+            timing_info["rollout_end_at"] = time.time()
+            timing_info["rollout_duration"] = timing_info["rollout_end_at"] - timing_info["rollout_start_at"]
+            timing_info["generation_duration"] = getattr(sample, "_generation_duration", 0)
+            timing_info["reward_duration"] = getattr(sample, "_reward_duration", 0)
+            sample.timing_info = timing_info
+            
+            # 5. Store processed sample in Ray object store and notify data coordinator
             await self.put_data(sample = sample, loop = loop)
             return sample
 

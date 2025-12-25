@@ -305,3 +305,73 @@ def compute_log_prob_diff_metrics(
     
     return metrics, std_stats
 
+
+def extract_rollout_timing_metrics(data: TensorDict) -> Dict[str, Any]:
+    """
+    Extracts rollout timing metrics from batch data.
+    
+    Each sample in the batch carries timing_info recorded during rollout:
+    - rollout_start_at: Unix timestamp when rollout started
+    - rollout_end_at: Unix timestamp when rollout ended
+    - rollout_duration: Total rollout time (seconds)
+    - generation_duration: LLM generation time (seconds)
+    - reward_duration: Reward computation time (seconds)
+    
+    Args:
+        data: A TensorDict containing batch data. The timing_info is expected
+              to be stored in data["timing_info"] as a list of dicts.
+              
+    Returns:
+        A dictionary containing:
+            - perf/delta_time/rollout_per_sample: Average rollout duration per sample
+            - perf/delta_time/generation_per_sample: Average generation duration per sample
+            - perf/delta_time/reward_per_sample: Average reward duration per sample
+            - _earliest_rollout_start_at: Earliest rollout start timestamp (for e2e calculation)
+    """
+    metrics = {}
+    
+    # Try to extract timing_info from data
+    timing_info_list = None
+    
+    if "timing_info" in data:
+        timing_info_raw = data["timing_info"]
+        # Handle NonTensorData wrapper
+        if hasattr(timing_info_raw, 'data'):
+            timing_info_list = timing_info_raw.data
+        elif isinstance(timing_info_raw, list):
+            timing_info_list = timing_info_raw
+    
+    if not timing_info_list or len(timing_info_list) == 0:
+        return metrics
+    
+    # Extract timing values from each sample
+    rollout_durations = []
+    generation_durations = []
+    reward_durations = []
+    rollout_start_times = []
+    
+    for timing_info in timing_info_list:
+        if isinstance(timing_info, dict):
+            if "rollout_duration" in timing_info:
+                rollout_durations.append(timing_info["rollout_duration"])
+            if "generation_duration" in timing_info:
+                generation_durations.append(timing_info["generation_duration"])
+            if "reward_duration" in timing_info:
+                reward_durations.append(timing_info["reward_duration"])
+            if "rollout_start_at" in timing_info:
+                rollout_start_times.append(timing_info["rollout_start_at"])
+    
+    # Compute average metrics
+    if rollout_durations:
+        metrics["perf/delta_time/rollout_per_sample"] = sum(rollout_durations) / len(rollout_durations)
+    if generation_durations:
+        metrics["perf/delta_time/generation_per_sample"] = sum(generation_durations) / len(generation_durations)
+    if reward_durations:
+        metrics["perf/delta_time/reward_per_sample"] = sum(reward_durations) / len(reward_durations)
+    
+    # Store earliest rollout start for e2e latency calculation (internal use)
+    if rollout_start_times:
+        metrics["_earliest_rollout_start_at"] = min(rollout_start_times)
+    
+    return metrics
+

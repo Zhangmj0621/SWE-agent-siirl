@@ -313,6 +313,7 @@ class Trainer:
                     compute_data_metric,
                     compute_throughput_metrics,
                     compute_log_prob_diff_metrics,
+                    extract_rollout_timing_metrics,
                 )
                 
                 # Compute and submit data metrics
@@ -320,20 +321,30 @@ class Trainer:
                 self.metric_client.submit_metric(data_metrics, self.dp_world_size)
 
                 # Compute and submit throughput metrics
+                # Note: throughput will be recalculated in train() with correct step_interval
                 n_gpus = self.world_size
                 throughput_metrics = compute_throughput_metrics(data_for_update, timing_raw, n_gpus)
                 self.metric_client.submit_metric(throughput_metrics, self.dp_world_size)
-
-                # Submit timing metrics
+                
+                # Submit timing metrics (train_step internal timings)
                 timing_metrics = {f"timing_s/{k}": v for k, v in timing_raw.items()}
                 self.metric_client.submit_metric(timing_metrics, self.dp_world_size)
 
+                # Extract and submit rollout timing metrics from batch data
+                rollout_timing = extract_rollout_timing_metrics(data_for_update)
+                if rollout_timing:
+                    # Separate internal key from metrics to submit
+                    earliest_start = rollout_timing.pop("_earliest_rollout_start_at", None)
+                    if rollout_timing:
+                        self.metric_client.submit_metric(rollout_timing, self.dp_world_size)
+
                 # Submit actor/critic update metrics
+                # Note: metrics from megatron_actor.py already have proper prefixes (e.g. "actor/pg_loss", "perf/mfu/actor")
+                # so we just merge them directly without adding another prefix
                 flat_metrics = {}
                 for prefix, result_dict in metrics.items():
                     if isinstance(result_dict, dict):
-                        for k, v in result_dict.items():
-                            flat_metrics[f"{prefix}/{k}"] = v
+                        flat_metrics.update(result_dict)
                 if flat_metrics:
                     self.metric_client.submit_metric(flat_metrics, self.dp_world_size)
 
@@ -395,6 +406,9 @@ class Trainer:
         """
         logger.info(f"[Trainer rank={self.rank}] Starting training loop, batch_size={batch_size}")
         
+        # Track step interval for accurate throughput calculation
+        last_step_end_time = None
+
         try:
             while True:
                 # Check stop signal
@@ -402,7 +416,10 @@ class Trainer:
                     logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
                     break
 
-                batch_data = self.get_batch(batch_size)
+                # Record get_batch timing
+                with Timer("get_batch") as get_batch_timer:
+                    batch_data = self.get_batch(batch_size)
+
                 if batch_data is None:
                     time.sleep(0.1)
                     continue
@@ -412,6 +429,13 @@ class Trainer:
                 # Update rollout weights and record timing
                 with Timer("weight_sync") as weight_sync_timer:
                     self.update_rollout_weight()
+
+                # Calculate step_interval (time between consecutive step completions)
+                current_step_end_time = time.time()
+                step_interval = None
+                if last_step_end_time is not None:
+                    step_interval = current_step_end_time - last_step_end_time
+                last_step_end_time = current_step_end_time
 
                 # Wait for all metric submissions and aggregate (rank=0 does the logging)
                 if self.metric_client is not None:
@@ -427,6 +451,16 @@ class Trainer:
                             aggregated_metrics = self.metric_client.wait_final_res()
                             aggregated_metrics["training/global_step"] = self.global_step
                             aggregated_metrics["perf/delta_time/weight_sync"] = weight_sync_timer.elapsed
+                            aggregated_metrics["perf/delta_time/get_batch"] = get_batch_timer.elapsed
+
+                            # Add step_interval for accurate throughput measurement
+                            if step_interval is not None:
+                                aggregated_metrics["perf/delta_time/step_interval"] = step_interval
+                                # Recalculate throughput using step_interval (system throughput)
+                                total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
+                                if step_interval > 0 and total_tokens > 0:
+                                    aggregated_metrics["perf/throughput"] = total_tokens / (step_interval * self.world_size)
+
                             self.tracker.log(aggregated_metrics, step=self.global_step)
 
                     except Exception as e:
