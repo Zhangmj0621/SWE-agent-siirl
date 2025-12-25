@@ -253,11 +253,15 @@ class NaiveExecutor:
             self.finish_group_samples[sample.uid] = []
         self.finish_group_samples[sample.uid].append((sample_info, sample_ref))
         # Send processed sample to data coordinator
-        if len(self.finish_group_samples[sample.uid]) == self.rollout_n:
+        current_count = len(self.finish_group_samples[sample.uid])
+        logger.info(f"[NaiveExecutor.put_data] uid={sample.uid}, collected {current_count}/{self.rollout_n} samples")
+        if current_count == self.rollout_n:
             tuple_datas = self.finish_group_samples.pop(sample.uid)
             sample_infos = [tuple_data[0] for tuple_data in tuple_datas]
             sample_refs = [tuple_data[1] for tuple_data in tuple_datas]
+            logger.info(f"[NaiveExecutor.put_data] Calling data_coordinator.put_batch with {len(sample_refs)} samples")
             await self.data_coordinator.put_batch.remote(sample_infos, sample_refs)
+            logger.info(f"[NaiveExecutor.put_data] put_batch completed for uid={sample.uid}")
         
         return sample
     

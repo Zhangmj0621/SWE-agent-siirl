@@ -94,6 +94,7 @@ class DataCoordinator:
         
         async with self.lock:
             self._sample_queue.extend(zip(sample_infos, sample_refs))
+            loguru.logger.info(f"[DataCoordinator.put_batch] Added {len(sample_refs)} samples, total in queue: {len(self._sample_queue)}")
 
     async def get_batch(
         self, 
@@ -129,7 +130,7 @@ class DataCoordinator:
                 if len(self._sample_queue) < global_batch_size:
                     self._batch_wait_log_counter += 1
                     if self._batch_wait_log_counter == 1 or self._batch_wait_log_counter % 100 == 0:
-                        loguru.logger.debug(f"Buffer has {len(self._sample_queue)} samples, waiting for {global_batch_size}... (checked {self._batch_wait_log_counter} times)")
+                        loguru.logger.info(f"[DataCoordinator.get_batch] Buffer has {len(self._sample_queue)} samples, waiting for {global_batch_size}... (checked {self._batch_wait_log_counter} times)")
                     return []
         
                 batch_items = []

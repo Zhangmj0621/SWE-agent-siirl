@@ -226,6 +226,7 @@ class Trainer:
 
         batch_size = batch_size // self.dp_world_size 
 
+        logger.info(f"[Trainer.get_batch] rank={self.rank} dp_rank={self.dp_rank} calling data_coordinator.get_batch")
         batch_ref = ray.get(
             self.data_coordinator.get_batch.remote(
                 batch_size=batch_size,
@@ -233,18 +234,24 @@ class Trainer:
                 balance_partitions=self.dp_world_size,
             )
         )
+        logger.info(f"[Trainer.get_batch] rank={self.rank} dp_rank={self.dp_rank} got batch_ref, len={len(batch_ref) if batch_ref else 0}, type={type(batch_ref)}")
 
         dist.barrier()
 
         if not batch_ref:
+            logger.info(f"[Trainer.get_batch] rank={self.rank} dp_rank={self.dp_rank} batch_ref is empty, returning None")
             return None
 
+        logger.info(f"[Trainer.get_batch] rank={self.rank} dp_rank={self.dp_rank} calling ray.get(batch_ref)")
         batch_data_list = ray.get(batch_ref)
+        logger.info(f"[Trainer.get_batch] rank={self.rank} dp_rank={self.dp_rank} got batch_data_list, len={len(batch_data_list) if batch_data_list else 0}")
 
         ray.get(self.data_coordinator.clear_cache.remote()) if self.rank == 0 else None
         dist.barrier()
 
-        return Samples2Dict(batch_data_list)
+        result = Samples2Dict(batch_data_list)
+        logger.info(f"[Trainer.get_batch] rank={self.rank} dp_rank={self.dp_rank} returning Samples2Dict result")
+        return result
 
     def train_step(self, batch_data):
         timers = TimerCollection()
@@ -429,18 +436,27 @@ class Trainer:
                     break
 
                 # Record get_batch timing
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} Before get_batch")
                 with Timer("get_batch") as get_batch_timer:
                     batch_data = self.get_batch(batch_size)
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} After get_batch, elapsed={get_batch_timer.elapsed:.2f}s")
 
                 if batch_data is None:
+                    logger.info(f"[Trainer rank={self.rank}] step={self.global_step} batch_data is None, sleeping 0.1s")
                     time.sleep(0.1)
                     continue
 
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} Got batch_data, type={type(batch_data)}, keys={list(batch_data.keys()) if hasattr(batch_data, 'keys') else 'N/A'}")
+
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} Before train_step")
                 self.train_step(batch_data)
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} After train_step")
 
                 # Update rollout weights and record timing
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} Before weight_sync")
                 with Timer("weight_sync") as weight_sync_timer:
                     self.update_rollout_weight()
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} After weight_sync, elapsed={weight_sync_timer.elapsed:.2f}s")
 
                 # Calculate step_interval (time between consecutive step completions)
                 current_step_end_time = time.time()
@@ -451,19 +467,25 @@ class Trainer:
 
                 # Wait for all metric submissions and aggregate (rank=0 does the logging)
                 # Only TP rank 0 and PP rank 0 submit metrics, so only they need to wait
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} Before wait_submit, should_submit_metrics={self.should_submit_metrics}")
                 if self.metric_client is not None and self.should_submit_metrics:
                     try:
                         self.metric_client.wait_submit()
                     except Exception as e:
                         logger.warning(f"[Trainer rank={self.rank}] Metric submission wait failed: {e}")
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} After wait_submit")
 
                 # Barrier sync to ensure all ranks are synchronized
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} Before barrier")
                 dist.barrier()
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} After barrier")
 
                 # Only rank=0 (global rank) aggregates and logs to tracker
                 if self.rank == 0 and self.tracker is not None and self.metric_client is not None:
                     try:
+                        logger.info(f"[Trainer rank={self.rank}] step={self.global_step} Before wait_final_res")
                         aggregated_metrics = self.metric_client.wait_final_res()
+                        logger.info(f"[Trainer rank={self.rank}] step={self.global_step} After wait_final_res")
                         aggregated_metrics["training/global_step"] = self.global_step
                         aggregated_metrics["perf/delta_time/weight_sync"] = weight_sync_timer.elapsed
                         aggregated_metrics["perf/delta_time/get_batch"] = get_batch_timer.elapsed
@@ -481,7 +503,11 @@ class Trainer:
                     except Exception as e:
                         logger.warning(f"[Trainer rank={self.rank}] Metric aggregation failed: {e}")
                 if self.rank == 0:
+                    logger.info(f"[Trainer rank={self.rank}] step={self.global_step} Before next_rollout")
                     ray.get(self.rollout_manager.next_rollout.remote())
+                    logger.info(f"[Trainer rank={self.rank}] step={self.global_step} After next_rollout")
+
+                logger.info(f"[Trainer rank={self.rank}] step={self.global_step} completed")
                 self.global_step += 1
 
                 if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
