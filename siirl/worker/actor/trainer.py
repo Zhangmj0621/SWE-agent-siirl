@@ -50,9 +50,7 @@ class Trainer:
         rollout_manager=None,
         metric_worker: Optional[ActorHandle] = None,
     ):
-        # Configure logging for this Ray actor process
-        from siirl.utils.logger.logging_utils import set_basic_config
-        set_basic_config()
+        # NOTE: Logging is auto-configured via worker_process_setup_hook in ray.init()
         
         self.config = config
         self.rank = rank
