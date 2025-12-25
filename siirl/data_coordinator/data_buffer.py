@@ -421,8 +421,15 @@ class DataCoordinator:
         return self.dataloader.total_training_steps, self.dataloader.num_train_batches
     
     @ray.method(concurrency_group="dataloader")
-    async def run_dataloader(self, epoch):
-        batch = self.dataloader.run(epoch)
+    def epoch_validation_info(self):
+        """
+        Get validation dataset size and number of validation batches.
+        """
+        return len(self.dataloader.get_val_dataset()), self.dataloader.num_val_batches
+    
+    @ray.method(concurrency_group="dataloader")
+    async def run_dataloader(self, epoch, is_validate=False):
+        batch = self.dataloader.run(epoch, is_validation_step=is_validate)
         tensor_dict = preprocess_dataloader(batch)
         samples = await Dict2Samples(tensor_dict, True)
         async with self.dataloader_lock:

@@ -204,6 +204,15 @@ class DataLoaderNode():
         """
         return self.train_dataloader
 
+    def get_train_dataset(self):
+        """
+        Returns the training dataset.
+
+        Returns:
+            Dataset: The dataset used for training.
+        """
+        return self.train_dataset
+
     def get_val_dataloader(self):
         """
         Returns the validation dataloader.
@@ -212,6 +221,15 @@ class DataLoaderNode():
             DataLoader: The dataloader used for validation data.
         """
         return self.val_dataloader
+
+    def get_val_dataset(self):
+        """
+        Returns the validation dataset.
+
+        Returns:
+            Dataset: The dataset used for validation.
+        """
+        return self.val_dataset
 
     def run(self, epoch: Optional[int] = None, is_validation_step: bool = False, **kwargs: Any) -> Any:
         """

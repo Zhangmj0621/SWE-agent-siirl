@@ -408,6 +408,35 @@ class RolloutManager:
         self.event.set()
         return self.router_address
 
+    async def eval(self):
+        """
+        Trigger evaluation rollout.
+
+        Returns: List of evaluation samples
+        """
+        from loguru import logger
+        logger.info("Starting evaluation rollout...")
+        dataset_size, eval_batch_count = ray.get(self.data_coordinator.epoch_validation_info.remote())
+        await self.data_coordinator.reset_cache.remote()
+        for _ in range(eval_batch_count):
+            self.data_coordinator.run_dataloader.remote(epoch=None, is_validate=True)
+        samples = []
+        # TODO: use config.rollout.val_kwargs.n here and in NaiveExecutor
+        total_samples = dataset_size * self.config.rollout.n
+        pbar = tqdm_asyncio(total=total_samples, desc="Eval Rollout")
+        while len(samples) < total_samples:
+            await asyncio.sleep(0.1)
+            get = await self.data_coordinator.get_batch.remote(
+                batch_size=self.config.data.val_batch_size,
+                dp_rank=0
+            )
+            if not get:
+                continue
+            get = await ray.get(get)
+            samples.extend(get)
+            pbar.update(len(get))
+        return samples
+        
     def should_stop(self) -> bool:
         """
         Check if rollout should stop based on coordinator status.

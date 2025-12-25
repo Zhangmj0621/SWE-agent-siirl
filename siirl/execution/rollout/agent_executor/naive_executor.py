@@ -46,6 +46,7 @@ class NaiveExecutor:
         self.data_coordinator = data_coordinator  # Ray actor handle to data coordinator
         self.running = False  # Flag to control executor main loop
         self.engine = engine  # Inference engine for text generation
+        # TODO: use validation arguments here
         self.train_batch_size = train_batch_size # Target batch size for rollout samples
         self.max_concurrency_size = train_batch_size * config.rollout.n
         self.tasks:Set[asyncio.Task] = set()  # Track active generation tasks for cleanup
