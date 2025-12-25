@@ -26,6 +26,7 @@ from siirl.engine.actor.megatron_actor import ActorWorker, ReferenceWorker, Crit
 from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.algorithm.advantage import compute_advantage
 from siirl.utils.distributed_utils import init_gloo_group
+from siirl.utils.timer import Timer, TimerCollection
 from siirl.data_coordinator.sample import Samples2Dict
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
 
@@ -222,6 +223,8 @@ class Trainer:
             )
         )
 
+        dist.barrier()
+
         if not batch_ref:
             return None
 
@@ -237,54 +240,73 @@ class Trainer:
         timing_raw = {}
         logger.info(f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} starting")
 
-        logger.info(f"[Trainer.train_step] step={self.global_step} computing actor log probs")
-        data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
+        with timers["step"]:
+            logger.info(f"[Trainer.train_step] step={self.global_step} computing actor log probs")
+            data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
 
-        logger.info(f"[Trainer.train_step] step={self.global_step} computing reference log probs")
-        ref_start = time.time()
-        data_with_ref = self.ref_worker.compute_ref_log_prob(data_with_logprobs)
-        timing_raw["ref"] = time.time() - ref_start
+            # Compute entropy from log probs (same as siiRL-github dagworker.py:563)
+            entropy_loss = None
+            if "entropys" in data_with_logprobs and "response_mask" in data_with_logprobs:
+                from siirl.algorithm.loss import agg_loss
+                entropys = data_with_logprobs["entropys"]
+                response_mask = data_with_logprobs["response_mask"]
+                loss_agg_mode = self.config.actor_ref.actor.loss_agg_mode
+                entropy_loss = agg_loss(entropys, response_mask.to(entropys.device), loss_agg_mode)
 
-        if self.use_critic:
-            logger.info(f"[Trainer.train_step] step={self.global_step} computing critic values")
-            values_start = time.time()
-            data_with_values = self.critic_worker.compute_values(data_with_ref)
-            timing_raw["values"] = time.time() - values_start
-        else:
-            data_with_values = data_with_ref
+            logger.info(f"[Trainer.train_step] step={self.global_step} computing reference log probs")
+            with timers["ref"]:
+                data_with_ref = self.ref_worker.compute_ref_log_prob(data_with_logprobs)
 
-        algo_config = self.config.actor_ref.algorithm
-        adv_estimator = algo_config.adv_estimator
-        gamma = algo_config.gamma
-        lam = algo_config.lam
+            if self.use_critic:
+                logger.info(f"[Trainer.train_step] step={self.global_step} computing critic values")
+                with timers["values"]:
+                    data_with_values = self.critic_worker.compute_values(data_with_ref)
+            else:
+                data_with_values = data_with_ref
 
-        logger.info(f"[Trainer.train_step] step={self.global_step} computing advantages with {adv_estimator}")
-        adv_start = time.time()
-        data_for_update = compute_advantage(
-            data=data_with_values,
-            adv_estimator=adv_estimator,
-            gamma=gamma,
-            lam=lam,
-        )
-        timing_raw["adv"] = time.time() - adv_start
+            algo_config = self.config.actor_ref.algorithm
+            adv_estimator = algo_config.adv_estimator
+            gamma = algo_config.gamma
+            lam = algo_config.lam
 
-        logger.info(f"[Trainer.train_step] step={self.global_step} updating actor")
-        update_actor_start = time.time()
-        actor_result = self.actor_worker.update_actor(data_for_update)
-        timing_raw["update_actor"] = time.time() - update_actor_start
+            logger.info(f"[Trainer.train_step] step={self.global_step} computing advantages with {adv_estimator}")
+            with timers["adv"]:
+                data_for_update = compute_advantage(
+                    data=data_with_values,
+                    adv_estimator=adv_estimator,
+                    gamma=gamma,
+                    lam=lam,
+                )
 
-        if self.use_critic:
-            logger.info(f"[Trainer.train_step] step={self.global_step} updating critic")
-            update_critic_start = time.time()
-            critic_result = self.critic_worker.update_critic(data_for_update)
-            timing_raw["update_critic"] = time.time() - update_critic_start
-            metrics = {"actor": actor_result, "critic": critic_result}
-        else:
-            metrics = {"actor": actor_result}
+            logger.info(f"[Trainer.train_step] step={self.global_step} updating actor")
+            with timers["update_actor"]:
+                actor_result = self.actor_worker.update_actor(data_for_update)
 
-        step_duration = time.time() - step_start_time
-        timing_raw["step"] = step_duration
+            # Extract metrics from TensorDict (stored in data["metrics"] by update_actor)
+            actor_metrics = actor_result.get("metrics", {})
+            if hasattr(actor_metrics, 'data'):  # NonTensorData wrapper
+                actor_metrics = actor_metrics.data
 
+            # Add entropy loss to actor metrics (computed earlier from compute_log_prob)
+            if entropy_loss is not None:
+                actor_metrics["entropy_loss"] = entropy_loss.item()
+
+            if self.use_critic:
+                logger.info(f"[Trainer.train_step] step={self.global_step} updating critic")
+                with timers["update_critic"]:
+                    critic_result = self.critic_worker.update_critic(data_for_update)
+
+                # Extract critic metrics
+                critic_metrics = critic_result.get("metrics", {})
+                if hasattr(critic_metrics, 'data'):
+                    critic_metrics = critic_metrics.data
+
+                metrics = {"actor": actor_metrics, "critic": critic_metrics}
+            else:
+                metrics = {"actor": actor_metrics}
+
+        timing_raw = timers.to_dict()
+        
         # Submit metrics to MetricWorker for aggregation
         if self.metric_client is not None:
             try:
@@ -315,7 +337,7 @@ class Trainer:
             except Exception as e:
                 logger.warning(f"[Trainer rank={self.rank}] Failed to submit metrics: {e}")
 
-        logger.success(f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} completed in {step_duration:.2f}s")
+        logger.success(f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} completed in {timers['step'].formatted}")
 
         return metrics
 
@@ -371,6 +393,10 @@ class Trainer:
 
                 self.train_step(batch_data)
 
+                # Update rollout weights and record timing
+                with Timer("weight_sync") as weight_sync_timer:
+                    self.update_rollout_weight()
+
                 # Wait for all metric submissions and aggregate (rank=0 does the logging)
                 if self.metric_client is not None:
                     try:
@@ -380,13 +406,13 @@ class Trainer:
                         if self.rank == 0 and self.tracker is not None:
                             aggregated_metrics = self.metric_client.wait_final_res()
                             aggregated_metrics["training/global_step"] = self.global_step
+                            aggregated_metrics["perf/delta_time/weight_sync"] = weight_sync_timer.elapsed
                             self.tracker.log(aggregated_metrics, step=self.global_step)
 
                     except Exception as e:
                         logger.warning(f"[Trainer rank={self.rank}] Metric aggregation failed: {e}")
-
-                self.update_rollout_weight()
-                ray.get(self.rollout_manager.next_rollout.remote())
+                if self.rank == 0:
+                    ray.get(self.rollout_manager.next_rollout.remote())
                 self.global_step += 1
 
                 if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:

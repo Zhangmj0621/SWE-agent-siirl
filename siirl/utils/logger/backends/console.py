@@ -177,15 +177,10 @@ class ConsoleBackend:
         for group in priority_groups:
             if group in groups:
                 metrics = groups.pop(group)
-                # Limit metrics per group for readability
-                if len(metrics) > 5:
-                    metrics = metrics[:5] + [f"...+{len(metrics)-5}"]
                 parts.append(f"{group}: {', '.join(metrics)}")
         
         # Add remaining groups
         for group, metrics in sorted(groups.items()):
-            if len(metrics) > 5:
-                metrics = metrics[:5] + [f"...+{len(metrics)-5}"]
             parts.append(f"{group}: {', '.join(metrics)}")
         
         return " | ".join(parts)

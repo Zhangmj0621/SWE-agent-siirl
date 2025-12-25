@@ -22,7 +22,9 @@ from siirl.algorithm.kl_penalty import kl_penalty
 from siirl.params.model_args import ActorRefArguments
 
 from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
+from siirl.utils.timer import Timer
 from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
+from siirl.utils.model_utils.flops_counter import FlopsCounter
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean
 from siirl.utils.megatron.megatron_utils import (
@@ -223,6 +225,10 @@ class ActorWorker:
             lr_scheduler=self.actor_optimizer_scheduler
         )
 
+
+        # Initialize FlopsCounter for MFU calculation
+        self.flops_counter = FlopsCounter(self.hf_config, forward_only=False)
+
         get_torch_device().empty_cache()
 
     def update_actor(self, data: TensorDict):
@@ -236,7 +242,26 @@ class ActorWorker:
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
         data["temperature"] = NonTensorData(self.config.actor.temperature)
 
-        metrics = self.actor.update_policy(data=data)
+        # Time the update_policy call for MFU calculation
+        with Timer("update_policy") as timer:
+            metrics = self.actor.update_policy(data=data)
+        delta_time = timer.elapsed
+
+        # Calculate MFU (Model FLOPs Utilization)
+        if "global_token_num" in data:
+            global_token_num = data["global_token_num"]
+            if hasattr(global_token_num, 'data'):
+                global_token_num = global_token_num.data
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
+            if promised_flops > 0:
+                metrics["perf/mfu/actor"] = estimated_flops / promised_flops
+
+        metrics["perf/delta_time/actor"] = delta_time
+
+        # Add GPU memory metrics
+        metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+        metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+
         data["metrics"] = NonTensorData(metrics)
         data = data.to("cpu")
 
@@ -602,6 +627,9 @@ class CriticWorker:
             critic_optimizer_config=critic_optimizer_config,
         )
 
+        # Initialize FlopsCounter for MFU calculation
+        self.flops_counter = FlopsCounter(self.hf_config, forward_only=False)
+
         self.checkpoint_manager = MegatronCheckpointManager(
             model=self.critic_module,
             optimizer=self.critic_optimizer,
@@ -633,7 +661,22 @@ class CriticWorker:
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.critic_optimizer)
 
-        metrics = self.critic.update_critic(data=data)
+        # Time the update_critic call for MFU calculation
+        with Timer("update_critic") as timer:
+            metrics = self.critic.update_critic(data=data)
+        delta_time = timer.elapsed
+
+        # Calculate MFU (Model FLOPs Utilization)
+        if "global_token_num" in data:
+            global_token_num = data["global_token_num"]
+            if hasattr(global_token_num, 'data'):
+                global_token_num = global_token_num.data
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
+            if promised_flops > 0:
+                metrics["perf/mfu/critic"] = estimated_flops / promised_flops
+
+        metrics["perf/delta_time/critic"] = delta_time
+
         data["metrics"] = NonTensorData(metrics)
         data = data.to("cpu")
 
@@ -917,7 +960,8 @@ class MegatronPPOActor():
                 append_to_dict(metrics, metric)
 
             update_successful, grad_norm, num_zeros_in_grad = self.actor_optimizer.step()
-            data = {"actor/grad_norm": grad_norm}
+            learning_rate = self.actor_optimizer.param_groups[-1]["lr"]
+            data = {"actor/grad_norm": grad_norm, "actor/lr": learning_rate}
             append_to_dict(metrics, data)
 
             if not update_successful:
