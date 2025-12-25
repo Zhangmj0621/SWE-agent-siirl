@@ -253,15 +253,11 @@ class NaiveExecutor:
             self.finish_group_samples[sample.uid] = []
         self.finish_group_samples[sample.uid].append((sample_info, sample_ref))
         # Send processed sample to data coordinator
-        current_count = len(self.finish_group_samples[sample.uid])
-        logger.info(f"[NaiveExecutor.put_data] uid={sample.uid}, collected {current_count}/{self.rollout_n} samples")
-        if current_count == self.rollout_n:
+        if len(self.finish_group_samples[sample.uid]) == self.rollout_n:
             tuple_datas = self.finish_group_samples.pop(sample.uid)
             sample_infos = [tuple_data[0] for tuple_data in tuple_datas]
             sample_refs = [tuple_data[1] for tuple_data in tuple_datas]
-            logger.info(f"[NaiveExecutor.put_data] Calling data_coordinator.put_batch with {len(sample_refs)} samples")
             await self.data_coordinator.put_batch.remote(sample_infos, sample_refs)
-            logger.info(f"[NaiveExecutor.put_data] put_batch completed for uid={sample.uid}")
         
         return sample
     
@@ -274,42 +270,50 @@ class NaiveExecutor:
             sample: Raw sample from data coordinator
         
         Returns:
-            Postprocessed sample with generated response and formatted tensors
+            Postprocessed sample with generated response and formatted tensors, or None if failed
         """
         # Record timing information for performance analysis
         timing_info = {
             "rollout_start_at": time.time(),
         }
+        sample_uid = getattr(sample, 'uid', 'unknown')
         
-        async with self.semaphore:  # Limit concurrent generations to batch size
-            loop = asyncio.get_running_loop()
-            # 1. Preprocess sample (CPU-bound, offload to executor)
-            sample = await loop.run_in_executor(
-                        None, 
-                        self._pre_process, 
-                        sample
-                    )
-            
-            # 2. Execute rollout flow (LLM generation with reward calculation)
-            sample = await self.rollout_flow(sample, copy.deepcopy(self.sampling_params), self.engine, self.reward_fn)
-            
-            # 3. Postprocess sample (CPU-bound padding and tensor formatting)
-            sample = await loop.run_in_executor(
-                        None, 
-                        self._post_process, 
-                        sample
-                    )
-            
-            # 4. Collect timing information from rollout flow
-            timing_info["rollout_end_at"] = time.time()
-            timing_info["rollout_duration"] = timing_info["rollout_end_at"] - timing_info["rollout_start_at"]
-            timing_info["generation_duration"] = getattr(sample, "_generation_duration", 0)
-            timing_info["reward_duration"] = getattr(sample, "_reward_duration", 0)
-            sample.timing_info = timing_info
-            
-            # 5. Store processed sample in Ray object store and notify data coordinator
-            await self.put_data(sample = sample, loop = loop)
-            return sample
+        try:
+            async with self.semaphore:  # Limit concurrent generations to batch size
+                loop = asyncio.get_running_loop()
+                # 1. Preprocess sample (CPU-bound, offload to executor)
+                sample = await loop.run_in_executor(
+                            None, 
+                            self._pre_process, 
+                            sample
+                        )
+                
+                # 2. Execute rollout flow (LLM generation with reward calculation)
+                sample = await self.rollout_flow(sample, copy.deepcopy(self.sampling_params), self.engine, self.reward_fn)
+                
+                # 3. Postprocess sample (CPU-bound padding and tensor formatting)
+                sample = await loop.run_in_executor(
+                            None, 
+                            self._post_process, 
+                            sample
+                        )
+                
+                # 4. Collect timing information from rollout flow
+                timing_info["rollout_end_at"] = time.time()
+                timing_info["rollout_duration"] = timing_info["rollout_end_at"] - timing_info["rollout_start_at"]
+                timing_info["generation_duration"] = getattr(sample, "_generation_duration", 0)
+                timing_info["reward_duration"] = getattr(sample, "_reward_duration", 0)
+                sample.timing_info = timing_info
+                
+                # 5. Store processed sample in Ray object store and notify data coordinator
+                await self.put_data(sample = sample, loop = loop)
+                return sample
+                
+        except Exception as e:
+            import traceback
+            logger.error(f"[NaiveExecutor.generate] Sample uid={sample_uid} failed: {e}")
+            logger.error(f"[NaiveExecutor.generate] Traceback:\n{traceback.format_exc()}")
+            raise
 
     async def run(self):
         """
