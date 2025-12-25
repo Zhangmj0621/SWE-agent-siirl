@@ -20,7 +20,6 @@ import ray
 
 from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.utils.task_coordinator import create_coordinator
-from siirl.utils.metrics import MetricWorker
 from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.worker.ray_utils import allocate_resources
 from siirl.worker.rollout.rollout_manager import RolloutManager
@@ -108,6 +107,7 @@ class MainRunner:
 
         # === 3. Initialize MetricWorker ===
         # Note: MetricTracker is created inside Trainer (only rank=0) for cleaner lifecycle management
+        from siirl.utils.metrics import MetricWorker
         logger.info("Initializing MetricWorker...")
         metric_worker = MetricWorker.remote()
         ray.get(metric_worker.start.remote())

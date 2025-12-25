@@ -22,7 +22,6 @@ import ray
 import asyncio
 from ray.actor import ActorHandle
 from typing import Optional, Any, Dict, List
-from loguru import logger
 from tensordict import TensorDict
 
 from siirl.utils.metrics.utils import Metric, MetricFunc
@@ -165,6 +164,7 @@ class MetricWorker:
         
         self.is_running = True
         self.process_task = asyncio.create_task(self._process_metrics_loop())
+        from loguru import logger
         logger.info("MetricWorker started")
 
     async def submit_metric(self, metric: Dict[str, Any], world_size: int):

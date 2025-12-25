@@ -26,11 +26,8 @@ from siirl.engine.actor.megatron_actor import ActorWorker, ReferenceWorker, Crit
 from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.algorithm.advantage import compute_advantage
 from siirl.utils.distributed_utils import init_gloo_group
-from siirl.utils.metrics import MetricClient, compute_data_metric, compute_throughput_metrics
-from siirl.utils.logger import MetricTracker
 from siirl.data_coordinator.sample import Samples2Dict
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
-
 
 class Trainer:
     """
@@ -63,14 +60,15 @@ class Trainer:
         self.rollout_manager = rollout_manager
 
         # Initialize MetricClient for distributed metrics collection
-        self.metric_client: Optional[MetricClient] = None
+        self.metric_client = None
         if metric_worker is not None:
+            from siirl.utils.metrics import MetricClient
             self.metric_client = MetricClient(metric_worker)
             logger.info(f"[Trainer rank={rank}] MetricClient initialized")
 
         # MetricTracker will be created in init_models()
         # Only rank=0 (global rank) creates a tracker (same as siiRL-github)
-        self.tracker: Optional[MetricTracker] = None
+        self.tracker = None
 
         # Initialize models (will be created in init_models method)
         self.actor_worker = None
@@ -135,6 +133,8 @@ class Trainer:
         Configures backends based on config settings, similar to siiRL-github's
         DAGWorker._initialize_worker() pattern.
         """
+        from siirl.utils.logger import MetricTracker
+        
         logger.info(f"[Trainer rank={self.rank}] Rank 0: Initializing MetricTracker...")
 
         # Configure backends based on config settings
@@ -285,6 +285,8 @@ class Trainer:
         # Submit metrics to MetricWorker for aggregation
         if self.metric_client is not None:
             try:
+                from siirl.utils.metrics import compute_data_metric, compute_throughput_metrics
+                
                 # Compute and submit data metrics
                 data_metrics = compute_data_metric(data_for_update)
                 self.metric_client.submit_metric(data_metrics, self.dp_world_size)
