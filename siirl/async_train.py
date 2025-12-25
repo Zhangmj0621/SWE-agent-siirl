@@ -36,21 +36,6 @@ RAY_RUNTIME_ENV_VARS = {
 MAIN_RUNNER_CPU_RESERVATION = 5
 
 
-def _worker_logging_setup():
-    """
-    Called automatically in each Ray worker process at startup.
-    
-    This is the most elegant way to configure logging across all Ray actors:
-    - Only configured once in ray.init()
-    - Automatically applies to all worker processes (RolloutManager, Trainer, RolloutWorker, etc.)
-    - No need to manually call set_basic_config() in each actor's __init__
-    
-    See: https://docs.ray.io/en/latest/ray-observability/user-guides/configure-logging.html
-    """
-    from siirl.utils.logger.logging_utils import set_basic_config
-    set_basic_config()
-
-
 @ray.remote(num_cpus=MAIN_RUNNER_CPU_RESERVATION)
 class MainRunner:
     """
@@ -248,13 +233,7 @@ def main() -> None:
         # Initialize Ray cluster if not already running
         if not ray.is_initialized():
             logger.info("Initializing local Ray cluster...")
-            ray.init(
-                runtime_env={
-                    "env_vars": RAY_RUNTIME_ENV_VARS,
-                    "worker_process_setup_hook": _worker_logging_setup,
-                },
-                num_cpus=None,
-            )
+            ray.init(runtime_env={"env_vars": RAY_RUNTIME_ENV_VARS}, num_cpus=None)
         logger.success(f"Ray is initialized. Time cost: {(time.time() - start_time) * 1000:.2f} ms")
 
         # Parse the complete configuration into a structured object
