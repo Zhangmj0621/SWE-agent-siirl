@@ -1,57 +1,55 @@
 import socket
-import mbridge
-from mbridge.core.bridge import Bridge
-from mbridge.core.util import unwrap_model
 from abc import abstractmethod
-import time
+from typing import Sequence
+
 import ray
 import torch
 import torch.distributed as dist
-from tqdm import tqdm
-from siirl.worker.rollout.rollout_worker import RolloutWorker
-from typing import List, Sequence
-from siirl.utils.distributed_utils import init_process_group
-from ray.actor import ActorHandle
-from siirl.params.training_args import SiiRLArguments
+from loguru import logger
+from mbridge.core.bridge import Bridge
 from megatron.core import mpu
-from siirl.utils.distributed_utils import init_gloo_group, get_gloo_group
+from ray.actor import ActorHandle
+from tqdm import tqdm
+
+from siirl.params.training_args import SiiRLArguments
+from siirl.utils.distributed_utils import get_gloo_group, init_process_group
+
+from . import mbridge_patch
+
+
 class ParamSyncInterface:
-    def __init__(self,config:SiiRLArguments, model: Sequence[torch.nn.Module],bridge:Bridge):
+    def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
         self.config = config
         self.model = model
         self.bridge = bridge
-        self.current_version = 0
-        self.weights_info = None
-        self.sync_group_initialized = False
-        self.sync_group_name = "actor_rollout"
-        self.wait_last_update = None
-        self.wait_last_resume = None
+        self.weight_version = 0
+        self._model_update_groups = None
 
-    def setup_param_sync_group(self,rollout_workers:Sequence[ActorHandle]):
+    @abstractmethod
+    def setup_param_sync_group(self, rollout_workers: Sequence[ActorHandle]):
         pass
 
     @abstractmethod
     def update_weights(self) -> None:
         pass
 
-class ParamSyncDistribute(ParamSyncInterface):
-    def __init__(self,config:SiiRLArguments,model: Sequence[torch.nn.Module],bridge:Bridge):
-        super().__init__(config,model,bridge)
+
+class ParamSyncDistributed(ParamSyncInterface):
+    def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
+        super().__init__(config, model, bridge)
         self.rollout_worker_connected = set()
 
-    def has_connected_to_actor(self,actor:ActorHandle):
+    def has_connected_to_actor(self, actor: ActorHandle):
         return actor._actor_id.hex() in self.rollout_worker_connected
 
-    def update_rollout_worker_connected(self,new_actors:Sequence[ActorHandle]):
-        if not isinstance(new_actors,Sequence):
+    def update_rollout_worker_connected(self, new_actors: Sequence[ActorHandle]):
+        if not isinstance(new_actors, Sequence):
             new_actors = [new_actors]
         for actor in new_actors:
-            # _actor_id 是 ActorHandle 的属性，.hex() 将其转为字符串
-            actor_id_hex = actor._actor_id.hex() 
+            actor_id_hex = actor._actor_id.hex()
             self.rollout_worker_connected.add(actor_id_hex)
 
-
-    def setup_param_sync_group(self,rollout_workers:Sequence[ActorHandle]):
+    def setup_param_sync_group(self, rollout_workers: Sequence[ActorHandle]):
         # from Train DP 0 to all worker
         # each pp rank has its own group
         self.rollout_workers = rollout_workers
@@ -73,11 +71,10 @@ class ParamSyncDistribute(ParamSyncInterface):
             self.rollout_worker_connected.clear()
             self.update_rollout_worker_connected(rollout_workers)
 
-
     @torch.no_grad()
     def update_weights(self) -> None:
         """
-        Pause → flush → non-expert (TP) → expert (EP) → continue. Progress on PP source.
+        Pause → flush → all params → continue. Progress on PP source.
         """
         self.weight_version += 1
         if dist.get_rank() == 0:
@@ -92,7 +89,7 @@ class ParamSyncDistribute(ParamSyncInterface):
         generator = self.bridge._export_weights_in_current_pipeline_stage(self.model)
 
         for name, param in generator:
-            buffer_size = self._update_param_sync_bucket(param,converted_named_tensors,buffer_size,pbar)
+            buffer_size = self._update_param_sync_bucket(param, converted_named_tensors, buffer_size, pbar)
 
         if converted_named_tensors:
             self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
@@ -106,7 +103,7 @@ class ParamSyncDistribute(ParamSyncInterface):
         converted_named_tensors: list[tuple[str, torch.Tensor]],
         buffer_size: int,
         pbar: tqdm | None = None,
-        ):
+    ):
         if not self._is_pp_src_rank:
             return
         param_size = param.numel() * param.element_size()
@@ -117,14 +114,10 @@ class ParamSyncDistribute(ParamSyncInterface):
         return buffer_size
 
     def _update_bucket_weights_from_distributed(
-        self, converted_named_tensors: list[tuple[str, torch.Tensor]], pbar: tqdm | None = None
+        self,
+        converted_named_tensors: list[tuple[str, torch.Tensor]],
+        pbar: tqdm | None = None,
     ) -> None:
-        """
-        Lock → broadcast → clear → unlock → pbar++. Lock prevents NCCL deadlock.
-        """
-        # lock the rollout workers to prevent dead lock on broadcast.
-        # while not ray.get(self.rollout_worker_lock.acquire.remote()):
-        #     time.sleep(0.1)
 
         refs = update_weights_from_distributed(
             self._group_name,
@@ -136,7 +129,6 @@ class ParamSyncDistribute(ParamSyncInterface):
 
         ray.get(refs)
         converted_named_tensors.clear()
-        # ray.get(self.rollout_worker_lock.release.remote())
         pbar.update(1)
 
 
@@ -150,13 +142,15 @@ def connect_rollout_workers_from_distributed(
     with socket.socket() as sock:
         sock.bind(("", 0))
         master_port = sock.getsockname()[1]
-    world_size = len(rollout_workers) * args.trainer.n_gpus_per_node + 1
-
+    rollout_worker_num = len(rollout_workers)
+    rollout_gpu_per_worker = args.trainer.rollout_gpus // rollout_worker_num
+    world_size = len(rollout_workers) * rollout_gpu_per_worker + 1
+    logger.debug(f"Group {group_name} is connecting to {rollout_workers}")
     refs = [
         worker.init_param_sync_group.remote(
             master_address,
             master_port,
-            i * args.trainer.n_gpus_per_node + 1,
+            i * rollout_gpu_per_worker + 1,
             world_size,
             group_name,
             backend="nccl",
@@ -172,6 +166,7 @@ def connect_rollout_workers_from_distributed(
     )
     ray.get(refs)
     return model_update_groups
+
 
 def disconnect_rollout_workers_from_distributed(group_name, model_update_groups, rollout_workers):
     """

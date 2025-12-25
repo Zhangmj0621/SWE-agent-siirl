@@ -130,6 +130,7 @@ class TrainerGroup:
                 use_critic=self.use_critic,
                 data_coordinator=self.data_coordinator,
                 coordinator=self.coordinator,
+                rollout_manager = self.rollout_manager,
             )
 
             self.trainers.append(trainer_handle)
@@ -140,10 +141,6 @@ class TrainerGroup:
 
         # Set rollout workers and setup param sync if rollout_manager is available
         if self.rollout_manager is not None:
-            rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
-            futures = [trainer.set_rollout_workers.remote(rollout_workers) for trainer in self.trainers]
-            ray.get(futures)
-
             futures = [trainer.setup_param_sync.remote() for trainer in self.trainers]
             ray.get(futures)
 

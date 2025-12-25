@@ -21,7 +21,7 @@ from loguru import logger
 from megatron.core import parallel_state as mpu
 
 from siirl.engine.actor.megatron_actor import ActorWorker, ReferenceWorker, CriticWorker
-from siirl.engine.param_sync.update_weight import ParamSyncDistribute
+from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.algorithm.advantage import compute_advantage
 from siirl.utils.distributed_utils import init_gloo_group
 from siirl.data_coordinator.sample import Samples2Dict
@@ -42,6 +42,7 @@ class Trainer:
         use_critic: bool = False,
         data_coordinator=None,
         coordinator=None,
+        rollout_manager = None,
     ):
         self.config = config
         self.rank = rank
@@ -51,7 +52,7 @@ class Trainer:
         self.data_coordinator = data_coordinator
         self.coordinator = coordinator  # TaskCoordinator for lifecycle management
 
-        self.rollout_manager = None
+        self.rollout_manager = rollout_manager
 
         # Initialize models (will be created in init_models method)
         self.actor_worker = None
@@ -92,22 +93,22 @@ class Trainer:
         logger.success(f"[Trainer.init_models] rank={self.rank} completed: dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}")
 
 
-    def set_rollout_workers(self, rollout_workers):
-        self.rollout_workers = rollout_workers
+    def set_rollout_manager(self, rollout_manager):
+        self.rollout_manager = rollout_manager
 
     def setup_param_sync(self):
         assert self.actor_worker is not None,"must init models first"
-        assert self.rollout_workers is not None, "must set rollout workers"
-        self.param_sync = ParamSyncDistribute(config=self.config.actor_ref, model=self.actor_worker.actor_module, bridge=self.actor_worker.bridge)
+        assert self.rollout_manager is not None, "must set rollout_manager"
+        self.param_sync = ParamSyncDistributed(config=self.config, model=self.actor_worker.actor_module, bridge=self.actor_worker.bridge)
         init_gloo_group()
         
     # @timer
     def update_rollout_weight(self):
         assert self.param_sync is not None, "must setup param sync first"
-        if isinstance(self.param_sync,ParamSyncDistribute):
+        if isinstance(self.param_sync,ParamSyncDistributed):
             # TODO support elastic rollout connection
-            rollout_workers = self.rollout_manager.get_rollout_worker_on_tp0.remote()
-            if any(self.param_sync.has_connected_to_actor(x) for x in rollout_workers):   
+            rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
+            if any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):   
                 self.param_sync.setup_param_sync_group(rollout_workers)
         self.param_sync.update_weights()
 
@@ -229,6 +230,8 @@ class Trainer:
                     continue
 
                 self.train_step(batch_data)
+                self.update_rollout_weight()
+
                 self.global_step += 1
 
                 time.sleep(0.01)
