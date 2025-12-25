@@ -15,6 +15,7 @@ class SampleInfo(BaseModel):
     prompt_length: int = Field(default=0)
     response_length: int = Field(default=0)
     dict_info: Dict[str, Any] = Field(default_factory=dict)
+    weight_version: int = Field()
     uid: Optional[str] = Field(default=None)
 
 class Sample(BaseModel):

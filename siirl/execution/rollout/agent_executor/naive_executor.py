@@ -245,6 +245,7 @@ class NaiveExecutor:
             prompt_length=getattr(sample, 'prompt_length', 0),
             response_length=getattr(sample, 'response_length', 0),
             uid=str(sample.uid),
+            weight_version=self.engine.weight_version,
             dict_info={
                 'key': "Actor",
             })
@@ -301,7 +302,10 @@ class NaiveExecutor:
         Runs until self.running is set to False.
         """
         self.running = True
-        stats_task = asyncio.create_task(self.rollout_status())
+        stats_task = None
+        rank = int(os.environ.get("RANK"))
+        if rank == 0:
+            stats_task = asyncio.create_task(self.rollout_status(rank))
         
         while self.running:
             # Get new samples to replenish batch
@@ -327,14 +331,16 @@ class NaiveExecutor:
                 
                 # Yield control to event loop (non-blocking sleep)
                 await asyncio.sleep(0)  
-        stats_task.cancel()
-        await asyncio.gather(stats_task, return_exceptions=True)
+        if rank == 0:
+            stats_task.cancel()
+            await asyncio.gather(stats_task, return_exceptions=True)
         
-    async def rollout_status(self, interval: float = 10.0):
+    async def rollout_status(self, rank:int = 0, interval: float = 10.0):
         while True:
             await asyncio.sleep(interval)
             active = len(self.tasks)
-            logger.info(f"rank_{os.environ.get('RANK')} active generate tasks: {active}, {len(self.pending_queue)} left in pending_queue")
+            if active:
+                logger.info(f"rank_{rank} active generate tasks: {active}, {len(self.pending_queue)} left in pending_queue")
     
           
     async def stop(self):

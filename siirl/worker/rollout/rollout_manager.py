@@ -388,7 +388,7 @@ class RolloutManager:
         total = (total_epochs - self.start_epoch) * self.num_train_batches
         done = (self.global_steps % self.num_train_batches) + self.start_epoch * self.num_train_batches
 
-        pbar = tqdm_asyncio(total=total, initial=done, desc="Epoch-Batch")
+        pbar = tqdm_asyncio(total=total, initial=done, desc="Step-Batch")
         for epoch in range(self.start_epoch, total_epochs):
             for batch_idx in range(self.num_train_batches):
                 if epoch == self.start_epoch and batch_idx < (self.global_steps % self.num_train_batches):
