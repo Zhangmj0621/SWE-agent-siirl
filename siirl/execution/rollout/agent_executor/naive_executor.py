@@ -82,6 +82,10 @@ class NaiveExecutor:
             mod = importlib.import_module(module_path)
             self.rollout_flow = getattr(mod, name)
 
+    async def init_sample(self):
+        need_replenish = self.max_concurrency_size
+
+    
 
     async def get_sample(self):
         """
@@ -297,6 +301,8 @@ class NaiveExecutor:
         Runs until self.running is set to False.
         """
         self.running = True
+        stats_task = asyncio.create_task(self.rollout_status())
+        
         while self.running:
             # Get new samples to replenish batch
             samples = await self.get_sample()
@@ -321,7 +327,16 @@ class NaiveExecutor:
                 
                 # Yield control to event loop (non-blocking sleep)
                 await asyncio.sleep(0)  
-                
+        stats_task.cancel()
+        await asyncio.gather(stats_task, return_exceptions=True)
+        
+    async def rollout_status(self, interval: float = 10.0):
+        while True:
+            await asyncio.sleep(interval)
+            active = len(self.tasks)
+            logger.info(f"rank_{os.environ.get('RANK')} active generate tasks: {active}, {len(self.pending_queue)} left in pending_queue")
+    
+          
     async def stop(self):
         """
         Stop executor and clean up active tasks.

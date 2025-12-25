@@ -25,7 +25,7 @@ from siirl.utils.enums import DistributedEnv
 from siirl.utils.net_utils.net import get_net_interface_ip, get_free_port
 from siirl.params.training_args import SiiRLArguments
 from siirl.worker.ray_utils import get_random_string, RayClassWithInitArgs, GPUResources
-
+from tqdm.asyncio import tqdm_asyncio
 
 @ray.remote
 class RolloutManager:
@@ -384,17 +384,21 @@ class RolloutManager:
         return self.router_address
 
     async def run_dataloader(self):
-        if self.num_train_batches > 0:
-            start_epoch = self.global_steps // self.num_train_batches
-            batches_to_skip = self.global_steps % self.num_train_batches
-        for epoch in range(self.start_epoch, self.config.trainer.total_epochs):
+        total_epochs = self.config.trainer.total_epochs
+        total = (total_epochs - self.start_epoch) * self.num_train_batches
+        done = (self.global_steps % self.num_train_batches) + self.start_epoch * self.num_train_batches
+
+        pbar = tqdm_asyncio(total=total, initial=done, desc="Epoch-Batch")
+        for epoch in range(self.start_epoch, total_epochs):
             for batch_idx in range(self.num_train_batches):
-                if epoch == start_epoch and batch_idx < batches_to_skip:
+                if epoch == self.start_epoch and batch_idx < (self.global_steps % self.num_train_batches):
                     continue
-            await self.event.wait()
-            self.event.clear()
-            ray.get(self.data_coordinator.run_dataloader.remote(epoch))
-            await asyncio.sleep(1)      # 真正的异步业务
+                await self.event.wait()
+                self.event.clear()
+                ray.get(self.data_coordinator.run_dataloader.remote(epoch))
+                pbar.update(1)     
+                await asyncio.sleep(1)
+        pbar.close()
 
     async def next_rollout(self):
         self.event.set()
