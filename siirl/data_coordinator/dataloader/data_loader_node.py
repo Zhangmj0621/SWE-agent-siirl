@@ -323,4 +323,4 @@ class DataLoaderNode():
             # sampler state. Setting it to None forces the run() method to create a new,
             # valid iterator that is synchronized with the restored state.
             self._current_train_iter = None
-            logger.info(f"Node {self.node_id} (Rank {self.group_rank}): Successfully loaded train_dataloader state. Iterator will be reset on next call.")
+            logger.info(f"(Rank {self.group_rank}): Successfully loaded train_dataloader state. Iterator will be reset on next call.")

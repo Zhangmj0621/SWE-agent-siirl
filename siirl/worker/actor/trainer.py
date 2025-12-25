@@ -25,6 +25,7 @@ from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.algorithm.advantage import compute_advantage
 from siirl.utils.distributed_utils import init_gloo_group
 from siirl.data_coordinator.sample import Samples2Dict
+from siirl.worker.actor.checkpoint_manager import CheckpointManager
 
 
 class Trainer:
@@ -60,7 +61,8 @@ class Trainer:
         self.critic_worker = None
         self.dp_rank = None
         self.dp_world_size = None
-        
+        self.checkpoint_manager = None
+
         # Training state
         self.global_step = 0
 
@@ -89,8 +91,31 @@ class Trainer:
 
         self.dp_rank = mpu.get_data_parallel_rank()
         self.dp_world_size = mpu.get_data_parallel_world_size()
-        
+
+        self.checkpoint_manager = CheckpointManager(
+            config=self.config,
+            rank=self.rank,
+            world_size=self.world_size,
+            actor_worker=self.actor_worker,
+            ref_worker=self.ref_worker,
+            critic_worker=self.critic_worker,
+            data_coordinator=self.data_coordinator,
+            dp_rank=self.dp_rank,
+            dp_world_size=self.dp_world_size,
+        )
+
         logger.success(f"[Trainer.init_models] rank={self.rank} completed: dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}")
+
+    def load_checkpoint(self):
+        """Load checkpoint and return global step."""
+        if self.checkpoint_manager is None:
+            logger.warning(f"[Trainer rank={self.rank}] Checkpoint manager not initialized")
+            return 0
+
+        global_step = self.checkpoint_manager.load_checkpoint()
+        self.global_step = global_step
+        logger.info(f"[Trainer rank={self.rank}] Loaded checkpoint, resuming from step {global_step}")
+        return global_step
 
 
     def set_rollout_manager(self, rollout_manager):
@@ -233,6 +258,10 @@ class Trainer:
                 self.update_rollout_weight()
                 ray.get(self.rollout_manager.next_rollout.remote())
                 self.global_step += 1
+
+                if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
+                    logger.info(f"[Trainer rank={self.rank}] Saving checkpoint at step {self.global_step}")
+                    self.checkpoint_manager.save_checkpoint(self.global_step)
 
                 time.sleep(0.01)
 

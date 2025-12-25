@@ -2,6 +2,10 @@ import os
 import datetime
 from functools import partial
 
+# Disable Transformer Engine to avoid ABI compatibility issues
+# This is needed when transformer_engine is compiled for a different PyTorch version
+os.environ.setdefault('NVTE_FRAMEWORK', 'none')
+
 import torch
 import torch.distributed
 from torch import nn
@@ -29,6 +33,7 @@ from siirl.utils.megatron.megatron_utils import (
 )
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
 from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
+from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 
 
 
@@ -211,6 +216,13 @@ class ActorWorker:
             actor_module=self.actor_module,
             actor_optimizer=self.actor_optimizer,
         )
+
+        self.checkpoint_manager = MegatronCheckpointManager(
+            model=self.actor_module,
+            optimizer=self.actor_optimizer,
+            lr_scheduler=self.actor_optimizer_scheduler
+        )
+
         get_torch_device().empty_cache()
 
     def update_actor(self, data: TensorDict):
@@ -252,6 +264,30 @@ class ActorWorker:
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
         return data
+
+    def save_checkpoint(self, local_path, global_step=0, max_ckpt_to_keep=None):
+        """Save actor checkpoint using Megatron distributed checkpointing."""
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module)
+
+        self.checkpoint_manager.save_checkpoint(
+            local_path=local_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep
+        )
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+
+    def load_checkpoint(self, local_path):
+        """Load actor checkpoint using Megatron distributed checkpointing."""
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module)
+
+        self.checkpoint_manager.load_checkpoint(local_path=local_path)
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
 
 
 class ReferenceWorker:
@@ -566,6 +602,12 @@ class CriticWorker:
             critic_optimizer_config=critic_optimizer_config,
         )
 
+        self.checkpoint_manager = MegatronCheckpointManager(
+            model=self.critic_module,
+            optimizer=self.critic_optimizer,
+            lr_scheduler=self.critic_optimizer_scheduler
+        )
+
     def compute_values(self, data: TensorDict):
         micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
@@ -601,6 +643,30 @@ class CriticWorker:
             offload_megatron_optimizer(self.critic_optimizer)
 
         return data
+
+    def save_checkpoint(self, local_path, global_step=0, max_ckpt_to_keep=None):
+        """Save critic checkpoint using Megatron distributed checkpointing."""
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.critic_module)
+
+        self.checkpoint_manager.save_checkpoint(
+            local_path=local_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep
+        )
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.critic_module)
+
+    def load_checkpoint(self, local_path):
+        """Load critic checkpoint using Megatron distributed checkpointing."""
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.critic_module)
+
+        self.checkpoint_manager.load_checkpoint(local_path=local_path)
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.critic_module)
 
 
 class MegatronPPOActor():

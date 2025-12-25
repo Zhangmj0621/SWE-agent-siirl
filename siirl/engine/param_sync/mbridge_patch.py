@@ -53,7 +53,6 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
         except StopIteration:
             name, param = None, None
         name = local_to_global_map[iter_name]
-        print(f"rank [{torch.distributed.get_rank()}] converting {name}")
 
         # EP
         if ".mlp.experts.linear_fc" in name and self.mpu.ep_size > 1:
