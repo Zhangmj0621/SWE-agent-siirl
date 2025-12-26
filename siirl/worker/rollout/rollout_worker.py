@@ -54,6 +54,11 @@ class RolloutWorker:
         Args:
             config: SiiRLArguments configuration object containing all training/rollout settings
         """
+        # Configure logging for this Ray actor process
+        # (worker_process_setup_hook only works for task workers, not actors)
+        from siirl.utils.logger.logging_utils import set_basic_config
+        set_basic_config()
+        
         self.config = config
         self.ip = None  # Network IP address for the worker
         self.port = None  # Network port for the worker

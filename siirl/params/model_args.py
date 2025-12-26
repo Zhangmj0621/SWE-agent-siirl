@@ -105,6 +105,7 @@ class ActorArguments:
     loss_mode: str = field(default="vanilla", metadata={"help": "loss_mode for loss compute"})
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
+    clip_ratio_c: float = field(default=3.0, metadata={"help": "lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729"})
     clip_ratio_high: float = field(default=0.2, metadata={"help": "Max value for clip ratio"})
     entropy_coeff: float = field(default=0, metadata={"help": "Entropy coefficient"})
     use_kl_loss: bool = field(default=False, metadata={"help": "Enable KL loss"})

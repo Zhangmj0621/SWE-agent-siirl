@@ -15,8 +15,10 @@ import os
 import copy
 import asyncio
 import ray
+import time
 import torch
 import importlib
+import numpy as np
 
 from collections import deque
 from loguru import logger
@@ -200,6 +202,15 @@ class NaiveExecutor:
         )
         response_mask = response_mask * response_attention_mask
         
+        # Pad rollout_log_prob to match response length (for monitoring metrics)
+        if sample.rollout_log_prob is not None:
+            rollout_log_prob, _ = self._manual_pad(
+                [sample.rollout_log_prob],
+                max_length=self.config.data.max_response_length,
+                padding_side="right"
+            )
+            sample.rollout_log_prob = rollout_log_prob[0].numpy().astype(np.float32)
+        
         # Validate tensor shape consistency
         assert response_ids.shape == response_mask.shape, (
             f"mismatch in response_ids and response_mask shape: {response_ids.shape} vs {response_mask.shape}"
@@ -269,30 +280,50 @@ class NaiveExecutor:
             sample: Raw sample from data coordinator
         
         Returns:
-            Postprocessed sample with generated response and formatted tensors
+            Postprocessed sample with generated response and formatted tensors, or None if failed
         """
-        async with self.semaphore:  # Limit concurrent generations to batch size
-            loop = asyncio.get_running_loop()
-            # 1. Preprocess sample (CPU-bound, offload to executor)
-            sample = await loop.run_in_executor(
-                        None, 
-                        self._pre_process, 
-                        sample
-                    )
-            
-            # 2. Execute rollout flow (LLM generation with reward calculation)
-            sample = await self.rollout_flow(sample, copy.deepcopy(self.sampling_params), self.engine, self.reward_fn)
-            
-            # 3. Postprocess sample (CPU-bound padding and tensor formatting)
-            sample = await loop.run_in_executor(
-                        None, 
-                        self._post_process, 
-                        sample
-                    )
-            
-            # 4. Store processed sample in Ray object store and notify data coordinator
-            await self.put_data(sample = sample, loop = loop)
-            return sample
+        # Record timing information for performance analysis
+        timing_info = {
+            "rollout_start_at": time.time(),
+        }
+        sample_uid = getattr(sample, 'uid', 'unknown')
+        
+        try:
+            async with self.semaphore:  # Limit concurrent generations to batch size
+                loop = asyncio.get_running_loop()
+                # 1. Preprocess sample (CPU-bound, offload to executor)
+                sample = await loop.run_in_executor(
+                            None, 
+                            self._pre_process, 
+                            sample
+                        )
+                
+                # 2. Execute rollout flow (LLM generation with reward calculation)
+                sample = await self.rollout_flow(sample, copy.deepcopy(self.sampling_params), self.engine, self.reward_fn)
+                
+                # 3. Postprocess sample (CPU-bound padding and tensor formatting)
+                sample = await loop.run_in_executor(
+                            None, 
+                            self._post_process, 
+                            sample
+                        )
+                
+                # 4. Collect timing information from rollout flow
+                timing_info["rollout_end_at"] = time.time()
+                timing_info["rollout_duration"] = timing_info["rollout_end_at"] - timing_info["rollout_start_at"]
+                timing_info["generation_duration"] = getattr(sample, "_generation_duration", 0)
+                timing_info["reward_duration"] = getattr(sample, "_reward_duration", 0)
+                sample.timing_info = timing_info
+                
+                # 5. Store processed sample in Ray object store and notify data coordinator
+                await self.put_data(sample = sample, loop = loop)
+                return sample
+                
+        except Exception as e:
+            import traceback
+            logger.error(f"[NaiveExecutor.generate] Sample uid={sample_uid} failed: {e}")
+            logger.error(f"[NaiveExecutor.generate] Traceback:\n{traceback.format_exc()}")
+            raise
 
     async def run(self):
         """

@@ -1,6 +1,6 @@
-from typing import Optional, Callable, cast, Awaitable, Any
+from typing import Optional, Callable, Awaitable, Any
 import asyncio
-from numpy import ndarray
+import numpy as np
 
 from siirl.data_coordinator.sample import Sample, Samples2Dict
 
@@ -70,10 +70,9 @@ class AgentFlowCallable:
         await self.flow.reward(s)
 
         # TODO: 对齐 sample；暂时只赋值 naive_flow 里的那些
-        # TODO: 对齐类型
-        sample.responses = cast(ndarray, s.tokens)
-        sample.rollout_log_prob = cast(ndarray, s.rollout_log_probs)
-        sample.response_mask = cast(ndarray, s.loss_mask)
+        sample.responses = np.array(s.tokens, dtype=np.int64)
+        sample.rollout_log_prob = np.array(s.rollout_log_probs, dtype=np.float32)
+        sample.response_mask = np.array(s.loss_mask, dtype=np.int64)
         sample.rewards = cast(float, s.reward)
 
         return sample

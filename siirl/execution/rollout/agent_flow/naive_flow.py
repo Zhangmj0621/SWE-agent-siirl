@@ -14,9 +14,10 @@
 import asyncio
 import json
 import os
-from typing import Dict
+import time
+from typing import Dict, Any
+import numpy as np
 from loguru import logger
-from typing import Any
 
 from siirl.data_coordinator.sample import Sample
 from siirl.params import SiiRLArguments, MultiturnArguments
@@ -70,6 +71,9 @@ class NaiveFlow():
             Sample object with generated response, log probabilities, response mask, and reward score
 
         """
+        # Track timing for performance analysis
+        generation_duration = 0.0
+        
         # Generate response and log probabilities from prompt using inference engine
         loop = asyncio.get_event_loop()
         agent_data = AgentData(raw_prompt = sample.raw_prompt.tolist())
@@ -77,7 +81,9 @@ class NaiveFlow():
             if agent_data.state == AgentState.PENDING:
                 agent_data.state = await self._handle_pending_state(agent_data, engine, loop)
             elif agent_data.state == AgentState.GENERATING:
+                gen_start = time.time()
                 agent_data.state = await self._handle_generating_state(agent_data, sampling_params, engine)
+                generation_duration += time.time() - gen_start
             elif agent_data.state == AgentState.PROCESSING_ENV:
                 agent_data.state = await self._handle_processing_envs_state(agent_data, engine, loop)
             else:
@@ -90,6 +96,11 @@ class NaiveFlow():
         sample.responses = response_ids
         sample.prompts = prompt_ids
         sample.response_mask = agent_data.response_mask
+        sample.rollout_log_prob = np.array(agent_data.rollout_log_prob, dtype=np.float32)
+        
+        # Track reward computation time
+        reward_start = time.time()
+        
         if agent_data.env_rewards:
             sample.rewards = sum(agent_data.env_rewards)
         else:
@@ -114,6 +125,12 @@ class NaiveFlow():
                 )
             # Assign computed reward to sample
             sample.rewards = rewards
+        
+        reward_duration = time.time() - reward_start
+        
+        # Store timing info for aggregation in executor
+        sample._generation_duration = generation_duration
+        sample._reward_duration = reward_duration
         
         return sample
 
