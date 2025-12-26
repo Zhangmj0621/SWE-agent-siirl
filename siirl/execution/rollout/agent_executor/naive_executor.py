@@ -18,6 +18,7 @@ import ray
 import time
 import torch
 import importlib
+import numpy as np
 
 from collections import deque
 from loguru import logger
@@ -200,6 +201,15 @@ class NaiveExecutor:
             padding_side="right"
         )
         response_mask = response_mask * response_attention_mask
+        
+        # Pad rollout_log_prob to match response length (for monitoring metrics)
+        if sample.rollout_log_prob is not None:
+            rollout_log_prob, _ = self._manual_pad(
+                [sample.rollout_log_prob],
+                max_length=self.config.data.max_response_length,
+                padding_side="right"
+            )
+            sample.rollout_log_prob = rollout_log_prob[0].numpy().astype(np.float32)
         
         # Validate tensor shape consistency
         assert response_ids.shape == response_mask.shape, (
