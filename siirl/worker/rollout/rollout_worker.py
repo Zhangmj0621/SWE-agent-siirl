@@ -191,7 +191,7 @@ class RolloutWorker:
     def param_sync_from_distributed(
         self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
     ):
-        return self.engine.sync_param_from_distributed(names, dtypes, shapes, group_name, flush_cache, weight_version)
+        return self.engine.param_sync_from_distributed(names, dtypes, shapes, group_name, flush_cache, weight_version)
     
     def destroy_weights_update_group(self, group_name):
         return self.engine.destroy_weights_update_group(group_name)

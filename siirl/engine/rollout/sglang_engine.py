@@ -54,6 +54,7 @@ class SglangEngine:
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
+        extra_server_args:dict = {},
     ):
         """
         Initialize SGLang engine with explicit GPU placement parameters.
@@ -89,7 +90,7 @@ class SglangEngine:
         )
         self.max_model_len = config.rollout.max_model_len if config.rollout.max_model_len else config.data.max_prompt_length + config.data.max_response_length
         self.max_response_length = config.data.max_response_length
-        self.launch_server()
+        self.launch_server(extra_server_args)
         
     def _build_server_args(self) -> dict:
         """
@@ -131,8 +132,8 @@ class SglangEngine:
             "dist_timeout": 1800,
             "skip_server_warmup": True,
         }
-        
-    def launch_server(self):
+
+    def launch_server(self, extra_server_args = {}):
         """
         Launch the SGLang HTTP server in a separate process.
         
@@ -141,6 +142,7 @@ class SglangEngine:
         in complex multi-node and cross-node TP scenarios.
         """
         args = self._build_server_args()
+        args.update(extra_server_args)
         self.sgl_args = ServerArgs(**args)
         print(f"Launch SglangHttpServer at: {get_net_interface_ip()}:{self.port}")
         multiprocessing.set_start_method("spawn", force=True)
@@ -177,6 +179,23 @@ class SglangEngine:
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
         text = output['text'] 
         return text, responses, rollout_log_prob
+    
+    async def generate_from_text(self, input_text:"str", sampling_params:Dict, use_sglang_router = False):
+        url = f"http://{self.ip}:{self.port}/generate"
+        if use_sglang_router:
+            url = f"http://{self.router_address}/generate"
+        # Prepare payload for sglang server
+        payload = {
+            "sampling_params": sampling_params,
+            "return_logprob": True,
+        }
+        payload["text"] = input_text
+        output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
+        responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
+        rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
+        text = output['text'] 
+        return text, responses, rollout_log_prob
+
 
     def flush_cache(self):
         """Flush the cache of the server."""
@@ -243,8 +262,8 @@ class SglangEngine:
             },
         )
 
-    def sync_param_from_distributed(
-        self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
+    def param_sync_from_distributed(
+        self, names, dtypes, shapes, group_name, flush_cache=True, weight_version: str | None = None
     ):
         payload = {
             "names": names,
