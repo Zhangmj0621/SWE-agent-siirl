@@ -16,6 +16,7 @@ import json
 import os
 import time
 from typing import Dict, Any
+import numpy as np
 from loguru import logger
 
 from siirl.data_coordinator.sample import Sample
@@ -95,7 +96,7 @@ class NaiveFlow():
         sample.responses = response_ids
         sample.prompts = prompt_ids
         sample.response_mask = agent_data.response_mask
-        sample.rollout_log_prob = agent_data.rollout_log_prob
+        sample.rollout_log_prob = np.array(agent_data.rollout_log_prob, dtype=np.float32)
         
         # Track reward computation time
         reward_start = time.time()
