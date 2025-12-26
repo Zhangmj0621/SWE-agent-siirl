@@ -74,7 +74,11 @@ class NaiveExecutor:
             self.rollout_flow = NaiveFlow(self.config, self.engine)
         elif flow_path == "agent":
             from siirl.execution.rollout.agent_flow.agent_flow import build_agentflow
-            self.rollout_flow = build_agentflow(config.rollout.flow_config, engine)
+            import yaml
+
+            with open(config.rollout.flow_config, "r") as f:
+                flow_config = yaml.safe_load(f)
+            self.rollout_flow = build_agentflow(flow_config, engine)
         else:
             # Dynamically import custom rollout flow function
             module_path, name = flow_path.rsplit('.', 1)

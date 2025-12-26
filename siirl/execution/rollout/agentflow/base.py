@@ -2,9 +2,10 @@ from dataclasses import dataclass, field
 from typing import Optional, Any, Protocol, Generic, TypeVar
 from types import MethodType
 from enum import Enum
+from loguru import logger
 
 # from transformers import PreTrainedTokenizer # This is slow!
-type PreTrainedTokenizer = Any
+PreTrainedTokenizer = Any
 
 
 class AgentFlow(Protocol):
@@ -178,5 +179,11 @@ class Sample(Generic[AgentMeta]):
             assert role != "assistant"
             tokens: list[int] = self.model.tokenizer(content)
             self.append_input_tokens(tokens)
-        # print(f"message {len(self.conversations)}: role={role}, content:\n{content}\n")
+        logger.debug(
+            f"[Agentflow Sample] message {len(self.conversations)}",
+            "role",
+            role,
+            "content",
+            content,
+        )
         self.conversations.append({"role": role, "content": content, **kwargs})

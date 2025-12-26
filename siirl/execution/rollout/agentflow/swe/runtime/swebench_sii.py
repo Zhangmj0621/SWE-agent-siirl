@@ -3,6 +3,7 @@
 from io import BytesIO
 from pydantic import BaseModel
 from dataclasses import dataclass
+from typing import cast
 import tempfile
 import os
 
@@ -13,12 +14,6 @@ from ..base import SWESample
 from swebench.harness.grading import get_eval_report
 from swebench.harness.test_spec.test_spec import make_test_spec, TestSpec
 from swebench.harness.constants import SWEbenchInstance
-
-
-class SBVSample(BaseModel):
-    prompt: str
-    label: str
-    metadata: SWEbenchInstance
 
 
 @dataclass(frozen=True)
@@ -136,7 +131,7 @@ class SWEBenchBuiler(RuntimeBuilder):
         self.config = SWEBenchConfig.model_validate(config)
 
     def parse_sampledata(self, sample: dict) -> SWESampleData:
-        s = SBVSample.model_validate(sample).metadata
+        s = cast(SWEbenchInstance, sample)
         spec = make_test_spec(s)
         spec.install_repo_script
         image = get_swebench_docker_image_name(s["instance_id"])
