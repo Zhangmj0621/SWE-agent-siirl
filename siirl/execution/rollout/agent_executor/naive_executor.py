@@ -204,12 +204,16 @@ class NaiveExecutor:
         
         # Pad rollout_log_prob to match response length (for monitoring metrics)
         if sample.rollout_log_prob is not None:
-            rollout_log_prob, _ = self._manual_pad(
-                [sample.rollout_log_prob],
-                max_length=self.config.data.max_response_length,
-                padding_side="right"
-            )
-            sample.rollout_log_prob = rollout_log_prob[0].numpy().astype(np.float32)
+            max_len = self.config.data.max_response_length
+            current_len = len(sample.rollout_log_prob)
+            if current_len < max_len:
+                pad_len = max_len - current_len
+                sample.rollout_log_prob = np.pad(
+                    sample.rollout_log_prob, (0, pad_len), 
+                    mode='constant', constant_values=0.0
+                ).astype(np.float32)
+            elif current_len > max_len:
+                sample.rollout_log_prob = sample.rollout_log_prob[:max_len].astype(np.float32)
         
         # Validate tensor shape consistency
         assert response_ids.shape == response_mask.shape, (

@@ -76,18 +76,18 @@ class RolloutManager:
         self.rollout_gpu = gpu_resources.num_gpus
         
         self.device_name = config.trainer.device
-        self.num_gpus_per_rollout_engine = config.trainer.num_gpus_per_rollout_engine
+        self.tp_size = config.rollout.tensor_model_parallel_size
         self.n_gpus_per_node = config.trainer.n_gpus_per_node
         
         # === Key metrics for actor/engine management ===
         # GPUs managed by each actor (capped at node boundary)
-        # self.gpus_per_actor = min(self.tp_size, self.n_gpus_per_node)
+        self.gpus_per_actor = min(self.tp_size, self.n_gpus_per_node)
         # Total number of RolloutWorker actors to create
         self.num_workers = self.rollout_gpu // self.gpus_per_actor
         # Number of TP groups (logical inference engines)
-        # self.num_tp_groups = self.rollout_gpu // self.tp_size
+        self.num_tp_groups = self.rollout_gpu // self.tp_size
         # Number of actors per TP group (>1 for cross-node TP)
-        # self.workers_per_tp_group = self.tp_size // self.gpus_per_actor
+        self.actors_per_tp_group = self.tp_size // self.gpus_per_actor
         
         self.data_coordinator = data_coordinator_handle
         
