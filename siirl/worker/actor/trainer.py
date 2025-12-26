@@ -362,7 +362,7 @@ class Trainer:
                 # Submit std stats separately for proper distributed std calculation
                 if std_stats is not None:
                     self.metric_client.submit_metric(
-                        {"training/rollout_probs_diff_std": std_stats},
+                        {"actor/rollout_probs_diff_std": std_stats},
                         self.dp_world_size
                     )
 

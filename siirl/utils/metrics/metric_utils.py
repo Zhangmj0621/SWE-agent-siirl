@@ -297,8 +297,8 @@ def compute_log_prob_diff_metrics(
         valid_diff = probs_diff.flatten()
     
     if valid_diff.numel() > 0:
-        metrics["training/rollout_probs_diff_max"] = torch.max(valid_diff).item()
-        metrics["training/rollout_probs_diff_mean"] = torch.mean(valid_diff).item()
+        metrics["actor/rollout_probs_diff_max"] = torch.max(valid_diff).item()
+        metrics["actor/rollout_probs_diff_mean"] = torch.mean(valid_diff).item()
         
         # Create StdStats for distributed std calculation
         std_stats = StdStats.from_tensor(valid_diff)
