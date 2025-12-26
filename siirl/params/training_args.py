@@ -43,8 +43,8 @@ class TrainingArguments:
     nnodes: int = field(default=1, metadata={"help": "Number of nodes"})
     n_gpus_per_node: int = field(default=8, metadata={"help": "GPUs per node"})
     save_freq: int = field(default=-1, metadata={"help": "Checkpoint frequency"})
-    resume_mode: str = field(default="auto", metadata={"help": "Resume training mode"})
-    resume_from_path: bool = field(default=False, metadata={"help": "Resume from specific path"})
+    resume_mode: str = field(default="auto", metadata={"help": "Resume training mode: auto/disable/resume_path"})
+    resume_from_path: Optional[str] = field(default=None, metadata={"help": "Resume from specific path"})
     test_freq: int = field(default=-1, metadata={"help": "Testing frequency"})
     critic_warmup: int = field(default=0, metadata={"help": "Critic warmup steps"})
     default_local_dir: str = field(

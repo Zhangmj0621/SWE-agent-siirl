@@ -438,6 +438,20 @@ class DataCoordinator:
                 self.dataloader_queue.clear()
                 return all_popped
 
+    @ray.method(concurrency_group="dataloader")
+    def save_dataloader_state(self):
+        """Save dataloader state dict."""
+        if self.dataloader is None:
+            return None
+        return self.dataloader.state_dict()
+
+    @ray.method(concurrency_group="dataloader")
+    def load_dataloader_state(self, state_dict):
+        """Load dataloader state dict."""
+        if self.dataloader is None or state_dict is None:
+            return
+        self.dataloader.load_state_dict(state_dict)
+
 # ====================================================================
 # Initialization Logic
 # ====================================================================

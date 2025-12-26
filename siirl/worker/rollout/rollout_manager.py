@@ -13,6 +13,7 @@
 # limitations under the License.
 import time
 import ray
+import sys
 import re
 import os
 import asyncio
@@ -388,7 +389,7 @@ class RolloutManager:
         total = (total_epochs - self.start_epoch) * self.num_train_batches
         done = (self.global_steps % self.num_train_batches) + self.start_epoch * self.num_train_batches
 
-        pbar = tqdm_asyncio(total=total, initial=done, desc="Step-Batch")
+        
         for epoch in range(self.start_epoch, total_epochs):
             for batch_idx in range(self.num_train_batches):
                 if epoch == self.start_epoch and batch_idx < (self.global_steps % self.num_train_batches):
@@ -396,9 +397,7 @@ class RolloutManager:
                 await self.event.wait()
                 self.event.clear()
                 ray.get(self.data_coordinator.run_dataloader.remote(epoch))
-                pbar.update(1)     
                 await asyncio.sleep(1)
-        pbar.close()
 
     async def next_rollout(self):
         self.event.set()

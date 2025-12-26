@@ -107,6 +107,12 @@ class MainRunner:
             logger.success(f"RolloutManager initialized. Router at: {router_address}")
             logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
 
+            # Load checkpoint if resume mode is enabled
+            if config.trainer.resume_mode != "disable":
+                logger.info("Loading checkpoint...")
+                trainer_group.load_checkpoint()
+                logger.success("Checkpoint loaded successfully")
+
             init_time = time.time() - start_time
             logger.info(f"Initialization completed in {init_time:.1f}s")
 

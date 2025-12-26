@@ -15,7 +15,7 @@
 import ray
 import os
 from loguru import logger
-from typing import List, Optional
+from typing import List
 
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.enums import DistributedEnv
@@ -145,6 +145,17 @@ class TrainerGroup:
             ray.get(futures)
 
         logger.success(f"Successfully initialized {len(self.trainers)} trainers with their models")
+
+    def load_checkpoint(self):
+        """Load checkpoint for all trainers."""
+        if not self.trainers:
+            logger.warning("No trainers available for checkpoint loading")
+            return
+
+        logger.info("Loading checkpoints for all trainers")
+        futures = [trainer.load_checkpoint.remote() for trainer in self.trainers]
+        ray.get(futures)
+        logger.success("Checkpoint loaded for all trainers")
 
     def train(self):
         """
