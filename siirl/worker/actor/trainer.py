@@ -15,6 +15,7 @@
 import ray
 import time
 import os
+import torch
 import torch.distributed as dist
 import traceback
 from loguru import logger
@@ -70,8 +71,7 @@ class Trainer:
             self.metric_client = MetricClient(metric_worker)
             logger.info(f"[Trainer rank={rank}] MetricClient initialized")
 
-        # MetricTracker will be created in init_models()
-        # Only rank=0 (global rank) creates a tracker (same as siiRL-github)
+        # MetricTracker will be created in init_models() (only on rank=0)
         self.tracker = None
 
         # Initialize models (will be created in init_models method)
@@ -88,6 +88,11 @@ class Trainer:
 
         # Training state
         self.global_step = 0
+        
+        # Local batch cache for handling async data fetch race conditions
+        # When some dp_ranks get data while others don't, the ones with data
+        # cache it locally and wait for the next round
+        self._local_batch_cache = None
 
         # Log trainer initialization info
         node_ip = ray.util.get_node_ip_address()
@@ -117,8 +122,7 @@ class Trainer:
         self.tp_rank = mpu.get_tensor_model_parallel_rank()
         self.pp_rank = mpu.get_pipeline_model_parallel_rank()
 
-        # Only TP rank 0 and PP rank 0 should submit metrics (same as siiRL-github)
-        # This avoids duplicate metrics submission from TP/PP groups
+        # Only TP rank 0 and PP rank 0 should submit metrics to avoid duplicates
         self.should_submit_metrics = (self.tp_rank == 0 and self.pp_rank == 0)
 
 
@@ -135,7 +139,7 @@ class Trainer:
         )
 
 
-        # Initialize MetricTracker only on rank=0 (global rank, same as siiRL-github)
+        # Initialize MetricTracker only on global rank=0
         if self.rank == 0:
             self._init_tracker()
         
@@ -145,8 +149,7 @@ class Trainer:
         """
         Initialize MetricTracker for logging (only called on rank=0).
 
-        Configures backends based on config settings, similar to siiRL-github's
-        DAGWorker._initialize_worker() pattern.
+        Configures backends based on config settings.
         """
         from siirl.utils.logger import MetricTracker
         
@@ -220,28 +223,85 @@ class Trainer:
     def has_critic(self):
         return self.critic_worker is not None
 
+    def _sync_batch_availability(self, batch_ref) -> bool:
+        """
+        Synchronize batch data availability across all DP ranks.
+        
+        In async training, different DP ranks may fetch data at different times,
+        leading to race conditions where some ranks have data while others don't.
+        This method ensures all DP ranks agree on whether to proceed with training.
+        
+        Args:
+            batch_ref: The batch reference fetched from DataCoordinator (can be empty list)
+            
+        Returns:
+            True if ALL DP ranks have data, False otherwise.
+            
+        Side effect:
+            If sync fails but this rank has data, caches it in self._local_batch_cache
+            for use in the next get_batch call.
+        """
+        # Use all_reduce with MIN on DP group: if any DP rank has 0 (no data), result is 0
+        # We use DP group because different DP ranks fetch different data partitions
+        # Same DP rank across TP/PP will have the same data status
+        has_data = torch.tensor([1 if batch_ref else 0], dtype=torch.int32, device="cuda")
+        dp_group = mpu.get_data_parallel_group(with_context_parallel=True)
+        dist.all_reduce(has_data, op=dist.ReduceOp.MIN, group=dp_group)
+
+        all_have_data = has_data.item() == 1
+
+        if not all_have_data and batch_ref:
+            # Sync failed, but this rank has data - cache it for next round
+            self._local_batch_cache = batch_ref
+            logger.debug(f"[Trainer rank={self.rank}] Caching batch data locally due to sync failure")
+
+        return all_have_data
+
     def get_batch(self, batch_size: int):
+        """
+        Get a batch of data for training with proper synchronization across DP ranks.
+        
+        This method handles the race condition where different DP ranks may receive
+        data at different times due to async data production. It uses:
+        1. Local cache to store data that was fetched but couldn't be used (due to sync failure)
+        2. all_reduce(MIN) to ensure all ranks agree on whether data is available
+        
+        Args:
+            batch_size: Total batch size (will be divided by dp_world_size)
+            
+        Returns:
+            TensorDict with batch data, or None if data not available for all ranks
+        """
         if self.data_coordinator is None:
             raise RuntimeError("DataCoordinator not available")
 
-        batch_size = batch_size // self.dp_world_size 
+        batch_size = batch_size // self.dp_world_size
 
-        batch_ref = ray.get(
-            self.data_coordinator.get_batch.remote(
-                batch_size=batch_size,
-                dp_rank=self.dp_rank,
-                balance_partitions=self.dp_world_size,
+        # Priority 1: Use locally cached data from previous failed sync
+        if self._local_batch_cache is not None:
+            batch_ref = self._local_batch_cache
+            self._local_batch_cache = None
+            logger.debug(f"[Trainer rank={self.rank}] Using locally cached batch data")
+        else:
+            # Priority 2: Fetch from DataCoordinator
+            batch_ref = ray.get(
+                self.data_coordinator.get_batch.remote(
+                    batch_size=batch_size,
+                    dp_rank=self.dp_rank,
+                    balance_partitions=self.dp_world_size,
+                )
             )
-        )
 
-        dist.barrier()
-
-        if not batch_ref:
+        # Synchronize: ensure all DP ranks have data before proceeding
+        if not self._sync_batch_availability(batch_ref):
             return None
 
+        # All DP ranks have data, proceed with training
         batch_data_list = ray.get(batch_ref)
 
-        ray.get(self.data_coordinator.clear_cache.remote()) if self.rank == 0 else None
+        # Clear DataCoordinator cache and sync before entering train_step
+        if self.rank == 0:
+            ray.get(self.data_coordinator.clear_cache.remote())
         dist.barrier()
 
         return Samples2Dict(batch_data_list)
@@ -252,7 +312,7 @@ class Trainer:
         with timers["step"]:
             data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
 
-            # Compute entropy from log probs (same as siiRL-github dagworker.py:563)
+            # Compute entropy from log probs
             entropy_loss = None
             if "entropys" in data_with_logprobs and "response_mask" in data_with_logprobs:
                 from siirl.algorithm.loss import agg_loss
@@ -311,7 +371,7 @@ class Trainer:
         timing_raw = timers.to_dict()
         
         # Submit metrics to MetricWorker for aggregation
-        # Only TP rank 0 and PP rank 0 should submit to avoid duplicates (same as siiRL-github)
+        # Only TP rank 0 and PP rank 0 should submit to avoid duplicates
         if self.metric_client is not None and self.should_submit_metrics:
             try:
                 from siirl.utils.metrics import (

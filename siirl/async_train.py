@@ -56,6 +56,8 @@ class MainRunner:
         """
         # NOTE: Logging is automatically configured when siirl is imported (see siirl/__init__.py)
         # All Ray actors inherit this configuration as they import siirl modules.
+        from siirl.utils.logger.logging_utils import set_basic_config
+        set_basic_config()
         from loguru import logger
 
         logger.info("MainRunner started. Beginning workflow setup...")
@@ -88,6 +90,7 @@ class MainRunner:
         total_training_steps, batches_per_epoch = ray.get(data_coordinator.epoch_info.remote())
         config.actor_ref.actor.optim.total_training_steps = total_training_steps
         config.critic.optim.total_training_steps = total_training_steps
+        config.trainer.total_training_steps = total_training_steps  # For progress bar
         logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
 
         # === 3. Initialize MetricWorker ===
@@ -224,6 +227,8 @@ def main() -> None:
     starts the MainRunner actor to orchestrate the distributed training workflow.
     """
     # Import logger locally to avoid Ray serialization issues
+    from siirl.utils.logger.logging_utils import set_basic_config
+    set_basic_config()
     from loguru import logger
 
     start_time = time.time()

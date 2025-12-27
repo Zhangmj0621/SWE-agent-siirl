@@ -15,8 +15,6 @@
 """
 Metric data structures and aggregation functions.
 
-Reused from siiRL-github/siirl/execution/metric_worker/utils.py
-
 Supports distributed aggregation including proper std calculation using
 the parallel variance formula: Var(X) = E[X²] - E[X]²
 """

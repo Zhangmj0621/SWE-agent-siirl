@@ -15,9 +15,6 @@
 
 """
 Metrics computation functions for RL training.
-
-Simplified version reused from siiRL-github/siirl/utils/metrics/metric_utils.py
-Can be extended as needed.
 """
 
 import os
@@ -282,7 +279,7 @@ def compute_log_prob_diff_metrics(
     if "rollout_log_prob" not in data or "old_log_probs" not in data:
         return metrics, std_stats
     
-    # Convert log probs to probs for comparison (same as siiRL-github)
+    # Convert log probs to probs for comparison
     rollout_probs = torch.exp(data["rollout_log_prob"])
     actor_probs = torch.exp(data["old_log_probs"])
     

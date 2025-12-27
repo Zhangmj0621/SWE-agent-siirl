@@ -16,7 +16,6 @@
 siiRL-agentic Metrics Module
 
 Provides distributed metrics collection and aggregation functionality.
-Reused from siiRL-github with minimal modifications.
 
 Usage:
     from siirl.utils.metrics import MetricWorker, MetricClient

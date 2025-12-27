@@ -14,8 +14,6 @@
 
 """
 MetricWorker and MetricClient for distributed metrics collection.
-
-Reused from siiRL-github/siirl/execution/metric_worker/metric_worker.py
 """
 
 import ray
