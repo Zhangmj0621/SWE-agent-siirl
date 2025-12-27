@@ -106,6 +106,9 @@ class TrainerGroup:
                 DistributedEnv.MASTER_ADDR.value: self.master_addr,
                 DistributedEnv.MASTER_PORT.value: self.master_ports,
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                # because sglang will always set NCCL_CUMEM_ENABLE to 0
+                # we need also set it to 0 to prevent nccl error.
+                "NCCL_CUMEM_ENABLE": os.environ.get("NCCL_CUMEM_ENABLE", "0"),
             }
             logger.info(f"  Creating Trainer rank={rank}: bundle_idx={bundle_idx}, local_rank={local_rank}, "
                        f"node_ip={self.node_ips[rank]}, env={{WORLD_SIZE={self.num_gpus}, RANK={rank}, "

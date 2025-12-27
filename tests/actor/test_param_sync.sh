@@ -2,7 +2,9 @@ export PYTHONPATH=/inspire/hdd/project/qianghuaxuexi/wangtongyu-25057/wty_public
 export PYTHONPATH=/inspire/hdd/project/qianghuaxuexi/wangtongyu-25057/wty_public/siirl-agentic/tests/:$PYTHONPATH
 export RAY_ENABLE_RECORD_ACTOR_TASK_LOGGING=1
 export RAY_record_task_actor_creation_sites=true
-export NCCL_DEBUG=INFO
+# export NCCL_DEBUG=INFO
+# export NCCL_NVLS_ENABLE=1
+# export CUDA_DEVICE_MAX_CONNECTIONS=1
 # --- Infrastructure & Boilerplate Functions ---
 NNODES=1
 start_ray_cluster() {
@@ -47,9 +49,9 @@ start_ray_cluster() {
         ray start --include-dashboard=True --head "${ray_start_common_opts[@]}"
     fi
 }
-export NCCL_SHM_DISABLE=1
+# export NCCL_SHM_DISABLE=1
 # export NCCL_P2P_DISABLE=1
 start_ray_cluster
 ray stop
 # ray start --include-dashboard=True --head
-python3 test_param_sync.py --model_path=Qwen3-0.6B
+python3 test_param_sync.py --model_path=/inspire/ssd/project/qianghuaxuexi/public/debug_models/Qwen3-0.6B
