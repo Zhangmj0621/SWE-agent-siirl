@@ -8,6 +8,8 @@ from typing import Optional, BinaryIO
 from subprocess import CalledProcessError
 from pydantic import BaseModel, Field
 
+from siirl.execution.rollout.agentflow.swe.environment.base import ContainerBuildArgs
+
 from .base import (
     ContainerEnv,
     ContainerEnvBuilder,
@@ -359,6 +361,9 @@ class K8sEnvBuilder(ContainerEnvBuilder):
         if self.context:
             args.extend(["--context", self.context])
         return args
+
+    async def build(self, args: ContainerBuildArgs):
+        raise NotImplementedError("K8s does not support container building")
 
     async def start(self, args: ContainerStartArgs) -> K8sEnv:
         """Start a Kubernetes pod from the given configuration.

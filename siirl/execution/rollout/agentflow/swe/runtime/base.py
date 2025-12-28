@@ -1,23 +1,19 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-
+from typing import Any
 from ...base import Sample
 from ..environment import ContainerStartArgs, ContainerEnv
 
 
 @dataclass
 class SWESampleData:
-    """SWE 单任务的数据集内容"""
+    """SWE 单任务的数据集内容；
+    应当包含 repo, base_commit, patch, test_patch, eval 等信息
+    """
 
     container_args: ContainerStartArgs
     problem_statement: str  # 问题描述，作为最初 prompt
-    repo: str  #
-    base_commit: str
-    patch: bytes
-    test_patch: bytes
-    eval_script: bytes
-
-    original: dict  # original dict
+    runtime_meta: Any  # original dict
 
 
 class RuntimeBuilder(ABC):
