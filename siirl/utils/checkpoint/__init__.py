@@ -13,5 +13,11 @@
 # limitations under the License.
 
 from .checkpoint_utils import find_latest_ckpt_path
+from .base_checkpoint_manager import BaseCheckpointManager
+from .megatron_checkpoint_manager import MegatronCheckpointManager
 
-__all__ = ["find_latest_ckpt_path"]
+__all__ = [
+    "find_latest_ckpt_path",
+    "BaseCheckpointManager",
+    "MegatronCheckpointManager",
+]
