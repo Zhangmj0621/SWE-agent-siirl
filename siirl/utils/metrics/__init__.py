@@ -41,6 +41,7 @@ from .metric_utils import (
     compute_throughput_metrics,
     compute_log_prob_diff_metrics,
     extract_rollout_timing_metrics,
+    aggregate_validation_metrics
 )
 
 __all__ = [
@@ -62,5 +63,6 @@ __all__ = [
     "compute_throughput_metrics",
     "compute_log_prob_diff_metrics",
     "extract_rollout_timing_metrics",
+    "aggregate_validation_metrics",
 ]
 

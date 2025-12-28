@@ -13,8 +13,7 @@
 # limitations under the License.
 
 import asyncio
-import io
-import os
+import copy
 import multiprocessing
 import time
 from urllib3.exceptions import NewConnectionError
@@ -90,7 +89,16 @@ class SglangEngine:
         )
         self.max_model_len = config.rollout.max_model_len if config.rollout.max_model_len else config.data.max_prompt_length + config.data.max_response_length
         self.max_response_length = config.data.max_response_length
+        # Sampling parameters for text generation (LLM inference config)
+        self.sampling_params =  dict(
+            temperature=config.rollout.temperature,  
+            top_p=config.rollout.top_p,  
+            top_k=config.rollout.top_k, 
+            repetition_penalty=1.0,  
+        )      
         self.launch_server(extra_server_args)
+
+        
         
     def _build_server_args(self) -> dict:
         """
@@ -164,8 +172,17 @@ class SglangEngine:
     def set_router(self, router_address):
         self.router_address = router_address
     
-    async def generate(self, input_ids:List[int], sampling_params:Dict):
+    async def generate(self, input_ids:List[int], is_validate:bool):
+        sampling_params = copy.deepcopy(self.sampling_params)
         sampling_params['max_new_tokens'] = min(self.max_model_len - len(input_ids), self.max_response_length)
+        if is_validate:
+            kwargs = {
+                "top_k": self.config.rollout.val_kwargs.top_k,
+                "top_p": self.config.rollout.val_kwargs.top_p,
+                "temperature": self.config.rollout.val_kwargs.temperature,
+                
+            }
+            sampling_params.update(kwargs)
         url = f"http://{self.ip}:{self.port}/generate"
         # url = f"http://{self.router_address}/generate"
         # Prepare payload for sglang server

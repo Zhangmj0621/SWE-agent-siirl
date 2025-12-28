@@ -60,9 +60,8 @@ class AgentFlowCallable:
     async def __call__(
         self,
         sample: Sample,
-        sampling_params: dict,
-        engine: LLMEngine,
         reward_fn=None,
+        is_generate=False
     ):
         sample_data = Samples2Dict([sample]).to_dict(convert_tensors=True)
         s = self.flow.preprocess(sample_data)

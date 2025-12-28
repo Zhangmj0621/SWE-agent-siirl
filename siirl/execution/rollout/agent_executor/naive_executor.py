@@ -22,10 +22,10 @@ import numpy as np
 
 from collections import deque
 from loguru import logger
-from typing import List, Set, Dict, Any
+from typing import List, Set, Dict, Any, Tuple
 from siirl.params.training_args import SiiRLArguments
 from siirl.data_coordinator.sample import Sample, SampleInfo, Samples2Dict
-
+from siirl.utils.timer import Timer
 class NaiveExecutor:
     '''
     NaiveExecutor used in synchronous training workflows.
@@ -53,13 +53,7 @@ class NaiveExecutor:
         self.finish_group_samples:Dict[str, List[Any]] = {} # Save result of finish samples until reach n group
         self.pending_queue = deque()
         self.rollout_n = config.rollout.n
-        # Sampling parameters for text generation (LLM inference config)
-        self.sampling_params =  dict(
-            temperature=config.rollout.temperature,  # Randomness control for generation
-            top_p=config.rollout.top_p,  # Nucleus sampling threshold
-            repetition_penalty=1.0,  # Penalty for repetitive text generation
-        )
-        
+
         # Semaphore to control concurrent generation tasks (limit to batch size)
         self.semaphore = asyncio.Semaphore(self.max_concurrency_size) 
         self.reward_fn = None  # Custom reward function (optional)
@@ -160,7 +154,7 @@ class NaiveExecutor:
         
         return padded_ids, attention_mask
 
-    def _pre_process(self, sample):
+    def _pre_process(self, sample:Sample, is_validate = False):
         """
         Preprocess single sample before generation.
         Maps raw prompt IDs to prompts field for consistency.
@@ -172,6 +166,8 @@ class NaiveExecutor:
             Preprocessed sample with prompts field set
         """
         sample.prompts = sample.raw_prompt_ids
+        if is_validate:
+            sample.prompt_texts = self.engine.tokenizer.decode(sample.prompts)
         return sample
     
     def _post_process(self, sample:Sample):
@@ -239,7 +235,6 @@ class NaiveExecutor:
         reward_tensor[valid_response_length - 1] = sample.rewards
         
         # Clean up and set processed fields in sample
-        sample.rewards = None
         sample.token_level_rewards = reward_tensor.numpy()
         sample.token_level_scores = copy.deepcopy(reward_tensor.numpy())
         sample.prompts = prompt_ids[0].numpy()
@@ -277,10 +272,10 @@ class NaiveExecutor:
             sample_infos = [tuple_data[0] for tuple_data in tuple_datas]
             sample_refs = [tuple_data[1] for tuple_data in tuple_datas]
             await self.data_coordinator.put_batch.remote(sample_infos, sample_refs)
-        
+
         return sample
     
-    async def generate(self, sample):
+    async def generate(self, sample, is_validate = False):
         """
         Asynchronous sample generation pipeline: preprocess → rollout → postprocess → data coordination.
         Uses semaphore to control concurrency and offloads CPU-bound processing to executor.
@@ -304,11 +299,11 @@ class NaiveExecutor:
                 sample = await loop.run_in_executor(
                             None, 
                             self._pre_process, 
-                            sample
+                            sample, is_validate
                         )
                 
                 # 2. Execute rollout flow (LLM generation with reward calculation)
-                sample = await self.rollout_flow(sample, copy.deepcopy(self.sampling_params), self.engine, self.reward_fn)
+                sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
                 
                 # 3. Postprocess sample (CPU-bound padding and tensor formatting)
                 sample = await loop.run_in_executor(
@@ -325,7 +320,8 @@ class NaiveExecutor:
                 sample.timing_info = timing_info
                 
                 # 5. Store processed sample in Ray object store and notify data coordinator
-                await self.put_data(sample = sample, loop = loop)
+                if not is_validate:
+                    await self.put_data(sample = sample, loop = loop)
                 return sample
                 
         except Exception as e:
@@ -343,7 +339,6 @@ class NaiveExecutor:
         self.running = True
         stats_task = None
         rank = int(os.environ.get("RANK"))
-        print(f"[hujr rank] {rank} {rank == 0}")
         if rank == 0:
             stats_task = asyncio.create_task(self.rollout_status(rank))
         
@@ -374,9 +369,27 @@ class NaiveExecutor:
         if rank == 0:
             stats_task.cancel()
             await asyncio.gather(stats_task, return_exceptions=True)
-        
-    async def rollout_status(self, rank:int = 0, interval: float = 10.0):
-        last_status = len(self.tasks)
+     
+    async def validate(self, val_batch_size) -> Tuple[List[Sample],Dict]:
+        val_samples = []
+        with Timer("get_val_data") as val_get_time:
+            while True:
+                data = ray.get(self.data_coordinator.get_dataloader.remote(batch_size = val_batch_size, is_validate = True))
+                if len(val_samples) and not len(data):
+                    break
+                val_samples.extend(data)
+        val_tasks = []
+        logger.info(f"RANK_{os.environ.get('RANK')} start validate, batch_size:{len(val_samples)}")
+        with Timer("val_generate") as val_generate_time:
+            for sample in val_samples:
+                task = asyncio.create_task(self.generate(sample, is_validate = True))
+                val_tasks.append(task)
+            result = await asyncio.gather(*val_tasks)
+        metrics = {"val_get_time":val_get_time.elapsed, "val_generate_time":val_generate_time.elapsed}
+        return result, metrics
+       
+    async def rollout_status(self, rank, interval: float = 10.0):
+        last_status = 0
         while True:
             await asyncio.sleep(interval)
             current_status = len(self.tasks)

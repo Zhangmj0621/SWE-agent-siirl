@@ -542,9 +542,13 @@ class Trainer:
                             total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
                             if step_interval > 0 and total_tokens > 0:
                                 aggregated_metrics["perf/throughput"] = total_tokens / (step_interval * self.world_size)
-
                         self.tracker.log(aggregated_metrics, step=self.global_step)
 
+                        # get rollout validate metrics
+                        val_metrics = ray.get(self.rollout_manager.get_metrics.remote())
+                        for metrics, global_step in val_metrics:
+                            self.tracker.log(metrics, global_step)
+                    
                     except Exception as e:
                         logger.warning(f"[Trainer rank={self.rank}] Metric aggregation failed: {e}")
                 if self.rank == 0:
