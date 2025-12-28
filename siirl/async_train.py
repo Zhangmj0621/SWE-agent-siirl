@@ -90,7 +90,6 @@ class MainRunner:
         total_training_steps, batches_per_epoch = ray.get(data_coordinator.epoch_info.remote())
         config.actor_ref.actor.optim.total_training_steps = total_training_steps
         config.critic.optim.total_training_steps = total_training_steps
-        config.trainer.total_training_steps = total_training_steps  # For progress bar
         logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
 
         # === 3. Initialize MetricWorker ===

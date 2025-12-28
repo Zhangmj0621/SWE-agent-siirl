@@ -70,7 +70,10 @@ def compute_policy_loss_vanilla(
     config: Optional[object] = None,
     rollout_is_weights: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute vanilla PPO clipped policy loss"""
+    """Compute vanilla PPO clipped policy loss (Dual-clip PPO).
+    
+    Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
+    """
     assert config is not None
 
     clip_ratio = config.clip_ratio
@@ -82,29 +85,48 @@ def compute_policy_loss_vanilla(
     cliprange_low = clip_ratio_low
     cliprange_high = clip_ratio_high
 
+    assert clip_ratio_c > 1.0, (
+        "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0,"
+        + f" but get the value: {clip_ratio_c}."
+    )
+
     negative_approx_kl = log_prob - old_log_prob
+    # Clamp negative_approx_kl for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
 
     # PPO KL divergence
     ppo_kl = masked_mean(-negative_approx_kl, response_mask)
 
-    # Clipped policy gradient loss
-    pg_losses = -advantages * ratio
-    pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
-    pg_loss_max = torch.max(pg_losses, pg_losses2)
+    # Clipped policy gradient loss (Dual-clip PPO)
+    pg_losses1 = -advantages * ratio
+    if cliprange_low is None:
+        cliprange_low = cliprange
+    if cliprange_high is None:
+        cliprange_high = cliprange
+    pg_losses2 = -advantages * torch.clamp(
+        ratio, 1 - cliprange_low, 1 + cliprange_high
+    )  # - clip(ratio, 1-cliprange, 1+cliprange) * A
+    clip_pg_losses1 = torch.maximum(
+        pg_losses1, pg_losses2
+    )  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
+    pg_clipfrac = masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+
+    # Dual-clip: additional lower bound for negative advantages
+    pg_losses3 = -advantages * clip_ratio_c
+    clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+    pg_clipfrac_lower = masked_mean(
+        torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask
+    )
+
+    # Select based on advantage sign
+    pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
 
     # Apply rollout importance weights if provided
     if rollout_is_weights is not None:
-        pg_loss_max = pg_loss_max * rollout_is_weights
+        pg_losses = pg_losses * rollout_is_weights
 
-    pg_loss = agg_loss(loss_mat=pg_loss_max, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-    # Clip fraction
-    pg_clipfrac = masked_mean((pg_losses2 > pg_losses).to(torch.float32), response_mask)
-
-    # Lower clip fraction
-    pg_losses_low = -advantages * torch.clamp(ratio, 1.0 - cliprange_low * clip_ratio_c, 1.0 + cliprange_high * clip_ratio_c)
-    pg_clipfrac_lower = masked_mean((pg_losses_low > pg_losses).to(torch.float32), response_mask)
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
