@@ -117,13 +117,17 @@ class Trainer:
             self.critic_worker.init_model()
             logger.info(f"[Trainer.init_models] rank={self.rank} CriticWorker initialized")
 
-        self.dp_rank = mpu.get_data_parallel_rank()
-        self.dp_world_size = mpu.get_data_parallel_world_size()
+        # Use with_context_parallel=True for dp_rank/dp_world_size:
+        # - Ensures CP group ranks have the same dp_rank (they process the same batch's different sequence parts)
+        # - Matches the DP group used in _sync_batch_availability
+        self.dp_rank = mpu.get_data_parallel_rank(with_context_parallel=True)
+        self.dp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
         self.tp_rank = mpu.get_tensor_model_parallel_rank()
         self.pp_rank = mpu.get_pipeline_model_parallel_rank()
+        self.cp_rank = mpu.get_context_parallel_rank()
 
-        # Only TP rank 0 and PP rank 0 should submit metrics to avoid duplicates
-        self.should_submit_metrics = (self.tp_rank == 0 and self.pp_rank == 0)
+        # Only TP rank 0, PP rank 0, and CP rank 0 should submit metrics to avoid duplicates
+        self.should_submit_metrics = (self.tp_rank == 0 and self.pp_rank == 0 and self.cp_rank == 0)
 
 
         self.checkpoint_manager = CheckpointManager(
@@ -143,7 +147,7 @@ class Trainer:
         if self.rank == 0:
             self._init_tracker()
         
-        logger.success(f"[Trainer.init_models] rank={self.rank} completed: dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}, tp_rank={self.tp_rank}, pp_rank={self.pp_rank}")
+        logger.success(f"[Trainer.init_models] rank={self.rank} completed: dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}, tp_rank={self.tp_rank}, pp_rank={self.pp_rank}, cp_rank={self.cp_rank}")
     
     def _init_tracker(self):
         """
