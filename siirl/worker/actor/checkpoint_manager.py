@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import glob
 import os
+import shutil
+
 import torch
 import torch.distributed as dist
-from typing import Optional
 from loguru import logger
+from typing import Optional
 
 from siirl.params import SiiRLArguments
 from siirl.utils.checkpoint.checkpoint_utils import find_latest_ckpt_path
@@ -48,7 +51,16 @@ class CheckpointManager:
         self.dp_world_size = dp_world_size
 
     def save_checkpoint(self, global_steps: int) -> None:
-        """Save checkpoint atomically across all ranks."""
+        """
+        Save checkpoint atomically across all ranks.
+        
+        This method saves model states (actor/critic), dataloader state,
+        and commits the checkpoint by writing a tracker file. After committing,
+        it cleans up old global_step_* directories based on max_ckpt_to_keep.
+        
+        Args:
+            global_steps: Current global training step number.
+        """
         step_dir = os.path.join(self.config.trainer.default_local_dir, f"global_step_{global_steps}")
         os.makedirs(step_dir, exist_ok=True)
         dist.barrier()
@@ -62,6 +74,8 @@ class CheckpointManager:
 
         if self.rank == 0:
             self._commit_checkpoint(global_steps)
+            # Clean up old global_step_* directories after successful commit
+            self._cleanup_old_global_steps()
 
         dist.barrier()
         logger.info(f"Rank {self.rank}: Checkpoint saved for step {global_steps}")
@@ -113,6 +127,56 @@ class CheckpointManager:
         with open(tracker_file, "w") as f:
             f.write(str(global_steps))
         logger.info(f"Rank 0: Checkpoint {global_steps} committed")
+
+    def _cleanup_old_global_steps(self) -> None:
+        """
+        Remove old global_step_* directories based on max_ckpt_to_keep config.
+        
+        This method is called after checkpoint commit on rank 0 only.
+        It uses the minimum of max_actor_ckpt_to_keep and max_critic_ckpt_to_keep
+        to determine how many global_step_* directories to retain.
+        
+        The cleanup happens at the global_step_* level, meaning entire checkpoint
+        directories (including actor/, critic/, and dataloader_state.pt) are removed.
+        """
+        checkpoint_dir = self.config.trainer.default_local_dir
+        
+        # Use the minimum of actor and critic limits for global directory cleanup
+        max_actor_keep = self.config.trainer.max_actor_ckpt_to_keep
+        max_critic_keep = self.config.trainer.max_critic_ckpt_to_keep
+        
+        # If critic doesn't exist, just use actor limit
+        if self.critic_worker is None:
+            max_keep = max_actor_keep
+        else:
+            max_keep = min(max_actor_keep, max_critic_keep)
+        
+        # Skip cleanup if max_keep is not set or <= 0
+        if max_keep <= 0:
+            return
+        
+        # Find all global_step_* directories
+        global_step_pattern = os.path.join(checkpoint_dir, "global_step_*")
+        global_step_dirs = glob.glob(global_step_pattern)
+        
+        if not global_step_dirs:
+            return
+        
+        # Sort by step number (ascending)
+        global_step_dirs = sorted(
+            global_step_dirs,
+            key=lambda x: int(os.path.basename(x).split("global_step_")[-1])
+        )
+        
+        # Remove oldest directories if exceeding the limit
+        if len(global_step_dirs) > max_keep:
+            dirs_to_remove = global_step_dirs[:-max_keep]
+            for old_dir in dirs_to_remove:
+                try:
+                    shutil.rmtree(old_dir, ignore_errors=True)
+                    logger.info(f"Rank 0: Removed old checkpoint directory: {old_dir}")
+                except Exception as e:
+                    logger.warning(f"Rank 0: Failed to remove checkpoint {old_dir}: {e}")
 
     def load_checkpoint(self) -> int:
         """Load checkpoint and return global step to resume from."""

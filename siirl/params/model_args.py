@@ -203,12 +203,55 @@ class AlgorithmArguments:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+
+@dataclass
+class CheckpointArguments:
+    """Configuration for checkpoint save/load contents.
+    
+    Supported content types:
+        - "model": Model weights (Megatron distributed format)
+        - "optimizer": Optimizer states
+        - "extra": Extra states (RNG states, lr_scheduler, etc.)
+        - "hf_model": HuggingFace format model (converted from Megatron)
+    
+    Example:
+        To enable HF model saving, add "hf_model" to save_contents:
+        ```yaml
+        checkpoint:
+            save_contents: ["model", "optimizer", "extra", "hf_model"]
+        ```
+    """
+    contents: List[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],
+        metadata={"help": "Default contents to save and load in the checkpoint."}
+    )
+    save_contents: List[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],
+        metadata={"help": "Contents to save: model, optimizer, extra, hf_model"}
+    )
+    load_contents: List[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],
+        metadata={"help": "Contents to load: model, optimizer, extra"}
+    )
+    async_save: bool = field(
+        default=False, 
+        metadata={"help": "Enable async checkpoint save (experimental)"}
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
 @dataclass
 class ActorRefArguments:
     model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Base model settings"})
     actor: ActorArguments = field(default_factory=ActorArguments, metadata={"help": "Actor configuration"})
     ref: RefArguments = field(default_factory=RefArguments, metadata={"help": "Reference model settings"})
     algorithm: AlgorithmArguments = field(default_factory=AlgorithmArguments, metadata={"help": "Algorithm settings"})
+    checkpoint: CheckpointArguments = field(
+        default_factory=CheckpointArguments,
+        metadata={"help": "Checkpoint save/load configuration"}
+    )
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -231,6 +274,10 @@ class CriticArguments:
     load_weight: bool = field(default=True)
     rollout_n: int = field(default=1, metadata={"help": "rollout n"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
+    checkpoint: CheckpointArguments = field(
+        default_factory=CheckpointArguments,
+        metadata={"help": "Checkpoint save/load configuration"}
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
