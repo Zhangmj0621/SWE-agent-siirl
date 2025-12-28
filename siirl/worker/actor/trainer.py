@@ -225,46 +225,56 @@ class Trainer:
 
     def _sync_batch_availability(self, batch_ref) -> bool:
         """
-        Synchronize batch data availability across all DP ranks.
+        Synchronize batch data availability across ALL ranks.
         
-        In async training, different DP ranks may fetch data at different times,
-        leading to race conditions where some ranks have data while others don't.
-        This method ensures all DP ranks agree on whether to proceed with training.
+        Two-phase synchronization:
+        1. DP group sync: ensure all ranks within same DP group agree on data availability
+        2. Global sync: ensure all DP groups agree
         
         Args:
             batch_ref: The batch reference fetched from DataCoordinator (can be empty list)
             
         Returns:
-            True if ALL DP ranks have data, False otherwise.
+            True if ALL ranks (across all DP groups) have data, False otherwise.
             
         Side effect:
             If sync fails but this rank has data, caches it in self._local_batch_cache
             for use in the next get_batch call.
         """
+        # Phase 1: DP group synchronization
         # Use all_reduce with MIN on DP group: if any DP rank has 0 (no data), result is 0
         # We use DP group because different DP ranks fetch different data partitions
-        # Same DP rank across TP/PP will have the same data status
         has_data = torch.tensor([1 if batch_ref else 0], dtype=torch.int32, device="cuda")
         dp_group = mpu.get_data_parallel_group(with_context_parallel=True)
         dist.all_reduce(has_data, op=dist.ReduceOp.MIN, group=dp_group)
+        dp_has_data = has_data.item() == 1
 
-        all_have_data = has_data.item() == 1
+        # Phase 2: Global synchronization
+        # Ensures all ranks across ALL DP groups agree on whether to proceed.
+        global_has_data = torch.tensor([1 if dp_has_data else 0], dtype=torch.int32, device="cuda")
+        dist.all_reduce(global_has_data, op=dist.ReduceOp.MIN)  # Uses default (global) process group
+        all_have_data = global_has_data.item() == 1
 
         if not all_have_data and batch_ref:
-            # Sync failed, but this rank has data - cache it for next round
+            # Global sync failed, but this rank has data - cache it for next round
             self._local_batch_cache = batch_ref
-            logger.debug(f"[Trainer rank={self.rank}] Caching batch data locally due to sync failure")
+            logger.debug(f"[Trainer rank={self.rank}] Caching batch data locally due to global sync failure")
 
         return all_have_data
 
     def get_batch(self, batch_size: int):
         """
-        Get a batch of data for training with proper synchronization across DP ranks.
+        Get a batch of data for training with proper synchronization across ALL ranks.
         
         This method handles the race condition where different DP ranks may receive
         data at different times due to async data production. It uses:
         1. Local cache to store data that was fetched but couldn't be used (due to sync failure)
-        2. all_reduce(MIN) to ensure all ranks agree on whether data is available
+        2. Two-phase sync via _sync_batch_availability:
+           - Phase 1: DP group all_reduce(MIN) for data partition consistency
+           - Phase 2: Global all_reduce(MIN) to ensure all DP groups agree
+        
+        The two-phase sync guarantees that either ALL ranks return data and execute
+        the subsequent barrier, or ALL ranks return None and skip the barrier.
         
         Args:
             batch_size: Total batch size (will be divided by dp_world_size)
