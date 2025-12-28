@@ -1,0 +1,136 @@
+# Support swebench dataset
+# must have run build_env_images on dataset before run.
+
+from io import BytesIO
+from pydantic import BaseModel, Field
+from typing import cast, Optional
+from dataclasses import dataclass
+import tempfile
+
+from .base import SWESampleData, Runtime, RuntimeBuilder
+from ..environment import ContainerStartArgs, ContainerEnv
+from ..base import SWESample
+
+from swebench.harness.test_spec.test_spec import make_test_spec, TestSpec
+from swebench.harness.constants import SWEbenchInstance, LATEST
+from swebench.harness.grading import get_eval_report
+
+
+class SWEBenchConfig(BaseModel):
+    namespace: Optional[str] = Field(default=None)
+    base_image_tag: str = LATEST
+    env_image_tag: str = LATEST
+    instance_image_tag: str = LATEST
+    arch: str = "x86_64"
+
+
+@dataclass(frozen=True)
+class SBSample:
+    instance: SWEbenchInstance
+    spec: TestSpec
+
+
+class SWEBenchRuntime(Runtime):
+    """See swebench.harness.run_evaluation:run_instance"""
+
+    def __init__(self, sample: SWESample):
+        self.sample = sample
+        self.m = sample.m
+
+    async def bootstrap(self, env: ContainerEnv):
+        await self._bootstrap_container(env)
+
+    async def diff(self, env: ContainerEnv):
+        output = await env.execute("git add -A && git diff --cached")
+        self.m.rollout.patch = output.output
+
+    async def eval(self, env: ContainerEnv):
+        await self._bootstrap_container(env)
+        # apply patch
+        if self.m.rollout.patch is None:
+            raise RuntimeError("must run diff before patch")
+        await env.execute(f"git checkout {self.instance["base_commit"]}")
+        stdin = BytesIO(self.m.rollout.patch)
+        await env.execute("git apply --verbose --reject -", stdin=stdin)
+
+        # run eval script
+        stdin = BytesIO(self.spec.eval_script.encode("utf-8"))
+        await env.execute("cat > /eval.sh", stdin=stdin)
+        output = await env.execute("bash /eval.sh", check=False)
+
+        with tempfile.NamedTemporaryFile() as f:
+            prediction = {
+                "instance_id": self.spec.instance_id,
+                "model_patch": "",  # placeholder
+            }
+            f.write(output.output)
+            report = get_eval_report(self.spec, prediction, f.name, True)
+            report = report[self.spec.instance_id]
+            """
+            example schema:
+            {
+                "patch_is_None": False,
+                "patch_exists": True,
+                "patch_successfully_applied": True,
+                "resolved": True,
+                "tests_status": {
+                    "FAIL_TO_PASS": {
+                        "success": ["test_case_1", "test_case_3"],
+                        "failure": ["test_case_2"],
+                    },
+                    "PASS_TO_PASS": {"success": ["test_case_4", "test_case_5"], "failure": []},
+                    "FAIL_TO_FAIL": {"success": [], "failure": []}, # or None
+                    "PASS_TO_FAIL": {"success": [], "failure": []}, # or None
+                },
+            }
+            """
+        # naive reward
+        if report["resolved"]:
+            self.sample.reward = 1.0
+        else:
+            self.sample.reward = 0.0
+
+    @property
+    def spec(self) -> TestSpec:
+        return self.m.data.runtime_meta.spec
+
+    @property
+    def instance(self) -> SWEbenchInstance:
+        return self.m.data.runtime_meta.instance
+
+    async def _bootstrap_container(self, env: ContainerEnv):
+        # rewrite of swebench.harness.docker_build:build_instance_image
+        # may optimize if env provide image build interface
+        stdin = BytesIO(self.spec.setup_env_script.encode("utf-8"))
+        await env.execute("cat - | bash", stdin=stdin)
+        stdin = BytesIO(self.spec.install_repo_script.encode("utf-8"))
+        await env.execute("cat - | bash", stdin=stdin)
+
+        # apply test patch
+        await env.execute(f"git checkout {self.instance["base_commit"]}")
+        stdin = BytesIO(self.instance["test_patch"].encode("utf-8"))
+        await env.execute("git apply --verbose --reject -", stdin=stdin)
+
+
+class SWEBenchBuiler(RuntimeBuilder):
+    def __init__(self, config: dict):
+        conf = SWEBenchConfig.model_validate(config)
+        self.config = conf.model_dump()
+
+    def parse_sampledata(self, sample: dict) -> SWESampleData:
+        s = cast(SWEbenchInstance, sample)
+        spec = make_test_spec(s, **self.config)
+
+        container = ContainerStartArgs(
+            image=spec.base_image_key,
+            cwd="/testbed",
+        )
+
+        return SWESampleData(
+            container_args=container,
+            problem_statement=s["problem_statement"],
+            runtime_meta=SBSample(s, spec),
+        )
+
+    def build(self, sample: SWESample) -> Runtime:
+        return SWEBenchRuntime(sample)

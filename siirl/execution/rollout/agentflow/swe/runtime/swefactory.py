@@ -20,18 +20,14 @@ class SFSample(BaseModel):
     hints_test: str = Field(default="")
     eval_script: str = Field(default="")
 
-
-class SWEFactoryConfig(BaseModel):
-    pass
-
-
 class SWEFactoryRuntime(Runtime):
     def __init__(self, sample: SWESample):
         self.sample = sample
         self.m = sample.m
 
     async def bootstrap(self, env: ContainerEnv):
-        stdin = BytesIO(self.m.data.test_patch)
+        await env.execute(f"git checkout {self.sfsample.base_commit}")
+        stdin = BytesIO(self.sfsample.test_patch.encode("utf-8"))
         await env.execute("git apply --verbose --reject -", stdin=stdin)
 
     async def diff(self, env: ContainerEnv):
@@ -42,11 +38,12 @@ class SWEFactoryRuntime(Runtime):
         # apply patch
         if self.m.rollout.patch is None:
             raise RuntimeError("must run diff before patch")
+        await env.execute(f"git checkout {self.sfsample.base_commit}")
         stdin = BytesIO(self.m.rollout.patch)
         await env.execute("git apply --verbose --reject -", stdin=stdin)
 
         # run eval script
-        stdin = BytesIO(self.m.data.eval_script)
+        stdin = BytesIO(self.sfsample.eval_script.encode("utf-8"))
         await env.execute("cat > /eval.sh", stdin=stdin)
         output = await env.execute("bash /eval.sh", check=False)
         # naive reward
@@ -54,6 +51,10 @@ class SWEFactoryRuntime(Runtime):
             self.sample.reward = 1.0
         else:
             self.sample.reward = 0.0
+    
+    @property
+    def sfsample(self)->SFSample:
+        return self.m.data.runtime_meta
 
 
 class SWEFactoryBuiler(RuntimeBuilder):
@@ -66,12 +67,7 @@ class SWEFactoryBuiler(RuntimeBuilder):
         return SWESampleData(
             container_args=container,
             problem_statement=s.problem_statement,
-            repo=s.repo,
-            base_commit=s.base_commit,
-            patch=s.patch.encode("utf-8"),
-            test_patch=s.test_patch.encode("utf-8"),
-            eval_script=s.eval_script.encode("utf-8"),
-            original=sample,
+            runtime_meta=s,
         )
 
     def build(self, sample: SWESample) -> Runtime:

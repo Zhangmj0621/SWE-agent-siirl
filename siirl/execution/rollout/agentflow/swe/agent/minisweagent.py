@@ -92,7 +92,7 @@ class MiniSWEAgent(Agent):
             self.messages
         )
         # TODO: apply(a+b) != apply(a)+apply(b) ? (tokenin tokenout 问题)
-        assert input_tokens == self.sample.tokens
+        # assert input_tokens == self.sample.tokens
         response = await self.model.query(input_tokens, self.messages)
         self.n_calls += 1
         self.sample.add_message("assistant", response)
@@ -106,8 +106,7 @@ class MiniSWEAgent(Agent):
         output = await self.execute_action(action, env)
         observation = self.render_template(
             self.config.action_observation_template,
-            output=output.output,
-            returncode=output.returncode,
+            output=output,
         )
         self.sample.add_message("user", observation)
         return output
@@ -122,14 +121,14 @@ class MiniSWEAgent(Agent):
         """Parse the action from the message. Returns the action cmd."""
         actions = re.findall(self.config.action_regex, response.output, re.DOTALL)
         if len(actions) == 1:
-            actions[0].strip()
+            return actions[0].strip()
         raise FormatError(
             self.render_template(self.config.format_error_template, actions=actions)
         )
 
     async def execute_action(self, cmd: str, env: ContainerEnv) -> ContainerOutput:
         try:
-            output = await env.execute(cmd)
+            output = await env.execute(cmd, check=False)
         except (TimeoutError, subprocess.TimeoutExpired) as e:
             output = (
                 e.output.decode("utf-8", errors="replace")
