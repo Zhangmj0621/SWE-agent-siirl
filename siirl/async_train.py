@@ -136,7 +136,6 @@ class MainRunner:
             # === 5. Async Training Loop ===
             logger.info("Starting async training loop...")
             rollout_manager.run_dataloader.remote()
-            ray.get(rollout_manager.next_rollout.remote())
             trainer_group.train()
 
             # === 6. Wait for completion or failure ===

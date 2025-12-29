@@ -112,7 +112,8 @@ class RolloutManager:
         self.start_epoch = 0
         self.batches_to_skip = 0
         self.event = asyncio.Event()
-        self.global_steps = 0 # need update from pre saved_checkpoint
+        self.global_steps = 0 # will be reset by actor checkpoint, but maybe not correct in fully async mode
+        
         # Initialize workers, engines, router and start rollout
         self.init_worker()
         self.init_engine()
@@ -318,6 +319,9 @@ class RolloutManager:
         logger.info(f"Initialized {self.num_workers} SGLang processes "
                     f"({self.num_tp_groups} TP groups, {len(self.worker_urls)} router endpoints)")
 
+    def set_step(self, step:int):
+        self.global_steps = step
+    
     def get_rollout_worker_on_tp0(self):
         """
         Get RolloutWorker handles for TP0 actors only.
@@ -396,11 +400,11 @@ class RolloutManager:
   
     
     async def run_dataloader(self):
+        from loguru import logger
         total_epochs = self.config.trainer.total_epochs
         val_num_batch, val_batch_size = ray.get(self.data_coordinator.val_info.remote())
         dp_val_batch = (val_batch_size + self.dp_size - 1) // self.dp_size
-        if self.config.trainer.val_before_train:
-            await self.validate(val_num_batch, dp_val_batch)
+        val_before_train = self.config.trainer.val_before_train
         for epoch in range(self.start_epoch, total_epochs):
             for batch_idx in range(self.num_train_batches):
                 is_last_step = self.global_steps >= self.total_training_steps
@@ -408,9 +412,13 @@ class RolloutManager:
                     continue
                 await self.event.wait()
                 self.event.clear()
+                if val_before_train:
+                    await self.validate(val_num_batch, dp_val_batch)
+                    val_before_train = False
                 self.global_steps += 1
                 if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
-                    await self.validate(val_num_batch, dp_val_batch)   
+                    await self.validate(val_num_batch, dp_val_batch)  
+                logger.info(f"Start Rollout Step {self.global_steps}") 
                 await self.data_coordinator.run_dataloader.remote(epoch)
                 
 
@@ -430,6 +438,7 @@ class RolloutManager:
         futures = [rollout_worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for rollout_worker in rollout_workers]
         await asyncio.gather(*futures)
         val_metrics = await self.metric_worker.wait_final_res.remote() 
+        logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
         self.message_queue.append((val_metrics, self.global_steps))
         return 
     

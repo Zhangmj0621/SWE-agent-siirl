@@ -116,7 +116,7 @@ class ParamSyncDistributed(ParamSyncInterface):
     def _check_weight_version(self):
         version_list = ray.get([worker.weight_version.remote() for worker in self.rollout_workers])
         for idx,v in enumerate(version_list):
-            if v != str(self.weight_version):
+            if v != self.weight_version:
                 raise ValueError(f"Weight version mismatch!, {idx}th rollout weight version: {v}, trainer weight version: {self.weight_version}")
         return True
 

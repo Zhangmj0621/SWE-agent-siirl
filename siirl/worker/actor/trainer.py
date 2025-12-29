@@ -200,6 +200,7 @@ class Trainer:
             return 0
 
         global_step = self.checkpoint_manager.load_checkpoint()
+        ray.get(self.rollout_manager.set_step.remote(global_step))
         self.global_step = global_step
         logger.info(f"[Trainer rank={self.rank}] Loaded checkpoint, resuming from step {global_step}")
         return global_step
@@ -494,20 +495,22 @@ class Trainer:
                 if self._check_should_stop():
                     logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
                     break
-
-                # Record get_batch timing
-                with Timer("get_batch") as get_batch_timer:
-                    batch_data = self.get_batch(batch_size)
-
-                if batch_data is None:
-                    time.sleep(0.1)
-                    continue
-
-                self.train_step(batch_data)
-
+                
                 # Update rollout weights and record timing
                 with Timer("weight_sync") as weight_sync_timer:
                     self.update_rollout_weight()
+                
+                # run dataloader for train
+                if self.rank == 0:
+                    ray.get(self.rollout_manager.next_rollout.remote())
+                
+                # Record get_batch timing
+                with Timer("get_batch") as get_batch_timer:
+                    while (batch_data := self.get_batch(batch_size)) is None:
+                        time.sleep(0.1)
+                
+                # compare 
+                self.train_step(batch_data)
 
                 # Calculate step_interval (time between consecutive step completions)
                 current_step_end_time = time.time()
@@ -551,8 +554,6 @@ class Trainer:
                     
                     except Exception as e:
                         logger.warning(f"[Trainer rank={self.rank}] Metric aggregation failed: {e}")
-                if self.rank == 0:
-                    ray.get(self.rollout_manager.next_rollout.remote())
 
                 self.global_step += 1
 
