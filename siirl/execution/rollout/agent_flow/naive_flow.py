@@ -56,7 +56,7 @@ class NaiveFlow():
                 self.env.tool_parser = ToolParser.get_tool_parser(tool_format, self.engine.tokenizer)
                 self.env.tool_parser_name = tool_format
             
-    async def __call__(self, sample: Sample, sampling_params: Dict, engine:SglangEngine, reward_fn = None):
+    async def __call__(self, sample: Sample, reward_fn = None, is_validate = False):
         """
         Naive rollout flow implementation for single-turn text generation and reward calculation.
         Generates response from prompt using inference engine, creates response mask, and computes reward score.
@@ -79,13 +79,13 @@ class NaiveFlow():
         agent_data = AgentData(raw_prompt = sample.raw_prompt.tolist())
         while agent_data.state != AgentState.TERMINATED:
             if agent_data.state == AgentState.PENDING:
-                agent_data.state = await self._handle_pending_state(agent_data, engine, loop)
+                agent_data.state = await self._handle_pending_state(agent_data, loop)
             elif agent_data.state == AgentState.GENERATING:
                 gen_start = time.time()
-                agent_data.state = await self._handle_generating_state(agent_data, sampling_params, engine)
+                agent_data.state = await self._handle_generating_state(agent_data, is_validate)
                 generation_duration += time.time() - gen_start
             elif agent_data.state == AgentState.PROCESSING_ENV:
-                agent_data.state = await self._handle_processing_envs_state(agent_data, engine, loop)
+                agent_data.state = await self._handle_processing_envs_state(agent_data, loop)
             else:
                 logger.error(f"Invalid state: {state}")
                 state = AgentState.TERMINATED
@@ -113,14 +113,14 @@ class NaiveFlow():
                 # Use custom reward function with decoded response text
                 rewards = reward_fn(
                     data_source = data_source, 
-                    solution_str = engine.tokenizer.decode(sample.responses), 
+                    solution_str = self.engine.tokenizer.decode(sample.responses), 
                     ground_truth = ground_truth
                 )
             else:
                 # Use default reward scoring function
                 rewards = default_compute_score(
                     data_source = data_source, 
-                    solution_str = engine.tokenizer.decode(sample.responses), 
+                    solution_str = self.engine.tokenizer.decode(sample.responses), 
                     ground_truth = ground_truth
                 )
             # Assign computed reward to sample
@@ -134,7 +134,7 @@ class NaiveFlow():
         
         return sample
 
-    async def _handle_processing_envs_state(self, agent_data:AgentData, engine, loop):
+    async def _handle_processing_envs_state(self, agent_data:AgentData, loop):
         tasks = []
         env_call_name = []
         env_messages = []
@@ -165,12 +165,12 @@ class NaiveFlow():
             
             tool_response_text = add_generation_prompt_for_gpt_oss("".join(tool_response_texts))
             response_ids = await loop.run_in_executor(
-                None, lambda: engine.tokenizer.encode(tool_response_text, add_special_tokens=False)
+                None, lambda: self.engine.tokenizer.encode(tool_response_text, add_special_tokens=False)
             )
         else:
             response_ids = await loop.run_in_executor(
                 None,
-                lambda:  engine.tokenizer.apply_chat_template(env_messages, add_generation_prompt=True, tokenize=True),
+                lambda:  self.engine.tokenizer.apply_chat_template(env_messages, add_generation_prompt=True, tokenize=True),
             )
             response_ids = response_ids[len(self.system_prompt) :]
         if len(agent_data.response_mask) + len(response_ids) >= self.max_response_length:
@@ -228,8 +228,8 @@ class NaiveFlow():
 
     
     
-    async def _handle_generating_state(self, agent_data:AgentData, sampling_params: Dict, engine:SglangEngine):
-        _, response_ids, rollout_log_prob = await engine.generate(agent_data.prompts_ids, sampling_params)
+    async def _handle_generating_state(self, agent_data:AgentData, is_validate = False):
+        _, response_ids, rollout_log_prob = await self.engine.generate(agent_data.prompts_ids, is_validate)
         agent_data.response_ids = response_ids
         agent_data.rollout_log_prob += rollout_log_prob
         agent_data.prompts_ids += response_ids
@@ -257,10 +257,10 @@ class NaiveFlow():
         
         
 
-    async def _handle_pending_state(self, agent_data:AgentData, engine: SglangEngine, loop):
+    async def _handle_pending_state(self, agent_data:AgentData, loop):
         prompts = await loop.run_in_executor(
                 None,
-                lambda: engine.tokenizer.apply_chat_template(
+                lambda: self.engine.tokenizer.apply_chat_template(
                     agent_data.messages,
                     tools=self.env.tool_schemas if self.env else None,
                     add_generation_prompt=True,

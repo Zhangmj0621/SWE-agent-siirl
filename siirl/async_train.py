@@ -107,7 +107,7 @@ class MainRunner:
         try:
             logger.info(f"Initializing components: {actor_resources.num_gpus} training GPUs, {rollout_resources.num_gpus} rollout GPUs...")
             
-            rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator, coordinator)
+            rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator, coordinator, metric_worker)
             trainer_group = TrainerGroup(
                 config, 
                 actor_resources, 

@@ -53,6 +53,7 @@ class DataCoordinator:
         
         # # dataloader
         self.dataloader_queue:deque[Sample] = deque()
+        self.dataloader_val_queue:deque[Sample] = deque()
         self.dataloader = None
         self.dataloader_lock = asyncio.Lock()  
         
@@ -419,23 +420,35 @@ class DataCoordinator:
     @ray.method(concurrency_group="dataloader")
     def epoch_info(self):
         return self.dataloader.total_training_steps, self.dataloader.num_train_batches
+
+    @ray.method(concurrency_group="dataloader")
+    def val_info(self):
+        return self.dataloader.num_val_batches, self.dataloader.val_batch_size
     
     @ray.method(concurrency_group="dataloader")
-    async def run_dataloader(self, epoch):
-        batch = self.dataloader.run(epoch)
+    async def run_dataloader(self, epoch = 0, is_validate=False):
+        batch = self.dataloader.run(epoch, is_validation_step=is_validate)
         tensor_dict = preprocess_dataloader(batch)
         samples = await Dict2Samples(tensor_dict, True)
-        async with self.dataloader_lock:
-            self.dataloader_queue.extend(samples)
+        if is_validate:
+            async with self.dataloader_lock:
+                self.dataloader_val_queue.extend(samples)
+        else:
+            async with self.dataloader_lock:
+                self.dataloader_queue.extend(samples)
+                
         
     @ray.method(concurrency_group="dataloader")
-    async def get_dataloader(self, batch_size):
+    async def get_dataloader(self, batch_size, is_validate=False):
+        data_queue = self.dataloader_queue
+        if is_validate:
+            data_queue = self.dataloader_val_queue
         async with self.dataloader_lock:
-            if len(self.dataloader_queue) > batch_size:
-                return [self.dataloader_queue.popleft() for _ in range(batch_size)]
+            if len(data_queue) > batch_size:
+                return [data_queue.popleft() for _ in range(batch_size)]
             else:
-                all_popped = list(self.dataloader_queue)
-                self.dataloader_queue.clear()
+                all_popped = list(data_queue)
+                data_queue.clear()
                 return all_popped
 
     @ray.method(concurrency_group="dataloader")

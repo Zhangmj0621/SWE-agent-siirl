@@ -16,6 +16,7 @@ import ray
 import asyncio
 import time
 import multiprocessing
+import threading
 import requests
 from loguru import logger
 from typing import Optional, Dict, Any, Literal
@@ -24,6 +25,10 @@ import httpx
 import logging
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+_thread_local = threading.local()
+
+
+
 def wait_until_ok(
     url: str,
     *,
@@ -71,41 +76,34 @@ HTTPMethod = Literal["GET", "POST", "PUT", "DELETE"]  # Restrict supported HTTP 
 
     
 class GlobalAsyncHTTPClient:
-    """Global asynchronous HTTP client with singleton pattern and auto-initialization.
-    No manual parameter passing required for usage.
     """
-    _instance: Optional[httpx.AsyncClient] = None
-    _lock = asyncio.Lock()
-    _max_connections: int = 50
-    _connect_timeout: float = 10.0
+    A thread-safe, asynchronous HTTP client that creates an isolated client instance for each thread.
+    This prevents issues with event loop mismatches when used across multiple threads or Ray actors.
+    """
+    _connect_timeout: float = 10.0  # Connection timeout in seconds
 
-    # -------------------------- Singleton Initialization --------------------------
     @classmethod
     async def _get_client(cls) -> httpx.AsyncClient:
-        """Internal method to get client instance (auto-initialize and reuse).
-        
-        Returns:
-            Initialized httpx.AsyncClient instance
         """
-        async with cls._lock:
-            if cls._instance is None:
-                # Create async HTTP client
-                cls._instance = httpx.AsyncClient(
-                    limits=httpx.Limits(
-                        max_connections=None,  # Fix: Change None to reasonable value in production
-                    ),
-                    timeout=httpx.Timeout(
-                        connect=cls._connect_timeout,
-                        read=None,  # Disable read timeout for large model generation
-                        write=None,
-                        pool=None
-                    ),
-                    http2=False,
-                    follow_redirects=True,
-                )
-            return cls._instance
+        Retrieves or initializes the thread-local AsyncClient instance.
 
-    # -------------------------- Core Request Method --------------------------
+        Returns:
+            httpx.AsyncClient: The thread-local HTTP client instance.
+        """
+        if not hasattr(_thread_local, "client"):
+            _thread_local.client = httpx.AsyncClient(
+                limits=httpx.Limits(max_connections=None),  # Unlimited connections (adjust based on your needs)
+                timeout=httpx.Timeout(
+                    connect=cls._connect_timeout,
+                    read=None,  # Disable read timeout for long-running operations (e.g., model generation)
+                    write=None,
+                    pool=None
+                ),
+                http2=False,  # Disable HTTP/2 for wider compatibility
+                follow_redirects=True,  # Automatically follow HTTP redirects
+            )
+        return _thread_local.client
+
     @classmethod
     async def make_request(
         cls,
@@ -116,118 +114,81 @@ class GlobalAsyncHTTPClient:
         max_attempts: Optional[int] = None,
         retry_delay: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Make asynchronous HTTP request with exponential backoff retry mechanism.
-        
+        """
+        Makes an asynchronous HTTP request with an exponential backoff retry mechanism.
+
         Args:
-            url: Target URL for the request
-            payload: Optional JSON payload for the request
-            method: HTTP method (GET/POST/PUT/DELETE)
-            timeout: Request timeout in seconds (only affects connect timeout)
-            max_attempts: Maximum retry attempts (overrides default)
-            retry_delay: Initial retry delay in seconds (overrides default)
-        
+            url: The target URL for the request.
+            payload: Optional JSON payload to send with the request.
+            method: The HTTP method to use (GET, POST, PUT, DELETE).
+            timeout: The request timeout in seconds (only affects the connect timeout).
+            max_attempts: The maximum number of retry attempts (overrides default).
+            retry_delay: The initial delay between retries in seconds (overrides default).
+
         Returns:
-            JSON response parsed as dictionary if request succeeds
-        
+            Optional[Dict[str, Any]]: The JSON response parsed as a dictionary if the request succeeds.
+
         Raises:
-            httpx.HTTPStatusError: For HTTP 4xx/5xx errors
-            RuntimeError: When all retry attempts are exhausted
-            Exception: For other unexpected errors (only on final attempt)
+            httpx.HTTPStatusError: If the HTTP request returns a 4xx or 5xx status code.
+            RuntimeError: If all retry attempts are exhausted.
+            Exception: For other unexpected errors (only raised on the final attempt).
         """
         client = await cls._get_client()
 
-        # Parameter fallback (compatible with instance attributes/default values)
-        use_max_attempts = max_attempts or getattr(cls, "max_attempts", DEFAULT_MAX_ATTEMPTS)
-        use_retry_delay = retry_delay or getattr(cls, "retry_delay", DEFAULT_RETRY_DELAY)
-        # Note: Client has disabled read timeout, timeout here only overrides connect timeout
+        # Use provided parameters or fall back to defaults
+        use_max_attempts = max_attempts or DEFAULT_MAX_ATTEMPTS
+        use_retry_delay = retry_delay or DEFAULT_RETRY_DELAY
         use_timeout = httpx.Timeout(
             connect=timeout or cls._connect_timeout,
-            read=None,  # Force disable read timeout for large model generation
+            read=None,  # Maintain disabled read timeout for long-running operations
             write=None,
             pool=None
         )
 
-        # Core request + retry logic
+        # Execute request with retries
         for attempt in range(use_max_attempts):
             attempt_num = attempt + 1
             try:
-                # Send HTTP request
                 response = await client.request(
                     method=method,
                     url=url,
                     json=payload or {},
                     timeout=use_timeout
                 )
-                # Raise exception for HTTP 4xx/5xx status codes
-                response.raise_for_status()
-                logger.debug(f"Request to {url} succeeded (attempt {attempt_num}/{use_max_attempts}), status code: {response.status_code}")
+                response.raise_for_status()  # Raise exception for HTTP errors (4xx/5xx)
+                logger.debug(f"Request to {url} succeeded (attempt {attempt_num}/{use_max_attempts})")
                 return response.json()
 
-            # -------------------------- Hierarchical Exception Handling (httpx async client compatible) --------------------------
+            # Handle specific HTTP exceptions
             except httpx.HTTPStatusError as e:
-                # HTTP errors (4xx/5xx): no retry, detailed logging
-                error_note = f"Status code: {e.response.status_code}, Response text: {e.response.text if e.response else 'None'}"
-                logger.error(
-                    f"HTTP error for request to {url} (attempt {attempt_num}/{use_max_attempts}): {str(e)}\n{error_note}"
-                )
-                raise  # Raise exception without retry
+                logger.error(f"HTTP error for {url} (attempt {attempt_num}/{use_max_attempts}): {e}")
+                raise  # Do not retry on HTTP status errors
 
-            except httpx.ReadTimeout as e:
-                # Read timeout (most common for large model generation)
-                logger.warning(
-                    f"Read timeout for request to {url} (attempt {attempt_num}/{use_max_attempts}): "
-                    f"Connect timeout {use_timeout.connect}s, read timeout disabled, error details: {str(e)}"
-                )
+            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+                logger.warning(f"Request error for {url} (attempt {attempt_num}/{use_max_attempts}): {e}")
 
-            except httpx.ConnectTimeout as e:
-                # Connection timeout (network/server unreachable)
-                logger.warning(
-                    f"Connection timeout for request to {url} (attempt {attempt_num}/{use_max_attempts}): "
-                    f"Timeout {use_timeout.connect}s, target: {url}, error details: {str(e)}"
-                )
-
-            except httpx.ConnectError as e:
-                # Connection failure (port unreachable/network interruption)
-                logger.warning(
-                    f"Connection failed for request to {url} (attempt {attempt_num}/{use_max_attempts}): "
-                    f"Target: {url}, error details: {str(e)}"
-                )
-
-            except httpx.TimeoutException as e:
-                # Other timeout exceptions (fallback)
-                logger.warning(
-                    f"Timeout for request to {url} (attempt {attempt_num}/{use_max_attempts}): "
-                    f"Timeout type: {type(e).__name__}, details: {str(e)}"
-                )
-
+            # Handle unexpected exceptions
             except Exception as e:
-                # Unknown exceptions: raise on final attempt, retry otherwise
-                logger.error(
-                    f"Unknown error for request to {url} (attempt {attempt_num}/{use_max_attempts}): "
-                    f"Exception type: {type(e).__name__}, details: {str(e)}"
-                )
+                logger.error(f"Unknown error for {url} (attempt {attempt_num}/{use_max_attempts}): {e}")
                 if attempt == use_max_attempts - 1:
-                    raise  # Raise exception on final attempt
+                    raise  # Raise on the final attempt
 
-            # -------------------------- Exponential Backoff Retry (async sleep) --------------------------
+            # Exponential backoff for retries
             if attempt < use_max_attempts - 1:
                 sleep_time = use_retry_delay * (2 ** attempt)
-                logger.debug(
-                    f"Retrying request to {url}, waiting {sleep_time:.2f} seconds before attempt {attempt_num + 1}/{use_max_attempts}"
-                )
-                await asyncio.sleep(sleep_time)  # Async sleep to avoid blocking event loop
+                logger.debug(f"Retrying request to {url} in {sleep_time:.2f} seconds (attempt {attempt_num + 1}/{use_max_attempts})")
+                await asyncio.sleep(sleep_time)
 
-        # All retry attempts exhausted
-        raise RuntimeError(
-            f"Request to {url} failed: {use_max_attempts} retry attempts exhausted, method: {method}, connect timeout: {use_timeout.connect}s"
-        )
+        # All retry attempts failed
+        raise RuntimeError(f"Request to {url} failed after {use_max_attempts} attempts")
 
-    # -------------------------- Resource Release --------------------------
     @classmethod
     async def close(cls):
-        """Close the HTTP client (call on program exit)."""
-        async with cls._lock:
-            if cls._instance is not None:
-                await cls._instance.aclose()
-                cls._instance = None
-                logger.info("Global async HTTP client closed successfully")
+        """
+        Closes the thread-local AsyncClient instance.
+        This should be called when the thread is done using the client to free resources.
+        """
+        if hasattr(_thread_local, "client"):
+            await _thread_local.client.aclose()
+            delattr(_thread_local, "client")
+            logger.info("Thread-local async HTTP client closed successfully")
