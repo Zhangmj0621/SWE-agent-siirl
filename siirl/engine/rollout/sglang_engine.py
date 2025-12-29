@@ -243,6 +243,14 @@ class SglangEngine:
         response.raise_for_status()
         return response
 
+    def weight_version(self):
+        if self.node_rank != 0:
+            return
+        url = f"http://{self.ip}:{self.port}/get_weight_version"
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.json()["weight_version"]
+
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request to the specified endpoint with the given payload.
 
