@@ -221,3 +221,6 @@ class RolloutWorker:
 
     def continue_generation(self):
         return self.engine.continue_generation()
+    
+    def weight_version(self):
+        return self.engine.weight_version()

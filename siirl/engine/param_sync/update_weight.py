@@ -23,6 +23,8 @@ class ParamSyncInterface:
         self.config = config
         self.model = model
         self.bridge = bridge
+        if self.bridge is not None:
+            from . import mbridge_patch
         self.weight_version = 0
         self._model_update_groups = None
 
@@ -72,16 +74,10 @@ class ParamSyncDistributed(ParamSyncInterface):
             self.update_rollout_worker_connected(rollout_workers)
             logger.info(f"self._model_update_groups=={self._model_update_groups.size()}")
 
-    @torch.no_grad()
-    def update_weights(self) -> None:
+    def _update_weights_use_mbridge(self) -> None:
         """
         Pause → flush → all params → continue. Progress on PP source.
         """
-        self.weight_version += 1
-        if dist.get_rank() == 0:
-            ray.get([worker.pause_generation.remote() for worker in self.rollout_workers])
-            ray.get([worker.flush_cache.remote() for worker in self.rollout_workers])
-        dist.barrier(group=get_gloo_group())
 
         buffer_size = 0
         converted_named_tensors = []
@@ -95,10 +91,34 @@ class ParamSyncDistributed(ParamSyncInterface):
         if converted_named_tensors:
             self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
 
+    def _update_weights_naive(self) -> None:
+        raise NotImplementedError("_update_weights_naive is not implemented, please set use_mbridge=True")
+
+    @torch.no_grad()
+    def update_weights(self) -> None:
+        self.weight_version += 1
+        if dist.get_rank() == 0:
+            ray.get([worker.pause_generation.remote() for worker in self.rollout_workers])
+            ray.get([worker.flush_cache.remote() for worker in self.rollout_workers])
+        dist.barrier(group=get_gloo_group())
+
+        if self.bridge is not None:
+            self._update_weights_use_mbridge()
+        else:
+            self._update_weights_naive()
+
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
+            self._check_weight_version()
             ray.get([worker.continue_generation.remote() for worker in self.rollout_workers])
         dist.barrier(group=get_gloo_group())
+
+    def _check_weight_version(self):
+        version_list = ray.get([worker.weight_version.remote() for worker in self.rollout_workers])
+        for idx,v in enumerate(version_list):
+            if v != str(self.weight_version):
+                raise ValueError(f"Weight version mismatch!, {idx}th rollout weight version: {v}, trainer weight version: {self.weight_version}")
+        return True
 
     def _update_param_sync_bucket(
         self,
