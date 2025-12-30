@@ -19,6 +19,7 @@ import threading
 import importlib
 import asyncio
 import time
+from collections import Counter
 
 from loguru import logger
 from typing import List
@@ -170,7 +171,12 @@ class RolloutWorker:
             logger.info(f"Starting Validation @ Global Step {global_step}...")
             logger.info("=" * 60)
         samples, val_time_metrics = await self.executor.validate(val_batch_size)    
-        val_metrics = aggregate_and_log_validation_metrics(samples)
+        validate_samples = []
+        for sample in samples:
+            if sample.extra_info and isinstance(sample.extra_info, dict) and sample.extra_info.get("padded_duplicate", None):
+                continue
+            validate_samples.append(sample)
+        val_metrics = aggregate_and_log_validation_metrics(validate_samples)
         await self.metric_worker.submit_metric.remote(val_metrics, self.global_dp_size)
 
     def get_ip(self):

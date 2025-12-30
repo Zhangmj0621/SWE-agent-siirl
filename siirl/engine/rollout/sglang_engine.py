@@ -269,7 +269,7 @@ class SglangEngine:
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
-            e.add_note(f"{response.text=}")
+            logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
             raise
         return response.json()
 

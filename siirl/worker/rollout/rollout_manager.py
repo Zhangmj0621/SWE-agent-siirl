@@ -115,12 +115,14 @@ class RolloutManager:
         self.global_steps = 0 # will be reset by actor checkpoint, but maybe not correct in fully async mode
         
         # Initialize workers, engines, router and start rollout
+        self.message_queue = deque()
+    
+    def init(self):
         self.init_worker()
         self.init_engine()
         self.start_router()
         self.start_rollout()
-        self.message_queue = deque()
-        
+    
     def init_worker(self):
         """
         Initialize RolloutWorker actors.

@@ -379,7 +379,7 @@ def extract_rollout_timing_metrics(data: TensorDict) -> Dict[str, Any]:
     return metrics
 
 # validate metrics, inherited from siirl
-def _calculate_bootstrap_metrics(group: pd.DataFrame, variable_name: str, subset_size: int, n_bootstrap: int = 1000) -> Dict[str, float]:
+def _calculate_bootstrap_metrics(group: pd.DataFrame, variable_name: str, subset_size: int, n_bootstrap: int = 1000) -> Dict[str, Any]:
     """Performs fully vectorized bootstrap sampling to estimate statistics.
 
     This is the core computational engine. It avoids all Python loops by using
@@ -394,7 +394,7 @@ def _calculate_bootstrap_metrics(group: pd.DataFrame, variable_name: str, subset
         n_bootstrap: The number of bootstrap iterations to perform.
 
     Returns:
-        A dictionary containing the calculated mean and standard deviation for
+        A dictionary containing the calculated mean and StdStats objects for
         best-of-N, worst-of-N, and majority-vote-of-N metrics.
     """
     metrics = {}
@@ -415,11 +415,11 @@ def _calculate_bootstrap_metrics(group: pd.DataFrame, variable_name: str, subset
     max_values_per_sample = np.max(bootstrap_data, axis=1)
     min_values_per_sample = np.min(bootstrap_data, axis=1)
 
-    # Finally, calculate the mean and std across all bootstrap results.
+    # Calculate mean and create StdStats for distributed std calculation
     metrics[f"best@{subset_size}/mean"] = np.mean(max_values_per_sample)
-    metrics[f"best@{subset_size}/std"] = np.std(max_values_per_sample)
+    metrics[f"best@{subset_size}/std"] = StdStats.from_values(max_values_per_sample.tolist())
     metrics[f"worst@{subset_size}/mean"] = np.mean(min_values_per_sample)
-    metrics[f"worst@{subset_size}/std"] = np.std(min_values_per_sample)
+    metrics[f"worst@{subset_size}/std"] = StdStats.from_values(min_values_per_sample.tolist())
 
     # --- Step 4: Vectorized calculation for majority vote ('maj').
     if "pred" in group.columns:
@@ -441,7 +441,7 @@ def _calculate_bootstrap_metrics(group: pd.DataFrame, variable_name: str, subset
         majority_values = bootstrap_data[np.arange(n_bootstrap), first_match_indices]
 
         metrics[f"maj@{subset_size}/mean"] = np.mean(majority_values)
-        metrics[f"maj@{subset_size}/std"] = np.std(majority_values)
+        metrics[f"maj@{subset_size}/std"] = StdStats.from_values(majority_values.tolist())
 
     return metrics
 
@@ -462,6 +462,7 @@ def _process_prompt_group_task(group: pd.DataFrame, numeric_variables: List[str]
     Returns:
         A tidy DataFrame with columns ['data_source', 'prompt', 'var_name',
         'metric_name', 'value'], containing all calculated metrics for the group.
+        For std metrics, 'value' will be a StdStats object.
     """
     # Seed the random number generator for this specific worker.
     np.random.seed(seed)
@@ -480,17 +481,17 @@ def _process_prompt_group_task(group: pd.DataFrame, numeric_variables: List[str]
         results.append({**base_info, "metric_name": f"mean@{num_responses}", "value": group[var_name].mean()})
         
         if num_responses > 1:
-            # 1. Re-added the original std@N metric for the user's logging block.
-            #    NOTE: Averaging this metric across prompts is statistically incorrect.
-            results.append({**base_info, "metric_name": f"std@{num_responses}", "value": group[var_name].std(ddof=1)})
+            # Use StdStats for std calculation instead of direct std computation
+            values = group[var_name].tolist()
+            std_stats = StdStats.from_values(values)
+            results.append({**base_info, "metric_name": f"std@{num_responses}", "value": std_stats})
 
-            # 2. Kept the components for the correct pooled standard deviation calculation.
-            #    These will be used for the function's actual return value.
-            variance = group[var_name].var(ddof=1)
-            df = num_responses - 1
-            sum_sq_dev = variance * df
-            results.append({**base_info, "metric_name": "internal_sum_sq_dev_for_pooled_std", "value": sum_sq_dev})
-            results.append({**base_info, "metric_name": "internal_df_for_pooled_std", "value": df})
+            # For pooled_std, we also use StdStats - it contains all the information needed
+            # to calculate pooled std in a distributed manner:
+            # pooled_variance = Σ(sum_sq - sum²/count) / Σ(count - 1)
+            # The StdStats object contains sum, sum_sq, count which allows us to compute
+            # both the numerator (sum_sq - sum²/count) and denominator (count - 1)
+            results.append({**base_info, "metric_name": "pooled_std", "value": std_stats})
 
             # --- Calculate bootstrapped metrics for various sample sizes ---
             bootstrap_sizes = sorted(list(set([2**i for i in range(1, 10) if 2**i < num_responses] + [num_responses])))
@@ -503,7 +504,7 @@ def _process_prompt_group_task(group: pd.DataFrame, numeric_variables: List[str]
     return pd.DataFrame(results)
 
 
-def aggregate_validation_metrics(data_sources: List[str], sample_inputs: List[str], infos_dict: Dict[str, List[Any]], seed: int = 42) -> Dict[str, Dict[str, Dict[str, float]]]:
+def aggregate_validation_metrics(data_sources: List[str], sample_inputs: List[str], infos_dict: Dict[str, List[Any]], seed: int = 42) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Process validation metrics into a structured format with statistical analysis.
 
     This function organizes validation metrics by data source and prompt, then computes
@@ -522,20 +523,21 @@ def aggregate_validation_metrics(data_sources: List[str], sample_inputs: List[st
         {
             data_source: {
                 variable_name: {
-                    metric_name: value
+                    metric_name: value_or_stdstats
                 }
             }
         }
 
         Where metric_name includes:
         - "mean@N": Mean value across N samples
-        - "std@N": Standard deviation across N samples
+        - "std@N": StdStats object for distributed std calculation
+        - "pooled_std": StdStats object for distributed pooled std calculation
         - "best@N/mean": Mean of the best values in bootstrap samples of size N
-        - "best@N/std": Standard deviation of the best values in bootstrap samples
+        - "best@N/std": StdStats object for distributed std calculation of best values
         - "worst@N/mean": Mean of the worst values in bootstrap samples
-        - "worst@N/std": Standard deviation of the worst values in bootstrap samples
+        - "worst@N/std": StdStats object for distributed std calculation of worst values
         - "maj@N/mean": Mean of majority voting results in bootstrap samples (if "pred" exists)
-        - "maj@N/std": Standard deviation of majority voting results (if "pred" exists)
+        - "maj@N/std": StdStats object for distributed std calculation of majority voting (if "pred" exists)
 
     Example:
         >>> data_sources = ["source1", "source1", "source2"]
@@ -566,37 +568,26 @@ def aggregate_validation_metrics(data_sources: List[str], sample_inputs: List[st
         return {}
     processed_df = pd.concat(processed_df_list)    
 
-    # --- 6. Final Aggregation ---
-    # Perform a single, efficient groupby to get the mean value of each metric
-    # across all prompts within a data source.
-    # Separate the standard metrics from the internal components for pooled std.
-    is_std_component = processed_df["metric_name"].str.startswith("internal_")
-    is_legacy_std = processed_df["metric_name"].str.startswith("std@")
-    
-    # Exclude internal components AND the legacy std@N metric from the regular aggregation.
-    regular_metrics_df = processed_df[~is_std_component & ~is_legacy_std]
-    std_components_df = processed_df[is_std_component]
-
-    # Aggregate regular metrics by taking the mean across all prompts.
-    final_agg_df = regular_metrics_df.groupby(["data_source", "var_name", "metric_name"])["value"].mean().reset_index()
-
-    final_df = final_agg_df
-    # Calculate the pooled standard deviation correctly.
-    if not std_components_df.empty:
-        summed_components = std_components_df.groupby(["data_source", "var_name", "metric_name"])["value"].sum().unstack()
-        total_df = summed_components["internal_df_for_pooled_std"]
-        pooled_variance = summed_components["internal_sum_sq_dev_for_pooled_std"].divide(total_df).fillna(0)
-        pooled_std = np.sqrt(pooled_variance)
-        
-        pooled_std_df = pooled_std.reset_index(name="value")
-        pooled_std_df["metric_name"] = "pooled_std"
-        
-        final_df = pd.concat([final_agg_df, pooled_std_df], ignore_index=True)
-
-    # --- 7. Output Formatting ---
-    # Convert the flattened Series from the groupby into the required nested dict.
+    # --- 5. Final Aggregation ---
+    # Handle different types of metrics separately
     output_dict = defaultdict(lambda: defaultdict(dict))
-    for _, row in final_df.iterrows():
-        output_dict[row['data_source']][row['var_name']][row['metric_name']] = row['value']
+    
+    # Group by data_source, var_name, and metric_name
+    for (data_source, var_name, metric_name), group in processed_df.groupby(["data_source", "var_name", "metric_name"]):
+        values = group["value"].tolist()
+        
+        # Check if this is a std metric (contains StdStats objects)
+        if values and isinstance(values[0], StdStats):
+            # Aggregate StdStats objects using the distributed calculation
+            total_sum = sum(stats.sum for stats in values)
+            total_sum_sq = sum(stats.sum_sq for stats in values)
+            total_count = sum(stats.count for stats in values)
+            
+            # Create aggregated StdStats object
+            aggregated_stats = StdStats(sum=total_sum, sum_sq=total_sum_sq, count=total_count)
+            output_dict[data_source][var_name][metric_name] = aggregated_stats
+        else:
+            # For non-std metrics, take the mean across prompts
+            output_dict[data_source][var_name][metric_name] = sum(values) / len(values)
 
     return output_dict

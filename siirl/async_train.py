@@ -62,7 +62,6 @@ class MainRunner:
 
         logger.info("MainRunner started. Beginning workflow setup...")
         start_time = time.time()
-
         # === 0. Create Task Coordinator ===
         # Coordinator manages task lifecycle: graceful shutdown, failure propagation
         coordinator = create_coordinator()
@@ -83,15 +82,8 @@ class MainRunner:
         )
         
         # Initialize dataloader in DataCoordinator
-        ray.get(data_coordinator.init_dataloader.remote(config))
+        dataloader_fut = data_coordinator.init_dataloader.remote(config)
         
-        # Get training info from DataCoordinator and update config
-        # NOTE: Ray actors modify their local copy of config, so we must fetch the calculated values
-        total_training_steps, batches_per_epoch = ray.get(data_coordinator.epoch_info.remote())
-        config.actor_ref.actor.optim.total_training_steps = total_training_steps
-        config.critic.optim.total_training_steps = total_training_steps
-        logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
-
         # === 3. Initialize MetricWorker ===
         # Note: MetricTracker is created inside Trainer (only rank=0) for cleaner lifecycle management
         from siirl.utils.metrics import MetricWorker
@@ -117,12 +109,21 @@ class MainRunner:
                 metric_worker=metric_worker,
             )
 
+            # init rollout
+            rollout_fut = rollout_manager.init.remote()
+            
+            # Get training info from DataCoordinator and update config
+            # NOTE: Ray actors modify their local copy of config, so we must fetch the calculated values
+            ray.get(dataloader_fut)
+            total_training_steps, batches_per_epoch = ray.get(data_coordinator.epoch_info.remote())
+            config.actor_ref.actor.optim.total_training_steps = total_training_steps
+            config.critic.optim.total_training_steps = total_training_steps
+            logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
+            
             # Initialize trainer actors (creates Trainer Ray actors with models)
             trainer_group.init_actors()
-
-            router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
-            logger.success(f"RolloutManager initialized. Router at: {router_address}")
-            logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
+            
+            
 
             # Load checkpoint if resume mode is enabled
             if config.trainer.resume_mode != "disable":
@@ -133,9 +134,16 @@ class MainRunner:
             init_time = time.time() - start_time
             logger.info(f"Initialization completed in {init_time:.1f}s")
 
+            # Wait rollout and Get Rollout Info
+            ray.get(rollout_fut)
+            router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
+            logger.success(f"RolloutManager initialized. Router at: {router_address}")
+            logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
+            
             # === 5. Async Training Loop ===
             logger.info("Starting async training loop...")
             rollout_manager.run_dataloader.remote()
+            
             trainer_group.train()
 
             # === 6. Wait for completion or failure ===

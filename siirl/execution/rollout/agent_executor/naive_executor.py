@@ -20,12 +20,14 @@ import torch
 import importlib
 import numpy as np
 
+from tqdm.asyncio import tqdm_asyncio
 from collections import deque
 from loguru import logger
 from typing import List, Set, Dict, Any, Tuple
 from siirl.params.training_args import SiiRLArguments
 from siirl.data_coordinator.sample import Sample, SampleInfo, Samples2Dict
 from siirl.utils.timer import Timer
+from siirl.utils.model_utils.model import compute_position_id_with_mask
 class NaiveExecutor:
     '''
     NaiveExecutor used in synchronous training workflows.
@@ -58,7 +60,7 @@ class NaiveExecutor:
         self.semaphore = asyncio.Semaphore(self.max_concurrency_size) 
         self.reward_fn = None  # Custom reward function (optional)
         self.rollout_flow = None  # Rollout flow function for sample generation
-        
+        self._rank = int(os.environ.get('RANK'))
         # Load custom reward function if configured
         if config.custom_reward_function.path:
             from siirl.utils.reward_score.custom_reward import load_custom_reward_function
@@ -226,14 +228,30 @@ class NaiveExecutor:
         attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1)
         
         # Create position IDs (account for padding in attention mask)
-        position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
+        # Initialize position_ids with the same shape as attention_mask
+        # position_ids = torch.zeros_like(attention_mask, dtype=torch.long)
+        # # Get the attention mask for this sample
+        # valid_indices = attention_mask [0].nonzero(as_tuple=False).squeeze(-1)
+        # seq_length = attention_mask.size(1)
+        # if len(valid_indices) > 0:
+        #     first_valid = valid_indices[0].item()
+        #     # Left padding positions remain 0
+        #     # Valid positions get incremental IDs starting from 0
+        #     # Right padding positions continue the sequence
+
+        #     # Assign position IDs for the entire sequence starting from first valid position
+        #     position_sequence = torch.arange(seq_length - first_valid)
+        #     position_ids[0, first_valid:] = position_sequence
+        
+        # position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
+        
+        position_ids = compute_position_id_with_mask(attention_mask)
         
         # Format reward tensor (place reward value at last valid response token position)
         reward_tensor = torch.zeros_like(response_ids[0], dtype=torch.float32)
         prompt_length = prompt_ids[0].shape[-1]
         valid_response_length = attention_mask[0][prompt_length:].sum()
         reward_tensor[valid_response_length - 1] = sample.rewards
-        
         # Clean up and set processed fields in sample
         sample.token_level_rewards = reward_tensor.numpy()
         sample.token_level_scores = copy.deepcopy(reward_tensor.numpy())
@@ -338,9 +356,8 @@ class NaiveExecutor:
         """
         self.running = True
         stats_task = None
-        rank = int(os.environ.get("RANK"))
-        if rank == 0:
-            stats_task = asyncio.create_task(self.rollout_status(rank))
+        if self._rank == 0:
+            stats_task = asyncio.create_task(self.rollout_status())
         
         while self.running:
             # Get new samples to replenish batch
@@ -366,7 +383,7 @@ class NaiveExecutor:
                 
                 # Yield control to event loop (non-blocking sleep)
                 await asyncio.sleep(0)  
-        if rank == 0:
+        if self._rank == 0:
             stats_task.cancel()
             await asyncio.gather(stats_task, return_exceptions=True)
      
@@ -379,22 +396,29 @@ class NaiveExecutor:
                     break
                 val_samples.extend(data)
         val_tasks = []
-        logger.info(f"RANK_{os.environ.get('RANK')} start validate, batch_size:{len(val_samples)}")
+        logger.info(f"RANK_{self._rank} start validate, batch_size:{len(val_samples)}")
         with Timer("val_generate") as val_generate_time:
             for sample in val_samples:
                 task = asyncio.create_task(self.generate(sample, is_validate = True))
                 val_tasks.append(task)
-            result = await asyncio.gather(*val_tasks)
+            result = await tqdm_asyncio.gather(
+                    *val_tasks,
+                    desc=f"[Rank_{self._rank}]-Validate",
+                    unit="sample",
+                    dynamic_ncols=True,
+                    mininterval=2.0,     
+                    miniters=50,         
+                )
         metrics = {"val_get_time":val_get_time.elapsed, "val_generate_time":val_generate_time.elapsed}
         return result, metrics
        
-    async def rollout_status(self, rank, interval: float = 10.0):
+    async def rollout_status(self, interval: float = 10.0):
         last_status = 0
         while True:
             await asyncio.sleep(interval)
             current_status = len(self.tasks)
             if last_status != current_status :
-                logger.info(f"rank_{rank} active generate tasks: {current_status}, {len(self.pending_queue)} left in pending_queue")
+                logger.info(f"rank_{self._rank} active generate tasks: {current_status}, {len(self.pending_queue)} left in pending_queue")
                 last_status = current_status
           
     async def stop(self):
