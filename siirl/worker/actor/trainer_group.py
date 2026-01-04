@@ -16,6 +16,8 @@ import ray
 import os
 from loguru import logger
 from typing import List, Optional
+from ray.actor import ActorHandle
+from typing import List
 
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.enums import DistributedEnv
@@ -42,6 +44,7 @@ class TrainerGroup:
         data_coordinator,
         rollout_manager=None,
         coordinator=None,
+        metric_worker: Optional[ActorHandle] = None,
     ) -> None:
         """
         Initialize TrainerGroup with configuration and resource handles.
@@ -52,11 +55,13 @@ class TrainerGroup:
             data_coordinator: Ray handle to DataCoordinator
             rollout_manager: Ray handle to RolloutManager for weight synchronization
             coordinator: Ray handle to TaskCoordinator for lifecycle management
+            metric_worker: Ray handle to MetricWorker for distributed metrics collection
         """
         self.config = config
         self.data_coordinator = data_coordinator
         self.rollout_manager = rollout_manager
         self.coordinator = coordinator
+        self.metric_worker = metric_worker
 
         # GPU resources from allocate_resources()
         self.pg = gpu_resources.pg  # Ray placement group
@@ -101,6 +106,9 @@ class TrainerGroup:
                 DistributedEnv.MASTER_ADDR.value: self.master_addr,
                 DistributedEnv.MASTER_PORT.value: self.master_ports,
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                # because sglang will always set NCCL_CUMEM_ENABLE to 0
+                # we need also set it to 0 to prevent nccl error.
+                "NCCL_CUMEM_ENABLE": os.environ.get("NCCL_CUMEM_ENABLE", "0"),
             }
             logger.info(f"  Creating Trainer rank={rank}: bundle_idx={bundle_idx}, local_rank={local_rank}, "
                        f"node_ip={self.node_ips[rank]}, env={{WORLD_SIZE={self.num_gpus}, RANK={rank}, "
@@ -130,7 +138,8 @@ class TrainerGroup:
                 use_critic=self.use_critic,
                 data_coordinator=self.data_coordinator,
                 coordinator=self.coordinator,
-                rollout_manager = self.rollout_manager,
+                rollout_manager=self.rollout_manager,
+                metric_worker=self.metric_worker,
             )
 
             self.trainers.append(trainer_handle)
@@ -146,9 +155,22 @@ class TrainerGroup:
 
         logger.success(f"Successfully initialized {len(self.trainers)} trainers with their models")
 
+    def load_checkpoint(self):
+        """Load checkpoint for all trainers."""
+        if not self.trainers:
+            logger.warning("No trainers available for checkpoint loading")
+            return
+
+        logger.info("Loading checkpoints for all trainers")
+        futures = [trainer.load_checkpoint.remote() for trainer in self.trainers]
+        ray.get(futures)
+        logger.success("Checkpoint loaded for all trainers")
+
     def train(self):
         """
         Execute training loop.
+
+        MetricTracker is created inside each Trainer (only rank=0 creates one).
         """
         batch_size = self.config.data.train_batch_size * self.config.rollout.n 
         futures = [trainer.train.remote(batch_size) for trainer in self.trainers]

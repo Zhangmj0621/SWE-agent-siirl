@@ -1,8 +1,9 @@
-from typing import Optional, Callable, cast, Awaitable, Any
+from typing import Optional, Callable, Awaitable, Any, cast
 import asyncio
-from numpy import ndarray
+import numpy as np
+from loguru import logger
 
-from siirl.data_coordinator.sample import Sample, Samples2Dict
+from siirl.data_coordinator.sample import Sample
 
 from ..agentflow import ModelResponse, load_agentflow, AgentFlow
 
@@ -60,23 +61,30 @@ class AgentFlowCallable:
     async def __call__(
         self,
         sample: Sample,
-        sampling_params: dict,
-        engine: LLMEngine,
         reward_fn=None,
+        is_generate=False
     ):
-        sample_data = Samples2Dict([sample]).to_dict(convert_tensors=True)
-        s = self.flow.preprocess(sample_data)
-        await self.flow.generate(s)
-        await self.flow.reward(s)
+        try:
+            sample_data = sample.extra_info
+            s = self.flow.preprocess(sample_data)
+            await self.flow.generate(s)
+            await self.flow.reward(s)
 
-        # TODO: 对齐 sample；暂时只赋值 naive_flow 里的那些
-        # TODO: 对齐类型
-        sample.responses = cast(ndarray, s.tokens)
-        sample.rollout_log_prob = cast(ndarray, s.rollout_log_probs)
-        sample.response_mask = cast(ndarray, s.loss_mask)
-        sample.rewards = cast(float, s.reward)
-
+            # TODO: 对齐 sample；暂时只赋值 naive_flow 里的那些
+            sample.responses = np.array(s.tokens, dtype=np.int64)
+            sample.rollout_log_prob = np.array(s.rollout_log_probs, dtype=np.float32)
+            sample.response_mask = np.array(s.loss_mask, dtype=np.int64)
+            sample.rewards = cast(float, s.reward)
+        except Exception as e:
+            logger.error(f"SWE Instance fail with exception: {e}")
+            sample.responses = np.array([])
+            sample.rollout_log_prob = np.array([])
+            sample.response_mask = np.array([])
+            sample.rewards = 0.0
         return sample
+
+    def __repr__(self) -> str:
+        return f"AgentflowCallable"
 
 
 def build_agentflow(config: dict, engine: LLMEngine) -> Callable[..., Awaitable]:

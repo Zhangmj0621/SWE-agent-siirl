@@ -13,8 +13,7 @@
 # limitations under the License.
 
 import asyncio
-import io
-import os
+import copy
 import multiprocessing
 import time
 from urllib3.exceptions import NewConnectionError
@@ -54,6 +53,7 @@ class SglangEngine:
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
+        extra_server_args:dict = {},
     ):
         """
         Initialize SGLang engine with explicit GPU placement parameters.
@@ -76,7 +76,7 @@ class SglangEngine:
         self.port = port
         self.nccl_port = nccl_port
         self.ip = ip
-        self.weights_version = 0
+        self.weight_version = 0
         # GPU placement parameters (directly passed, not calculated)
         self.base_gpu_id = base_gpu_id
         self.node_rank = node_rank
@@ -89,7 +89,16 @@ class SglangEngine:
         )
         self.max_model_len = config.rollout.max_model_len if config.rollout.max_model_len else config.data.max_prompt_length + config.data.max_response_length
         self.max_response_length = config.data.max_response_length
-        self.launch_server()
+        # Sampling parameters for text generation (LLM inference config)
+        self.sampling_params =  dict(
+            temperature=config.rollout.temperature,  
+            top_p=config.rollout.top_p,  
+            top_k=config.rollout.top_k, 
+            repetition_penalty=1.0,  
+        )      
+        self.launch_server(extra_server_args)
+
+        
         
     def _build_server_args(self) -> dict:
         """
@@ -131,8 +140,8 @@ class SglangEngine:
             "dist_timeout": 1800,
             "skip_server_warmup": True,
         }
-        
-    def launch_server(self):
+
+    def launch_server(self, extra_server_args = {}):
         """
         Launch the SGLang HTTP server in a separate process.
         
@@ -141,6 +150,7 @@ class SglangEngine:
         in complex multi-node and cross-node TP scenarios.
         """
         args = self._build_server_args()
+        args.update(extra_server_args)
         self.sgl_args = ServerArgs(**args)
         print(f"Launch SglangHttpServer at: {get_net_interface_ip()}:{self.port}")
         multiprocessing.set_start_method("spawn", force=True)
@@ -162,8 +172,17 @@ class SglangEngine:
     def set_router(self, router_address):
         self.router_address = router_address
     
-    async def generate(self, input_ids:List[int], sampling_params:Dict):
+    async def generate(self, input_ids:List[int], is_validate:bool):
+        sampling_params = copy.deepcopy(self.sampling_params)
         sampling_params['max_new_tokens'] = min(self.max_model_len - len(input_ids), self.max_response_length)
+        if is_validate:
+            kwargs = {
+                "top_k": self.config.rollout.val_kwargs.top_k,
+                "top_p": self.config.rollout.val_kwargs.top_p,
+                "temperature": self.config.rollout.val_kwargs.temperature,
+                
+            }
+            sampling_params.update(kwargs)
         url = f"http://{self.ip}:{self.port}/generate"
         # url = f"http://{self.router_address}/generate"
         # Prepare payload for sglang server
@@ -177,6 +196,23 @@ class SglangEngine:
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
         text = output['text'] 
         return text, responses, rollout_log_prob
+    
+    async def generate_from_text(self, input_text:"str", sampling_params:Dict, use_sglang_router = False):
+        url = f"http://{self.ip}:{self.port}/generate"
+        if use_sglang_router:
+            url = f"http://{self.router_address}/generate"
+        # Prepare payload for sglang server
+        payload = {
+            "sampling_params": sampling_params,
+            "return_logprob": True,
+        }
+        payload["text"] = input_text
+        output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
+        responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
+        rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
+        text = output['text'] 
+        return text, responses, rollout_log_prob
+
 
     def flush_cache(self):
         """Flush the cache of the server."""
@@ -207,6 +243,14 @@ class SglangEngine:
         response.raise_for_status()
         return response
 
+    def weight_version(self):
+        if self.node_rank != 0:
+            return
+        url = f"http://{self.ip}:{self.port}/get_weight_version"
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.json()["weight_version"]
+
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request to the specified endpoint with the given payload.
 
@@ -225,7 +269,7 @@ class SglangEngine:
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
-            e.add_note(f"{response.text=}")
+            logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
             raise
         return response.json()
 
@@ -243,8 +287,8 @@ class SglangEngine:
             },
         )
 
-    def sync_param_from_distributed(
-        self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
+    def param_sync_from_distributed(
+        self, names, dtypes, shapes, group_name, flush_cache=True, weight_version: str | None = None
     ):
         payload = {
             "names": names,
@@ -260,9 +304,9 @@ class SglangEngine:
             payload,
         )
         if weight_version:
-            self.weights_version = int(weight_version)
+            self.weight_version = int(weight_version)
         else:
-            self.weights_version += 1
+            self.weight_version += 1
         return result
 
     def destroy_weights_update_group(self, group_name):

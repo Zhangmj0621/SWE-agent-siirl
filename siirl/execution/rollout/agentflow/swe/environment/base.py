@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
-from typing import Optional, BinaryIO
+from typing import Optional, BinaryIO, Union
 
 
 @dataclass
@@ -33,8 +33,39 @@ class ContainerStartArgs:
     forward_env: list[str] = field(default_factory=list)
     container_timeout: str = "2h"
     startup_timeout: float = 180.0
-    resource_requests: Optional[dict[str, str]] = None
-    resource_limits: Optional[dict[str, str]] = None
+    resource_requests: Optional[dict[str, Union[int, str]]] = None
+    resource_limits: Optional[dict[str, Union[int, str]]] = None
+
+
+@dataclass
+class ContainerBuildArgs:
+    """Arguments for building a container image.
+
+    Attributes:
+        tag: The tag to apply to the built container image (e.g., 'myapp:latest').
+        build_dir: Path to the directory containing the build context.
+        dockerfile_path: Optional path to the Dockerfile. If None, defaults to
+            'Dockerfile' in the build_dir.
+        nocache: If True, do not use cache when building the image. Defaults to False.
+        rm: If True, remove intermediate containers after a successful build.
+            Defaults to True.
+        push: If True, push the built image to a registry after building.
+            Defaults to False.
+        timeout: Build timeout in seconds. A value of 0.0 means no timeout.
+            Defaults to 0.0.
+        resource_limits: Optional dictionary of resource limits for the build process.
+            Can include keys like 'memory' (int or str) and 'cpus' (int or str).
+            Defaults to None.
+    """
+
+    tag: str
+    build_dir: str
+    dockerfile_path: Optional[str] = None
+    nocache: bool = False
+    rm: bool = True
+    push: bool = False
+    timeout: float = 0.0
+    resource_limits: Optional[dict[str, Union[int, str]]] = None
 
 
 class ContainerEnvBuilder(ABC):
@@ -42,6 +73,21 @@ class ContainerEnvBuilder(ABC):
 
     @abstractmethod
     def __init__(self, conf: dict):
+        raise NotImplementedError
+
+    @abstractmethod
+    async def build(self, args: ContainerBuildArgs):
+        """Start a container from the given configuration.
+
+        TODO: design signature
+
+        Args:
+            args (ContainerBuildArgs): container build arguments
+
+        Raises:
+            TimeoutError: Startup timeout.
+            Exception: Unexpected failure
+        """
         raise NotImplementedError
 
     @abstractmethod

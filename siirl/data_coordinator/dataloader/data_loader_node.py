@@ -175,7 +175,7 @@ class DataLoaderNode():
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
         self.val_dataloader = StatefulDataLoader(dataset=self.val_dataset, batch_size=val_batch_size, num_workers=self.num_loader_workers, shuffle=False, drop_last=False, collate_fn=default_collate_fn)
-
+        self.val_batch_size = val_batch_size
         # Assert that there is at least one batch for this rank
         assert len(self.train_dataloader) >= 1, f"Not enough data for current rank (rank id: {self.rollout_ddp_rank}) to consume. Please increase the train datasets or reduce the number of GPUs."
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
@@ -323,4 +323,4 @@ class DataLoaderNode():
             # sampler state. Setting it to None forces the run() method to create a new,
             # valid iterator that is synchronized with the restored state.
             self._current_train_iter = None
-            logger.info(f"Node {self.node_id} (Rank {self.group_rank}): Successfully loaded train_dataloader state. Iterator will be reset on next call.")
+            logger.info(f"(Rank {self.group_rank}): Successfully loaded train_dataloader state. Iterator will be reset on next call.")

@@ -36,7 +36,7 @@ class MegatronArguments:
     optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
     override_transformer_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override transformer config"})
     override_ddp_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override ddp config"})
-    use_mbridge: bool = field(default=False, metadata={"help": "Whether to use mbridge"})
+    use_mbridge: bool = field(default=True, metadata={"help": "Whether to use mbridge"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -98,23 +98,6 @@ class ModelArguments():
 
 
 @dataclass
-class CheckpointArguments:
-    contents: List[str] = field(
-        default_factory=lambda: ["model", "hf_model", "optimizer", "extra"], 
-        metadata={"help": "The contents to save and load in the checkpoint."}
-    )
-    save_contents: List[str] = field(
-        default_factory=lambda: ["model", "optimizer", "extra"],
-        metadata={"help": "The contents to save in the checkpoint."}
-    )
-    load_contents: List[str] = field(
-        default_factory=lambda: ["model", "optimizer", "extra"],
-        metadata={"help": "The contents to load in the checkpoint."}
-    )
-    async_save: bool = field(default=False, metadata={"help": "Async checkpoint save mode"})
-
-
-@dataclass
 class ActorArguments:
     train_backend: str = field(default="megatron", metadata={"help": "Backend for training"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
@@ -122,6 +105,7 @@ class ActorArguments:
     loss_mode: str = field(default="vanilla", metadata={"help": "loss_mode for loss compute"})
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
+    clip_ratio_c: float = field(default=3.0, metadata={"help": "lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729"})
     clip_ratio_high: float = field(default=0.2, metadata={"help": "Max value for clip ratio"})
     entropy_coeff: float = field(default=0, metadata={"help": "Entropy coefficient"})
     use_kl_loss: bool = field(default=False, metadata={"help": "Enable KL loss"})
@@ -158,6 +142,8 @@ class MultiturnArguments:
     max_parallel_calls: int = field(default=1, metadata={"help": "Max parallel env"})
     max_env_response_length: int = field(default=256, metadata={"help": "Max env response"})
     env_response_truncate_side: str = field(default="middle", metadata={"help": "Truncate side of Env response: left, middle, right"})
+
+
 @dataclass
 class RolloutArguments:
     name: str = field(default="sglang", metadata={"help": "Rollout engine"})
@@ -186,7 +172,7 @@ class RolloutArguments:
     router_port: str = field(default=None, metadata={"help": "Rollout Router Port"})
     executor_module: str = field(default="naive", metadata={"help": "Batch rollout Generate Executor"})
     flow_function: str = field(default="naive", metadata={"help": "Sample rollout Generate Executor"})
-    flow_config: dict = field(default_factory=dict, metadata={"help": "Sample rollout Generate Executor config"})
+    flow_config: str = field(default="config.yaml", metadata={"help": "Sample rollout Generate Executor config path"})
     multiturn: MultiturnArguments = field(default_factory=MultiturnArguments)
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -217,12 +203,55 @@ class AlgorithmArguments:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+
+@dataclass
+class CheckpointArguments:
+    """Configuration for checkpoint save/load contents.
+    
+    Supported content types:
+        - "model": Model weights (Megatron distributed format)
+        - "optimizer": Optimizer states
+        - "extra": Extra states (RNG states, lr_scheduler, etc.)
+        - "hf_model": HuggingFace format model (converted from Megatron)
+    
+    Example:
+        To enable HF model saving, add "hf_model" to save_contents:
+        ```yaml
+        checkpoint:
+            save_contents: ["model", "optimizer", "extra", "hf_model"]
+        ```
+    """
+    contents: List[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],
+        metadata={"help": "Default contents to save and load in the checkpoint."}
+    )
+    save_contents: List[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],
+        metadata={"help": "Contents to save: model, optimizer, extra, hf_model"}
+    )
+    load_contents: List[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],
+        metadata={"help": "Contents to load: model, optimizer, extra"}
+    )
+    async_save: bool = field(
+        default=False, 
+        metadata={"help": "Enable async checkpoint save (experimental)"}
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
 @dataclass
 class ActorRefArguments:
     model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Base model settings"})
     actor: ActorArguments = field(default_factory=ActorArguments, metadata={"help": "Actor configuration"})
     ref: RefArguments = field(default_factory=RefArguments, metadata={"help": "Reference model settings"})
     algorithm: AlgorithmArguments = field(default_factory=AlgorithmArguments, metadata={"help": "Algorithm settings"})
+    checkpoint: CheckpointArguments = field(
+        default_factory=CheckpointArguments,
+        metadata={"help": "Checkpoint save/load configuration"}
+    )
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -244,8 +273,11 @@ class CriticArguments:
     cliprange_value: float = field(default=0.5, metadata={"help": "Value clipping range"})
     load_weight: bool = field(default=True)
     rollout_n: int = field(default=1, metadata={"help": "rollout n"})
-    checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
+    checkpoint: CheckpointArguments = field(
+        default_factory=CheckpointArguments,
+        metadata={"help": "Checkpoint save/load configuration"}
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

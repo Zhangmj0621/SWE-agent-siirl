@@ -56,11 +56,12 @@ class MainRunner:
         """
         # NOTE: Logging is automatically configured when siirl is imported (see siirl/__init__.py)
         # All Ray actors inherit this configuration as they import siirl modules.
+        from siirl.utils.logger.logging_utils import set_basic_config
+        set_basic_config()
         from loguru import logger
 
         logger.info("MainRunner started. Beginning workflow setup...")
         start_time = time.time()
-
         # === 0. Create Task Coordinator ===
         # Coordinator manages task lifecycle: graceful shutdown, failure propagation
         coordinator = create_coordinator()
@@ -81,45 +82,74 @@ class MainRunner:
         )
         
         # Initialize dataloader in DataCoordinator
-        ray.get(data_coordinator.init_dataloader.remote(config))
+        dataloader_fut = data_coordinator.init_dataloader.remote(config)
         
-        # Get training info from DataCoordinator and update config
-        # NOTE: Ray actors modify their local copy of config, so we must fetch the calculated values
-        total_training_steps, batches_per_epoch = ray.get(data_coordinator.epoch_info.remote())
-        config.actor_ref.actor.optim.total_training_steps = total_training_steps
-        config.critic.optim.total_training_steps = total_training_steps
-        logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
+        # === 3. Initialize MetricWorker ===
+        # Note: MetricTracker is created inside Trainer (only rank=0) for cleaner lifecycle management
+        from siirl.utils.metrics import MetricWorker
+        logger.info("Initializing MetricWorker...")
+        metric_worker = MetricWorker.remote()
+        ray.get(metric_worker.start.remote())
+        logger.success("MetricWorker initialized")
 
-        # === 3. Initialize Components (RolloutManager & TrainerGroup) ===
+        # === 4. Initialize Components (RolloutManager & TrainerGroup) ===
         rollout_manager = None
         trainer_group = None
 
         try:
             logger.info(f"Initializing components: {actor_resources.num_gpus} training GPUs, {rollout_resources.num_gpus} rollout GPUs...")
             
-            rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator, coordinator)
-            trainer_group = TrainerGroup(config, actor_resources, data_coordinator, rollout_manager, coordinator)
+            rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator, coordinator, metric_worker)
+            trainer_group = TrainerGroup(
+                config, 
+                actor_resources, 
+                data_coordinator, 
+                rollout_manager, 
+                coordinator,
+                metric_worker=metric_worker,
+            )
 
+            # init rollout
+            rollout_fut = rollout_manager.init.remote()
+            
+            # Get training info from DataCoordinator and update config
+            # NOTE: Ray actors modify their local copy of config, so we must fetch the calculated values
+            ray.get(dataloader_fut)
+            total_training_steps, batches_per_epoch = ray.get(data_coordinator.epoch_info.remote())
+            config.actor_ref.actor.optim.total_training_steps = total_training_steps
+            config.critic.optim.total_training_steps = total_training_steps
+            logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
+            
             # Initialize trainer actors (creates Trainer Ray actors with models)
             trainer_group.init_actors()
+            
+            
 
-            router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
-            logger.success(f"RolloutManager initialized. Router at: {router_address}")
-            logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
+            # Load checkpoint if resume mode is enabled
+            if config.trainer.resume_mode != "disable":
+                logger.info("Loading checkpoint...")
+                trainer_group.load_checkpoint()
+                logger.success("Checkpoint loaded successfully")
 
             init_time = time.time() - start_time
             logger.info(f"Initialization completed in {init_time:.1f}s")
 
-            # === 4. Async Training Loop ===
+            # Wait rollout and Get Rollout Info
+            ray.get(rollout_fut)
+            router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
+            logger.success(f"RolloutManager initialized. Router at: {router_address}")
+            logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
+            
+            # === 5. Async Training Loop ===
             logger.info("Starting async training loop...")
             rollout_manager.run_dataloader.remote()
-            ray.get(rollout_manager.next_rollout.remote())
+            
             trainer_group.train()
 
-            # === 5. Wait for completion or failure ===
+            # === 6. Wait for completion or failure ===
             self._wait_for_completion(coordinator, logger)
             
-            # === 6. Check final status and raise if failed ===
+            # === 7. Check final status and raise if failed ===
             final_status = ray.get(coordinator.get_status.remote())
             if final_status == "failed":
                 failure_reason = ray.get(coordinator.get_failure_reason.remote())
@@ -135,7 +165,8 @@ class MainRunner:
             raise
         
         finally:
-            # === 7. Cleanup and summary ===
+            # === 8. Cleanup and summary ===
+            # Note: MetricTracker cleanup is handled inside Trainer (rank=0)
             self._cleanup_and_report(coordinator, trainer_group, rollout_manager, start_time, logger)
 
     def _wait_for_completion(self, coordinator, logger, check_interval: float = 5.0):
@@ -202,6 +233,8 @@ def main() -> None:
     starts the MainRunner actor to orchestrate the distributed training workflow.
     """
     # Import logger locally to avoid Ray serialization issues
+    from siirl.utils.logger.logging_utils import set_basic_config
+    set_basic_config()
     from loguru import logger
 
     start_time = time.time()

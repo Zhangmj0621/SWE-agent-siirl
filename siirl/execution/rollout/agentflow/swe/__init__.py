@@ -8,10 +8,15 @@ from .runtime import RuntimeBuilder
 BUILTIN_PROVIDERS = {
     "agent": {"minisweagent": ".swe.agent.minisweagent:MiniSWEAgentBuilder"},
     "environment": {
+        "docker": ".swe.environment.docker:DockerEnvBuilder",
         "k8s": ".swe.environment.k8s:K8sEnvBuilder",
-        "k8rs": ".swe.environment.k8rs:K8rsEnvBuilder",
+        "kr8s": ".swe.environment.kr8s:Kr8sEnvBuilder",
     },
-    "runtime": {"swefactory": ".swe.runtime.swefactory:SWEFactoryBuiler"},
+    "runtime": {
+        "swefactory": ".swe.runtime.swefactory:SWEFactoryBuiler",
+        "swebench": ".swe.runtime.swebench:SWEBenchBuiler",
+        "swebench_sii": ".swe.runtime.swebench_sii:SWEBenchBuiler",
+    },
 }
 
 

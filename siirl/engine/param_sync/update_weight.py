@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.distributed_utils import get_gloo_group, init_process_group
+import debugpy
 
 from . import mbridge_patch
 
@@ -22,6 +23,8 @@ class ParamSyncInterface:
         self.config = config
         self.model = model
         self.bridge = bridge
+        if self.bridge is not None:
+            from . import mbridge_patch
         self.weight_version = 0
         self._model_update_groups = None
 
@@ -32,7 +35,6 @@ class ParamSyncInterface:
     @abstractmethod
     def update_weights(self) -> None:
         pass
-
 
 class ParamSyncDistributed(ParamSyncInterface):
     def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
@@ -70,17 +72,12 @@ class ParamSyncDistributed(ParamSyncInterface):
             )
             self.rollout_worker_connected.clear()
             self.update_rollout_worker_connected(rollout_workers)
+            logger.info(f"self._model_update_groups=={self._model_update_groups.size()}")
 
-    @torch.no_grad()
-    def update_weights(self) -> None:
+    def _update_weights_use_mbridge(self) -> None:
         """
         Pause → flush → all params → continue. Progress on PP source.
         """
-        self.weight_version += 1
-        if dist.get_rank() == 0:
-            ray.get([worker.pause_generation.remote() for worker in self.rollout_workers])
-            ray.get([worker.flush_cache.remote() for worker in self.rollout_workers])
-        dist.barrier(group=get_gloo_group())
 
         buffer_size = 0
         converted_named_tensors = []
@@ -89,16 +86,43 @@ class ParamSyncDistributed(ParamSyncInterface):
         generator = self.bridge._export_weights_in_current_pipeline_stage(self.model)
 
         for name, param in generator:
-            buffer_size = self._update_param_sync_bucket(param, converted_named_tensors, buffer_size, pbar)
+            buffer_size = self._update_param_sync_bucket(name, param, converted_named_tensors, buffer_size, pbar)
 
         if converted_named_tensors:
             self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
 
+    def _update_weights_naive(self) -> None:
+        raise NotImplementedError("_update_weights_naive is not implemented, please set use_mbridge=True")
+
+    @torch.no_grad()
+    def update_weights(self) -> None:
+        self.weight_version += 1
         if dist.get_rank() == 0:
+            ray.get([worker.pause_generation.remote() for worker in self.rollout_workers])
+            ray.get([worker.flush_cache.remote() for worker in self.rollout_workers])
+        dist.barrier(group=get_gloo_group())
+
+        if self.bridge is not None:
+            self._update_weights_use_mbridge()
+        else:
+            self._update_weights_naive()
+
+        dist.barrier(group=get_gloo_group())
+        if dist.get_rank() == 0:
+            self._check_weight_version()
             ray.get([worker.continue_generation.remote() for worker in self.rollout_workers])
+        dist.barrier(group=get_gloo_group())
+
+    def _check_weight_version(self):
+        version_list = ray.get([worker.weight_version.remote() for worker in self.rollout_workers])
+        for idx,v in enumerate(version_list):
+            if v != self.weight_version:
+                raise ValueError(f"Weight version mismatch!, {idx}th rollout weight version: {v}, trainer weight version: {self.weight_version}")
+        return True
 
     def _update_param_sync_bucket(
         self,
+        name: str,
         param: torch.nn.Parameter,
         converted_named_tensors: list[tuple[str, torch.Tensor]],
         buffer_size: int,
@@ -110,6 +134,7 @@ class ParamSyncDistributed(ParamSyncInterface):
         if buffer_size + param_size > self.config.trainer.param_sync_buffer_size:
             self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
             buffer_size = 0
+        converted_named_tensors.append((name, param))
         buffer_size += param_size
         return buffer_size
 
@@ -145,7 +170,7 @@ def connect_rollout_workers_from_distributed(
     rollout_worker_num = len(rollout_workers)
     rollout_gpu_per_worker = args.trainer.rollout_gpus // rollout_worker_num
     world_size = len(rollout_workers) * rollout_gpu_per_worker + 1
-    logger.debug(f"Group {group_name} is connecting to {rollout_workers}")
+    logger.info(f"Group {group_name} is connecting to {rollout_workers}")
     refs = [
         worker.init_param_sync_group.remote(
             master_address,

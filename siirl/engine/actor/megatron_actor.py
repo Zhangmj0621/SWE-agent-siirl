@@ -2,6 +2,10 @@ import os
 import datetime
 from functools import partial
 
+# Disable Transformer Engine to avoid ABI compatibility issues
+# This is needed when transformer_engine is compiled for a different PyTorch version
+os.environ.setdefault('NVTE_FRAMEWORK', 'none')
+
 import torch
 import torch.distributed
 from torch import nn
@@ -18,7 +22,9 @@ from siirl.algorithm.kl_penalty import kl_penalty
 from siirl.params.model_args import ActorRefArguments
 
 from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
+from siirl.utils.timer import Timer
 from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
+from siirl.utils.model_utils.flops_counter import FlopsCounter
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean
 from siirl.utils.megatron.megatron_utils import (
@@ -29,6 +35,7 @@ from siirl.utils.megatron.megatron_utils import (
 )
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
 from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
+from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 
 
 
@@ -211,6 +218,17 @@ class ActorWorker:
             actor_module=self.actor_module,
             actor_optimizer=self.actor_optimizer,
         )
+
+        self.checkpoint_manager = MegatronCheckpointManager(
+            model=self.actor_module,
+            optimizer=self.actor_optimizer,
+            lr_scheduler=self.actor_optimizer_scheduler
+        )
+
+
+        # Initialize FlopsCounter for MFU calculation
+        self.flops_counter = FlopsCounter(self.hf_config, forward_only=False)
+
         get_torch_device().empty_cache()
 
     def update_actor(self, data: TensorDict):
@@ -224,7 +242,29 @@ class ActorWorker:
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
         data["temperature"] = NonTensorData(self.config.actor.temperature)
 
-        metrics = self.actor.update_policy(data=data)
+        # Time the update_policy call for MFU calculation
+        with Timer("update_policy") as timer:
+            metrics = self.actor.update_policy(data=data)
+        delta_time = timer.elapsed
+
+        # Calculate MFU (Model FLOPs Utilization)
+        # Note: flops_counter calculates FLOPs for the entire model, but with TP each GPU
+        # only computes 1/TP of the model FLOPs. So we need to divide by TP world size.
+        if "global_token_num" in data:
+            global_token_num = data["global_token_num"]
+            if hasattr(global_token_num, 'data'):
+                global_token_num = global_token_num.data
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
+            if promised_flops > 0:
+                tp_world_size = mpu.get_tensor_model_parallel_world_size()
+                metrics["perf/mfu/actor"] = estimated_flops / promised_flops / tp_world_size
+        
+        metrics["perf/delta_time/actor"] = delta_time
+
+        # Add GPU memory metrics
+        metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+        metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+
         data["metrics"] = NonTensorData(metrics)
         data = data.to("cpu")
 
@@ -252,6 +292,30 @@ class ActorWorker:
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
         return data
+
+    def save_checkpoint(self, local_path, global_step=0, max_ckpt_to_keep=None):
+        """Save actor checkpoint using Megatron distributed checkpointing."""
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module)
+
+        self.checkpoint_manager.save_checkpoint(
+            local_path=local_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep
+        )
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+
+    def load_checkpoint(self, local_path):
+        """Load actor checkpoint using Megatron distributed checkpointing."""
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module)
+
+        self.checkpoint_manager.load_checkpoint(local_path=local_path)
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
 
 
 class ReferenceWorker:
@@ -566,6 +630,15 @@ class CriticWorker:
             critic_optimizer_config=critic_optimizer_config,
         )
 
+        # Initialize FlopsCounter for MFU calculation
+        self.flops_counter = FlopsCounter(self.hf_config, forward_only=False)
+
+        self.checkpoint_manager = MegatronCheckpointManager(
+            model=self.critic_module,
+            optimizer=self.critic_optimizer,
+            lr_scheduler=self.critic_optimizer_scheduler
+        )
+
     def compute_values(self, data: TensorDict):
         micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
@@ -591,7 +664,25 @@ class CriticWorker:
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.critic_optimizer)
 
-        metrics = self.critic.update_critic(data=data)
+        # Time the update_critic call for MFU calculation
+        with Timer("update_critic") as timer:
+            metrics = self.critic.update_critic(data=data)
+        delta_time = timer.elapsed
+
+        # Calculate MFU (Model FLOPs Utilization)
+        # Note: flops_counter calculates FLOPs for the entire model, but with TP each GPU
+        # only computes 1/TP of the model FLOPs. So we need to divide by TP world size.
+        if "global_token_num" in data:
+            global_token_num = data["global_token_num"]
+            if hasattr(global_token_num, 'data'):
+                global_token_num = global_token_num.data
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
+            if promised_flops > 0:
+                tp_world_size = mpu.get_tensor_model_parallel_world_size()
+                metrics["perf/mfu/critic"] = estimated_flops / promised_flops / tp_world_size
+        
+        metrics["perf/delta_time/critic"] = delta_time
+
         data["metrics"] = NonTensorData(metrics)
         data = data.to("cpu")
 
@@ -601,6 +692,30 @@ class CriticWorker:
             offload_megatron_optimizer(self.critic_optimizer)
 
         return data
+
+    def save_checkpoint(self, local_path, global_step=0, max_ckpt_to_keep=None):
+        """Save critic checkpoint using Megatron distributed checkpointing."""
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.critic_module)
+
+        self.checkpoint_manager.save_checkpoint(
+            local_path=local_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep
+        )
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.critic_module)
+
+    def load_checkpoint(self, local_path):
+        """Load critic checkpoint using Megatron distributed checkpointing."""
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.critic_module)
+
+        self.checkpoint_manager.load_checkpoint(local_path=local_path)
+
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.critic_module)
 
 
 class MegatronPPOActor():
@@ -851,7 +966,8 @@ class MegatronPPOActor():
                 append_to_dict(metrics, metric)
 
             update_successful, grad_norm, num_zeros_in_grad = self.actor_optimizer.step()
-            data = {"actor/grad_norm": grad_norm}
+            learning_rate = self.actor_optimizer.param_groups[-1]["lr"]
+            data = {"actor/grad_norm": grad_norm, "actor/lr": learning_rate}
             append_to_dict(metrics, data)
 
             if not update_successful:

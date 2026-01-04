@@ -18,13 +18,17 @@ import torch.distributed as dist
 import threading
 import importlib
 import asyncio
+import time
+from collections import Counter
 
 from loguru import logger
+from typing import List
 
 from siirl.engine.rollout.sglang_engine import SglangEngine
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.backend.device import get_nccl_backend,get_device_name
 from siirl.utils.net_utils.net import get_free_port, get_net_interface_ip
+from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
 
 def async_run_wrapper(executor):
     """
@@ -47,14 +51,21 @@ class RolloutWorker:
     RolloutWorker class manages the rollout process execution in a distributed training environment.
     It handles engine initialization, executor thread management, and network configuration for rollout tasks.
     """
-    def __init__(self, config:SiiRLArguments) -> None:
+    def __init__(self, config:SiiRLArguments, global_dp_size = 1, metric_worker = None) -> None:
         """
         Initialize RolloutWorker with configuration parameters.
         
         Args:
             config: SiiRLArguments configuration object containing all training/rollout settings
         """
+        # Configure logging for this Ray actor process
+        # (worker_process_setup_hook only works for task workers, not actors)
+        from siirl.utils.logger.logging_utils import set_basic_config
+        set_basic_config()
+        self.rank = int(os.environ.get("RANK"))
         self.config = config
+        self.global_dp_size = global_dp_size
+        self.metric_worker = metric_worker
         self.ip = None  # Network IP address for the worker
         self.port = None  # Network port for the worker
         self.executor = None  # Rollout executor instance
@@ -131,6 +142,7 @@ class RolloutWorker:
             mod = importlib.import_module(module_path)
             Executor = getattr(mod, name)
         executor = Executor(self.config, data_coordinator, self.engine, self.config.data.train_batch_size // num_engine)
+        self.executor = executor
         self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(executor,), daemon=True)
         self.rollout_thread.start()
 
@@ -150,6 +162,22 @@ class RolloutWorker:
             router_address: New router address to set for engine communication
         """
         self.engine.set_router(router_address)    
+        
+    async def validate(self, val_batch_size, global_step):
+        rank = int(os.environ.get("RANK"))
+        start_time = time.perf_counter()
+        if rank == 0:
+            logger.info("=" * 60)
+            logger.info(f"Starting Validation @ Global Step {global_step}...")
+            logger.info("=" * 60)
+        samples, val_time_metrics = await self.executor.validate(val_batch_size)    
+        validate_samples = []
+        for sample in samples:
+            if sample.extra_info and isinstance(sample.extra_info, dict) and sample.extra_info.get("padded_duplicate", None):
+                continue
+            validate_samples.append(sample)
+        val_metrics = aggregate_and_log_validation_metrics(validate_samples)
+        await self.metric_worker.submit_metric.remote(val_metrics, self.global_dp_size)
 
     def get_ip(self):
         """
@@ -186,7 +214,7 @@ class RolloutWorker:
     def param_sync_from_distributed(
         self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
     ):
-        return self.engine.sync_param_from_distributed(names, dtypes, shapes, group_name, flush_cache, weight_version)
+        return self.engine.param_sync_from_distributed(names, dtypes, shapes, group_name, flush_cache, weight_version)
     
     def destroy_weights_update_group(self, group_name):
         return self.engine.destroy_weights_update_group(group_name)
@@ -199,3 +227,6 @@ class RolloutWorker:
 
     def continue_generation(self):
         return self.engine.continue_generation()
+    
+    def weight_version(self):
+        return self.engine.weight_version

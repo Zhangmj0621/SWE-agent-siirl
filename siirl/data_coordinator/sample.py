@@ -3,7 +3,7 @@ import numpy as np
 import asyncio
 import ray
 import uuid
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 from typing import Any, Dict, List, Optional, Union, Set
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
@@ -77,6 +77,13 @@ class Sample(BaseModel):
         default=None,
         metadata={"help": "temperature"}
     )
+    timing_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        metadata={"help": "Rollout timing information: rollout_start_at, rollout_end_at, rollout_duration, generation_duration, reward_duration"}
+    )
+    # Internal timing fields used by naive_flow.py, consumed by naive_executor.py
+    _generation_duration: float = PrivateAttr(default=0.0)
+    _reward_duration: float = PrivateAttr(default=0.0)
 
     class Config:
         arbitrary_types_allowed = True
