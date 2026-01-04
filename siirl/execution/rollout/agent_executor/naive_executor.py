@@ -277,7 +277,7 @@ class NaiveExecutor:
             prompt_length=getattr(sample, 'prompt_length', 0),
             response_length=getattr(sample, 'response_length', 0),
             uid=str(sample.uid),
-            weight_version=self.engine.weight_version,
+            weight_version=self.engine.weights_version,
             dict_info={
                 'key': "Actor",
             })

@@ -60,6 +60,18 @@ class TrainingArguments:
     device: Optional[str] = field(default="cuda", metadata={"help": "Training device."})
     async_factor: int = field(default=1, metadata={"help": "Control async speed"})
     param_sync_buffer_size: int = field(default=512 * 1024**2,metadata={"help":"buffer size for param_sync, in bytes. This is used for updating weights by chunk and should be useful for MoE models."})
+    
+    # === Off Policy Configuration ===
+    off_policy_step: int = field(
+        default=0,
+        metadata={"help": "Number of version steps allowed for off-policy data. "
+                  "0 means on-policy only (strict current version). "
+                  "N means accept data from versions [current - N, current]."}
+    )
+    off_policy_strategy: str = field(
+        default="fifo",
+        metadata={"help": "Strategy for dispatching off-policy data. Options: 'fifo' (default), 'oldest_first'"}
+    )
 
     # === Resource Allocation Configuration ===
     actor_gpus: int = field(
