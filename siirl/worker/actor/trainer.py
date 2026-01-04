@@ -228,7 +228,6 @@ class Trainer:
     def has_critic(self):
         return self.critic_worker is not None
 
-<<<<<<< HEAD
     def get_current_weight_version(self) -> int:
         """Get current weight version from param_sync."""
         if hasattr(self, 'param_sync') and self.param_sync is not None:
@@ -247,7 +246,7 @@ class Trainer:
         current_version = self.get_current_weight_version()
         off_policy_step = self.config.trainer.off_policy_step
         return max(0, current_version - off_policy_step)
-=======
+    
     def _sync_batch_availability(self, batch_ref) -> bool:
         """
         Synchronize batch data availability across ALL ranks.
@@ -286,7 +285,6 @@ class Trainer:
             logger.debug(f"[Trainer rank={self.rank}] Caching batch data locally due to global sync failure")
 
         return all_have_data
->>>>>>> master
 
     def get_batch(self, batch_size: int):
         """
@@ -312,16 +310,6 @@ class Trainer:
             raise RuntimeError("DataCoordinator not available")
 
         batch_size = batch_size // self.dp_world_size
-<<<<<<< HEAD
-        min_version = self._compute_min_version()
-
-        batch_ref = ray.get(
-            self.data_coordinator.get_batch.remote(
-                batch_size=batch_size,
-                dp_rank=self.dp_rank,
-                balance_partitions=self.dp_world_size,
-                min_version=min_version,
-=======
 
         # Priority 1: Use locally cached data from previous failed sync
         if self._local_batch_cache is not None:
@@ -330,15 +318,16 @@ class Trainer:
             logger.debug(f"[Trainer rank={self.rank}] Using locally cached batch data")
         else:
             # Priority 2: Fetch from DataCoordinator
+            min_version = self._compute_min_version()
             batch_ref = ray.get(
                 self.data_coordinator.get_batch.remote(
                     batch_size=batch_size,
                     dp_rank=self.dp_rank,
                     balance_partitions=self.dp_world_size,
+                    min_version=min_version,
                 )
->>>>>>> master
             )
-
+            
         # Synchronize: ensure all DP ranks have data before proceeding
         if not self._sync_batch_availability(batch_ref):
             return None
