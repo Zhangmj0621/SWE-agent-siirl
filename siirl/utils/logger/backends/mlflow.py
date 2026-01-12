@@ -103,9 +103,7 @@ class MLflowBackend:
                 mlflow.log_params(params)
 
             self._initialized = True
-            logger.success(
-                f"MLflow initialized: experiment={self._config.project_name}, run={self._config.experiment_name}"
-            )
+            logger.success(f"MLflow initialized: experiment={self._config.project_name}, run={self._config.experiment_name}")
             return True
 
         except ImportError:

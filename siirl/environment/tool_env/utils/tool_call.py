@@ -100,9 +100,7 @@ async def call_long_batch(
             async with session.post(url, json=data) as response:
                 response.raise_for_status()
                 response_json = await response.json()
-                for sub_id, result, duration in zip(
-                    sub_ids, response_json["results"], response_json["duration_time"], strict=False
-                ):
+                for sub_id, result, duration in zip(sub_ids, response_json["results"], response_json["duration_time"], strict=False):
                     results[sub_id] = result
                     duration_time[sub_id] = duration
             print(
@@ -274,9 +272,7 @@ async def run_tool_calls_on_server_async(
         failed_indices = [i for i, result in enumerate(results) if result is None]
         # throw an error if any tool call failed after max retries
         if len(failed_indices) > 0:
-            print(
-                f"run_tool_calls_on_server_async failed for {len(failed_indices)} tool calls after {max_retries} attempts."
-            )
+            print(f"run_tool_calls_on_server_async failed for {len(failed_indices)} tool calls after {max_retries} attempts.")
 
     for i in range(len(results)):
         # only need to contain stdout and stderr here

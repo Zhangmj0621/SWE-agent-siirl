@@ -1,11 +1,6 @@
 from siirl.utils.megatron.megatron_utils import unwrap_model
 
-from .util import (
-    postprocess_packed_seqs,
-    preprocess_packed_seqs,
-    recover_left_padding,
-    remove_left_padding,
-)
+from .util import postprocess_packed_seqs, preprocess_packed_seqs, recover_left_padding, remove_left_padding
 
 
 def gptmodel_forward(
@@ -34,10 +29,7 @@ def gptmodel_forward(
             packed_seq_params=packed_seq_params,
         )
         if post_process and logits_processor is not None:
-            args = {
-                k: preprocess_packed_seqs(v, attention_mask, pre_process=True)[0]
-                for k, v in logits_processor_args.items()
-            }
+            args = {k: preprocess_packed_seqs(v, attention_mask, pre_process=True)[0] for k, v in logits_processor_args.items()}
             output_dict = logits_processor(output_orig, **args)
             output = {
                 k: postprocess_packed_seqs(

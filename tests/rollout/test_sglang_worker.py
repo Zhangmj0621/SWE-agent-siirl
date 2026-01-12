@@ -86,7 +86,7 @@ class MainRunner:
             start_epoch = global_steps // num_train_batches
             # batches_to_skip = global_steps % num_train_batches
         for epoch in range(start_epoch, siirl_args.trainer.total_epochs):
-            for batch_idx in range(num_train_batches):
+            for _ in range(num_train_batches):
                 ray.get(data_coordinator_handle.run_dataloader.remote(epoch))
                 while True:
                     pass

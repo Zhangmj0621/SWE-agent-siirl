@@ -17,10 +17,7 @@
 # use mcore transformer config to initialize the model
 from abc import ABC, abstractmethod
 
-from megatron.core.models.gpt.gpt_layer_specs import (
-    get_gpt_decoder_block_spec,
-    get_gpt_mtp_block_spec,
-)
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec, get_gpt_mtp_block_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
 
 from .config_converter import PretrainedConfig, TransformerConfig
@@ -71,7 +68,7 @@ class BaseModelInitializer(ABC):
         """
         transformer_layer_spec = self.get_transformer_layer_spec()
         rope_scaling_args = self.get_rope_scaling_args()
-        mtp_block_spec = extra_kwargs.get("mtp_block_spec", None)
+        mtp_block_spec = extra_kwargs.get("mtp_block_spec")
         model = GPTModel(
             config=self.tfconfig,
             transformer_layer_spec=transformer_layer_spec,

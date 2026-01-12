@@ -17,10 +17,7 @@ from typing import Any
 
 import ray
 from ray.util.placement_group import PlacementGroup, placement_group
-from ray.util.scheduling_strategies import (
-    NodeAffinitySchedulingStrategy,
-    PlacementGroupSchedulingStrategy,
-)
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
 from siirl.params.training_args import SiiRLArguments
 
@@ -95,9 +92,7 @@ class RayClassWithInitArgs:
             target_node_id = ray.get(sharing_with.get_node_id.remote())
             cuda_visible_devices = ray.get(sharing_with.get_cuda_visible_devices.remote())
             options = {"scheduling_strategy": NodeAffinitySchedulingStrategy(node_id=target_node_id, soft=False)}
-            return self.cls.options(**options).remote(
-                *self.args, cuda_visible_devices=cuda_visible_devices, **local_kwargs
-            )
+            return self.cls.options(**options).remote(*self.args, cuda_visible_devices=cuda_visible_devices, **local_kwargs)
 
         options = {
             "scheduling_strategy": PlacementGroupSchedulingStrategy(
@@ -212,9 +207,7 @@ def _allocate_separated(config: SiiRLArguments) -> dict[str, GPUResources]:
     rollout_gpus = cfg.rollout_gpus
     total_gpus = actor_gpus + rollout_gpus
 
-    logger.info(
-        f"Allocating resources (separated mode): " f"{actor_gpus} GPUs for training, {rollout_gpus} GPUs for rollout"
-    )
+    logger.info(f"Allocating resources (separated mode): " f"{actor_gpus} GPUs for training, {rollout_gpus} GPUs for rollout")
 
     # Determine device type
     device = "GPU" if cfg.device == "cuda" else "NPU"

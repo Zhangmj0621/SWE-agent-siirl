@@ -49,9 +49,7 @@ def register_adv_est(name_or_enum: str | AdvantageEstimator) -> Any:
     def decorator(fn):
         name = name_or_enum.value if isinstance(name_or_enum, Enum) else name_or_enum
         if name in ADV_ESTIMATOR_REGISTRY and ADV_ESTIMATOR_REGISTRY[name] != fn:
-            raise ValueError(
-                f"Adv estimator {name} has already been registered: {ADV_ESTIMATOR_REGISTRY[name]} vs {fn}"
-            )
+            raise ValueError(f"Adv estimator {name} has already been registered: {ADV_ESTIMATOR_REGISTRY[name]} vs {fn}")
         ADV_ESTIMATOR_REGISTRY[name] = fn
         return fn
 
@@ -247,7 +245,7 @@ def compute_advantage(
         TensorDict: The updated data with computed advantages and returns.
     """
     # Back-compatible with trainers that do not compute response mask in fit
-    if "response_mask" not in data.keys():
+    if "response_mask" not in data:
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group
     # TODO: add other ways to estimate advantages

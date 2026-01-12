@@ -24,10 +24,7 @@ import ray
 from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.data_coordinator.sample import Dict2Samples, Sample, SampleInfo, preprocess_dataloader
 from siirl.params.training_args import SiiRLArguments
-from siirl.utils.model_utils.seqlen_balancing import (
-    calculate_workload,
-    get_seqlen_balanced_partitions,
-)
+from siirl.utils.model_utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions
 
 
 @ray.remote(max_concurrency=1, concurrency_groups={"dataloader": 1}, num_cpus=2)
@@ -278,9 +275,7 @@ class DataCoordinator:
             )
 
         # Partition groups across workers
-        group_partitions = get_seqlen_balanced_partitions(
-            workload_lst, k_partitions=k_partitions, equal_size=equal_size
-        )
+        group_partitions = get_seqlen_balanced_partitions(workload_lst, k_partitions=k_partitions, equal_size=equal_size)
 
         # ========== Step 4: Expand groups to samples, keeping group integrity ==========
         reordered_refs = []
@@ -337,9 +332,7 @@ class DataCoordinator:
                 for j, part in enumerate(rearrange_minibatch_lst):
                     global_partition_lst[j].extend([x + minibatch_size * i for x in part])
         else:
-            global_partition_lst = get_seqlen_balanced_partitions(
-                workload_lst, k_partitions=self.world_size, equal_size=True
-            )
+            global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=self.world_size, equal_size=True)
 
         # Place smaller micro-batches at both ends to reduce the bubbles in pipeline parallel.
         for idx, partition in enumerate(global_partition_lst):
@@ -354,9 +347,7 @@ class DataCoordinator:
             for original_idx in partition:
                 reordered_refs.append(batch_items[original_idx][1])
 
-        loguru.logger.debug(
-            f"Applied length balancing: {len(batch_items)} samples reordered into {k_partitions} partitions"
-        )
+        loguru.logger.debug(f"Applied length balancing: {len(batch_items)} samples reordered into {k_partitions} partitions")
 
         return reordered_refs
 

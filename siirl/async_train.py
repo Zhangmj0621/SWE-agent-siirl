@@ -99,13 +99,9 @@ class MainRunner:
         trainer_group = None
 
         try:
-            logger.info(
-                f"Initializing components: {actor_resources.num_gpus} training GPUs, {rollout_resources.num_gpus} rollout GPUs..."
-            )
+            logger.info(f"Initializing components: {actor_resources.num_gpus} training GPUs, {rollout_resources.num_gpus} rollout GPUs...")
 
-            rollout_manager = RolloutManager.remote(
-                config, rollout_resources, data_coordinator, coordinator, metric_worker
-            )
+            rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator, coordinator, metric_worker)
             trainer_group = TrainerGroup(
                 config,
                 actor_resources,
@@ -124,9 +120,7 @@ class MainRunner:
             total_training_steps, batches_per_epoch = ray.get(data_coordinator.epoch_info.remote())
             config.actor_ref.actor.optim.total_training_steps = total_training_steps
             config.critic.optim.total_training_steps = total_training_steps
-            logger.success(
-                f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps"
-            )
+            logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
 
             # Initialize trainer actors (creates Trainer Ray actors with models)
             trainer_group.init_actors()

@@ -24,10 +24,7 @@ from megatron.core import ModelParallelConfig
 from torch import nn
 from transformers import LlamaConfig
 
-from siirl.models.llama.megatron.layers.parallel_attention import (
-    ParallelLlamaAttention,
-    ParallelLlamaAttentionRmPad,
-)
+from siirl.models.llama.megatron.layers.parallel_attention import ParallelLlamaAttention, ParallelLlamaAttentionRmPad
 from siirl.models.llama.megatron.layers.parallel_mlp import ParallelLlamaMLP
 from siirl.models.llama.megatron.layers.parallel_rmsnorm import ParallelLlamaRMSNorm
 from siirl.utils.megatron.megatron_utils import TransformerConfig, convert_config

@@ -83,8 +83,8 @@ class K8sEnv(ContainerEnv):
         self,
         cmd: str,
         cwd: str | None = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
     ) -> ContainerOutput:
         """Execute command and return combined output."""
@@ -95,8 +95,8 @@ class K8sEnv(ContainerEnv):
         cmd: str,
         stdin: BinaryIO | None = None,
         cwd: str | None = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
         check=True,
     ) -> ContainerOutput:
@@ -121,6 +121,10 @@ class K8sEnv(ContainerEnv):
         if self._closed:
             raise RuntimeError("Container environment is closed")
 
+        if env is None:
+            env = {}
+        if forward_env is None:
+            forward_env = []
         merged_env = self._merge_env(env, forward_env)
         shell_cmd = self._build_shell_command(cmd, cwd, merged_env)
         kubectl_args = self._get_kubectl_base_args()
@@ -157,10 +161,10 @@ class K8sEnv(ContainerEnv):
                     process.communicate(input=stdin_data),
                     timeout=timeout,
                 )
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
                 process.kill()
                 await process.wait()
-                raise TimeoutError(f"Command timed out after {timeout}s")
+                raise TimeoutError(f"Command timed out after {timeout}s") from e
 
             returncode = process.returncode if process.returncode is not None else 127
 
@@ -254,9 +258,9 @@ class K8sEnv(ContainerEnv):
 
             self.logger.info("Copy operation completed successfully")
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             self.logger.error("Copy operation timed out")
-            raise TimeoutError("Copy operation timed out after 300s")
+            raise TimeoutError("Copy operation timed out after 300s") from e
         except Exception as e:
             self.logger.error(f"Copy operation failed: {e}")
             raise

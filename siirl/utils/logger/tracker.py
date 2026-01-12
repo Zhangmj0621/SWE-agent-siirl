@@ -106,10 +106,7 @@ class MetricTracker:
             self._init_backend(backend_name)
 
         active_backends = list(self._backends.keys())
-        logger.info(
-            f"MetricTracker initialized: project={project_name}, "
-            f"experiment={experiment_name}, backends={active_backends}"
-        )
+        logger.info(f"MetricTracker initialized: project={project_name}, " f"experiment={experiment_name}, backends={active_backends}")
 
         # Eager initialization: validate all connections immediately
         if eager_init and active_backends:

@@ -422,9 +422,7 @@ class NaiveExecutor:
             await asyncio.sleep(interval)
             current_status = len(self.tasks)
             if last_status != current_status:
-                logger.info(
-                    f"rank_{self._rank} active generate tasks: {current_status}, {len(self.pending_queue)} left in pending_queue"
-                )
+                logger.info(f"rank_{self._rank} active generate tasks: {current_status}, {len(self.pending_queue)} left in pending_queue")
                 last_status = current_status
 
     async def stop(self):

@@ -1,19 +1,13 @@
 import json
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 
 from siirl.engine.actor.megatron_actor import ActorWorker
-from siirl.params.model_args import (
-    ActorArguments,
-    ActorRefArguments,
-    MegatronArguments,
-    ModelArguments,
-    OptimizerArguments,
-)
+from siirl.params.model_args import ActorArguments, ActorRefArguments, MegatronArguments, ModelArguments, OptimizerArguments
 
 # ============================================================================
 # Constants and Configuration

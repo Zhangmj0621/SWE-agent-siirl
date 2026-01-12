@@ -42,16 +42,7 @@ from .metric_utils import (
     extract_rollout_timing_metrics,
 )
 from .metric_worker import MetricClient, MetricWorker
-from .utils import (
-    MaxMetric,
-    MeanMetric,
-    Metric,
-    MetricFunc,
-    MinMetric,
-    StdMetric,
-    StdStats,
-    SumMetric,
-)
+from .utils import MaxMetric, MeanMetric, Metric, MetricFunc, MinMetric, StdMetric, StdStats, SumMetric
 
 __all__ = [
     # Data structures and aggregation functions

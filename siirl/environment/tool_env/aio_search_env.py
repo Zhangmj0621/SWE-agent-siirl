@@ -74,9 +74,7 @@ class AIOSearchEnv(ToolEnv):
                         )
 
                         # need to inform master node that this server has completed a task
-                        master_url = (
-                            f"http://{scheduler_config.PROXY_HOST_IP}:{scheduler_config.PROXY_HOST_PORT}/complete_task"
-                        )
+                        master_url = f"http://{scheduler_config.PROXY_HOST_IP}:{scheduler_config.PROXY_HOST_PORT}/complete_task"
 
                         try:
                             async with session.post(
@@ -89,8 +87,7 @@ class AIOSearchEnv(ToolEnv):
                             ) as complete_resp:
                                 if complete_resp.status != 200:
                                     error_msg = (
-                                        f"Error: Failed to inform master node of task completion. "
-                                        f"Status code: {complete_resp.status}"
+                                        f"Error: Failed to inform master node of task completion. " f"Status code: {complete_resp.status}"
                                     )
                                     print(f"[AIOSearchTool] {error_msg}")
                                     # Decide if you want to return an error here or just log it

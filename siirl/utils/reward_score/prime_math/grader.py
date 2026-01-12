@@ -124,9 +124,7 @@ def normalize(answer, pi) -> str:
         return answer[1:]
 
     # checking if answer is <number>% or <number>\\% and removing %
-    if isinstance(answer, str) and (
-        bool(re.match(r"^\d+(\.\d+)?%$", answer)) or bool(re.match(r"^\d+(\.\d+)?\\%$", answer))
-    ):
+    if isinstance(answer, str) and (bool(re.match(r"^\d+(\.\d+)?%$", answer)) or bool(re.match(r"^\d+(\.\d+)?\\%$", answer))):
         return answer.replace("\\%", "").replace("%", "")
 
     # handle base
@@ -248,10 +246,7 @@ def math_equal(
         pred_parts = prediction[1:-1].split(",")
         ref_parts = reference[1:-1].split(",")
         if len(pred_parts) == len(ref_parts) and all(
-            [
-                math_equal(pred_pt, ref_pt, include_percentage, tolerance)
-                for pred_pt, ref_pt in zip(pred_parts, ref_parts, strict=False)
-            ]
+            [math_equal(pred_pt, ref_pt, include_percentage, tolerance) for pred_pt, ref_pt in zip(pred_parts, ref_parts, strict=False)]
         ):
             return True
 
@@ -260,24 +255,14 @@ def math_equal(
         ref_parts = [item.strip() for item in reference.split(",")]
 
         if len(pred_parts) == len(ref_parts):
-            return bool(
-                all(
-                    [
-                        math_equal(pred_parts[i], ref_parts[i], include_percentage, tolerance)
-                        for i in range(len(pred_parts))
-                    ]
-                )
-            )
+            return bool(all([math_equal(pred_parts[i], ref_parts[i], include_percentage, tolerance) for i in range(len(pred_parts))]))
 
     # if we have point == tuple of values
     if prediction.startswith("Point") and reference[0] == "(" and reference[-1] == ")":
         pred_parts = prediction[prediction.find("(") + 1 : -1].split(",")
         ref_parts = reference[1:-1].split(",")
         if len(pred_parts) == len(ref_parts) and all(
-            [
-                math_equal(pred_pt, ref_pt, include_percentage, tolerance)
-                for pred_pt, ref_pt in zip(pred_parts, ref_parts, strict=False)
-            ]
+            [math_equal(pred_pt, ref_pt, include_percentage, tolerance) for pred_pt, ref_pt in zip(pred_parts, ref_parts, strict=False)]
         ):
             return True
 
@@ -287,10 +272,7 @@ def math_equal(
             pred_matrix = parse_expr(prediction)
             ref_matrix_items = reference.split()[1:-1:2]
             if len(pred_matrix) == len(ref_matrix_items) and all(
-                [
-                    math_equal(pred, ref, include_percentage, tolerance)
-                    for ref, pred in zip(ref_matrix_items, pred_matrix, strict=False)
-                ]
+                [math_equal(pred, ref, include_percentage, tolerance) for ref, pred in zip(ref_matrix_items, pred_matrix, strict=False)]
             ):
                 return True
         except Exception:
@@ -301,18 +283,12 @@ def math_equal(
                 pred_matrix = eval(prediction)
                 # ref_matrix_items = reference.split()[1:-1:2]
                 ref_matrix_items = (
-                    reference.lstrip("\\begin{pmatrix}")
-                    .lstrip(r"\begin{pmatrix}")
-                    .rstrip("\\end{pmatrix}")
-                    .rstrip(r"\end{pmatrix}")
+                    reference.lstrip("\\begin{pmatrix}").lstrip(r"\begin{pmatrix}").rstrip("\\end{pmatrix}").rstrip(r"\end{pmatrix}")
                 )  # noqa: B005
                 ref_matrix_items = ref_matrix_items.split("\\")
                 ref_matrix_items = [row.split("&") if "&" in row else row for row in ref_matrix_items]
                 if len(pred_matrix) == len(ref_matrix_items) and all(
-                    [
-                        math_equal(pred, ref, include_percentage, tolerance)
-                        for ref, pred in zip(ref_matrix_items, pred_matrix, strict=False)
-                    ]
+                    [math_equal(pred, ref, include_percentage, tolerance) for ref, pred in zip(ref_matrix_items, pred_matrix, strict=False)]
                 ):
                     return True
             except Exception:

@@ -77,14 +77,8 @@ def compute_policy_loss_vanilla(
     assert config is not None
 
     clip_ratio = config.clip_ratio
-    clip_ratio_low = (
-        config.clip_ratio_low if hasattr(config, "clip_ratio_low") and config.clip_ratio_low is not None else clip_ratio
-    )
-    clip_ratio_high = (
-        config.clip_ratio_high
-        if hasattr(config, "clip_ratio_high") and config.clip_ratio_high is not None
-        else clip_ratio
-    )
+    clip_ratio_low = config.clip_ratio_low if hasattr(config, "clip_ratio_low") and config.clip_ratio_low is not None else clip_ratio
+    clip_ratio_high = config.clip_ratio_high if hasattr(config, "clip_ratio_high") and config.clip_ratio_high is not None else clip_ratio
     clip_ratio_c = config.clip_ratio_c if hasattr(config, "clip_ratio_c") else 3.0
 
     cliprange = clip_ratio
@@ -92,8 +86,7 @@ def compute_policy_loss_vanilla(
     cliprange_high = clip_ratio_high
 
     assert clip_ratio_c > 1.0, (
-        "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0,"
-        + f" but get the value: {clip_ratio_c}."
+        "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0," + f" but get the value: {clip_ratio_c}."
     )
 
     negative_approx_kl = log_prob - old_log_prob
@@ -110,12 +103,8 @@ def compute_policy_loss_vanilla(
         cliprange_low = cliprange
     if cliprange_high is None:
         cliprange_high = cliprange
-    pg_losses2 = -advantages * torch.clamp(
-        ratio, 1 - cliprange_low, 1 + cliprange_high
-    )  # - clip(ratio, 1-cliprange, 1+cliprange) * A
-    clip_pg_losses1 = torch.maximum(
-        pg_losses1, pg_losses2
-    )  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
+    pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)  # - clip(ratio, 1-cliprange, 1+cliprange) * A
+    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
     pg_clipfrac = masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
 
     # Dual-clip: additional lower bound for negative advantages

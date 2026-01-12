@@ -86,8 +86,8 @@ class Kr8sEnv(ContainerEnv):
         self,
         cmd: str,
         cwd: str | None = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
     ) -> ContainerOutput:
         """Execute command and return combined output.
@@ -201,8 +201,8 @@ class Kr8sEnv(ContainerEnv):
         cmd: str,
         stdin: BinaryIO | None = None,
         cwd: str | None = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
         check: bool = True,
     ) -> ContainerOutput:
@@ -228,6 +228,10 @@ class Kr8sEnv(ContainerEnv):
             raise RuntimeError("Container environment is closed")
 
         # Merge environment variables
+        if env is None:
+            env = {}
+        if forward_env is None:
+            forward_env = []
         merged_env = self._merge_env(env, forward_env)
 
         # Build the shell command
@@ -274,9 +278,9 @@ class Kr8sEnv(ContainerEnv):
 
             return ContainerOutput(output=combined_output, returncode=returncode)
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             logger.error(f"Command execution timed out after {timeout}s: {cmd[:100]}")
-            raise TimeoutError(f"Command timed out after {timeout}s")
+            raise TimeoutError(f"Command timed out after {timeout}s") from e
         except Exception as e:
             logger.error(f"Command execution failed: {e}")
             raise
@@ -317,11 +321,11 @@ class Kr8sEnv(ContainerEnv):
 
             return stdout, stderr, returncode
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             if process is not None:
                 process.kill()
                 await process.wait()
-            raise TimeoutError(f"kubectl command timed out after {timeout}s")
+            raise TimeoutError(f"kubectl command timed out after {timeout}s") from e
 
     async def copy(
         self,

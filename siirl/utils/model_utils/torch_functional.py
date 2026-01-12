@@ -61,9 +61,7 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
 
 def logprobs_from_logits_flash_attn(logits, labels, inplace_backward=True):
     output = cross_entropy_loss(logits, labels, inplace_backward=inplace_backward)
-    assert isinstance(
-        output, tuple
-    ), "please make sure flash-attn>=2.4.3 where cross_entropy_loss returns Tuple[losses, z_losses]."
+    assert isinstance(output, tuple), "please make sure flash-attn>=2.4.3 where cross_entropy_loss returns Tuple[losses, z_losses]."
     return -output[0]
 
 
@@ -247,9 +245,7 @@ def postprocess_data(
             pad_token_id=pad_token_id,
             left_pad=left_pad,
         )
-        attention_mask = pad_sequence_to_length(
-            attention_mask, max_seq_len=max_length, pad_token_id=0, left_pad=left_pad
-        )
+        attention_mask = pad_sequence_to_length(attention_mask, max_seq_len=max_length, pad_token_id=0, left_pad=left_pad)
     elif sequence_length > max_length:
         if truncation == "left":
             # actually, left truncation may not be reasonable
@@ -284,12 +280,8 @@ def prepare_decoder_attention_mask(attention_mask, input_shape, inputs_embeds):
 
     if attention_mask is not None:
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-        expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
-            inputs_embeds.device
-        )
-        combined_attention_mask = (
-            expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
-        )
+        expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(inputs_embeds.device)
+        combined_attention_mask = expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
 
     return combined_attention_mask
 

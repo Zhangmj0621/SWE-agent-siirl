@@ -68,9 +68,7 @@ def aggregate_validation_results(all_payloads: list[Sample]) -> dict[str, float]
         # for key, value in p.extra_rewards.items():
         #     infos_dict[key].append(value)
 
-    data_src2var2metric2val = aggregate_validation_metrics(
-        data_sources=data_sources, sample_inputs=sample_inputs, infos_dict=infos_dict
-    )
+    data_src2var2metric2val = aggregate_validation_metrics(data_sources=data_sources, sample_inputs=sample_inputs, infos_dict=infos_dict)
 
     metric_dict = {}
     for data_source, var2metric2val in data_src2var2metric2val.items():
@@ -81,7 +79,7 @@ def aggregate_validation_results(all_payloads: list[Sample]) -> dict[str, float]
 
             # Robustly parse '@N' to prevent crashes from malformed metric names.
             n_max_values = []
-            for name in metric2val.keys():
+            for name in metric2val:
                 if "@" in name and "/mean" in name:
                     try:
                         n_val = int(name.split("@")[-1].split("/")[0])

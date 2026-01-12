@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import List
 
 from siirl.params.model_args import MultiturnArguments
 

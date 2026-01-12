@@ -123,9 +123,7 @@ class DataArguments:
     num_loader_workers: int = field(default=8, metadata={"help": "DataLoader worker number"})
     force_on_the_fly: bool = field(
         default=False,
-        metadata={
-            "help": "If True, the data will be loaded on-the-fly, which is useful for large datasets that cannot fit into memory."
-        },
+        metadata={"help": "If True, the data will be loaded on-the-fly, which is useful for large datasets that cannot fit into memory."},
     )
 
     def __post_init__(self):

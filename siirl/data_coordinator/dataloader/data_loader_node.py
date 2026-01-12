@@ -187,9 +187,7 @@ class DataLoaderNode:
             sampler = SequentialSampler(data_source=self.train_dataset)
 
         # Create the training dataloader with the specified batch size, workers, sampler, and collator
-        from siirl.data_coordinator.dataloader.partitioned_dataset import (
-            collate_fn as default_collate_fn,
-        )
+        from siirl.data_coordinator.dataloader.partitioned_dataset import collate_fn as default_collate_fn
 
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
@@ -381,6 +379,4 @@ class DataLoaderNode:
             # sampler state. Setting it to None forces the run() method to create a new,
             # valid iterator that is synchronized with the restored state.
             self._current_train_iter = None
-            logger.info(
-                f"(Rank {self.group_rank}): Successfully loaded train_dataloader state. Iterator will be reset on next call."
-            )
+            logger.info(f"(Rank {self.group_rank}): Successfully loaded train_dataloader state. Iterator will be reset on next call.")

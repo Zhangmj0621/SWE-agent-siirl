@@ -10,13 +10,13 @@ from ...base import DummyTokenizer, Model, ModelResponse
 class OpenaiModel(Model):
     def __init__(
         self,
-        api_url=os.getenv("API_URL", "http://localhost:8000"),
-        api_key=os.getenv("API_KEY", None),
-        model_name=os.getenv("API_MODEL_NAME", "GLM-4.6"),
+        api_url: str | None = None,
+        api_key: str | None = None,
+        model_name: str | None = None,
     ):
-        self.api_url = api_url
-        self.api_key = api_key
-        self.model_name = model_name
+        self.api_url = api_url if api_url is not None else os.getenv("API_URL", "http://localhost:8000")
+        self.api_key = api_key if api_key is not None else os.getenv("API_KEY", None)
+        self.model_name = model_name if model_name is not None else os.getenv("API_MODEL_NAME", "GLM-4.6")
         self._tokenizer = DummyTokenizer()
 
     @property

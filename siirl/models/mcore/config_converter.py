@@ -25,8 +25,7 @@ def _get_base_transformer_config(
 
     # Common parallel state parameters
     overlap_p2p_comm = (
-        mpu.get_virtual_pipeline_model_parallel_world_size() is not None
-        and mpu.get_virtual_pipeline_model_parallel_world_size() > 1
+        mpu.get_virtual_pipeline_model_parallel_world_size() is not None and mpu.get_virtual_pipeline_model_parallel_world_size() > 1
     )
     batch_p2p_comm = False
 
@@ -80,7 +79,7 @@ def hf_to_mcore_config_dense(
 ) -> TransformerConfig:
     # for LlamaForCausalLM or Qwen2ForCausalLM
     qkv_bias = True if "Qwen2ForCausalLM" in hf_config.architectures else getattr(hf_config, "attention_bias", False)
-    qk_layernorm = True if "Qwen3ForCausalLM" in hf_config.architectures else False
+    qk_layernorm = "Qwen3ForCausalLM" in hf_config.architectures
 
     args = _get_base_transformer_config(
         hf_config=hf_config,

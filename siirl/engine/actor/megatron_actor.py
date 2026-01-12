@@ -19,12 +19,7 @@ from siirl.algorithm.kl_penalty import kl_penalty
 from siirl.algorithm.loss import agg_loss, compute_value_loss, get_policy_loss_fn
 from siirl.engine.actor.utils import append_to_dict, set_random_seed
 from siirl.params import SiiRLArguments
-from siirl.utils.backend.device import (
-    get_device_id,
-    get_device_name,
-    get_nccl_backend,
-    get_torch_device,
-)
+from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
 from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from siirl.utils.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
@@ -33,10 +28,7 @@ from siirl.utils.megatron.megatron_utils import (
     offload_megatron_optimizer,
 )
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
-from siirl.utils.megatron.tensor_parallel import (
-    vocab_parallel_entropy,
-    vocab_parallel_log_probs_from_logits,
-)
+from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
 from siirl.utils.model_utils.flops_counter import FlopsCounter
 from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
@@ -111,9 +103,7 @@ class ActorWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print(
-                    "mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`"
-                )
+                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
             bridge.set_extra_args(**override_transformer_config)
@@ -133,15 +123,8 @@ class ActorWorker:
         override_transformer_config,
         override_ddp_config,
     ):
-        from siirl.engine.actor.optimizer import (
-            get_megatron_optimizer,
-            get_megatron_optimizer_param_scheduler,
-            init_megatron_optim_config,
-        )
-        from siirl.utils.megatron.megatron_utils import (
-            McoreModuleWrapperConfig,
-            make_megatron_module,
-        )
+        from siirl.engine.actor.optimizer import get_megatron_optimizer, get_megatron_optimizer_param_scheduler, init_megatron_optim_config
+        from siirl.utils.megatron.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
 
         self._init_hf_config_and_tf_config(
             model_path,
@@ -184,9 +167,7 @@ class ActorWorker:
 
         optim_megatron_config = init_megatron_optim_config(optim_config)
         actor_optimizer = get_megatron_optimizer(model=actor_module, config=optim_megatron_config)
-        actor_optimizer_scheduler = get_megatron_optimizer_param_scheduler(
-            optimizer=actor_optimizer, config=optim_config
-        )
+        actor_optimizer_scheduler = get_megatron_optimizer_param_scheduler(optimizer=actor_optimizer, config=optim_config)
 
         return (
             actor_module,
@@ -404,9 +385,7 @@ class ReferenceWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print(
-                    "mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`"
-                )
+                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
             bridge.set_extra_args(**override_transformer_config)
@@ -419,10 +398,7 @@ class ReferenceWorker:
         self.tf_config = tf_config
 
     def _build_ref_model(self, model_path, override_model_config, override_transformer_config):
-        from siirl.utils.megatron.megatron_utils import (
-            McoreModuleWrapperConfig,
-            make_megatron_module,
-        )
+        from siirl.utils.megatron.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
 
         self._init_hf_config_and_tf_config(
             model_path,
@@ -574,9 +550,7 @@ class CriticWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print(
-                    "mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`"
-                )
+                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
             bridge.set_extra_args(**override_transformer_config)
@@ -596,15 +570,8 @@ class CriticWorker:
         override_transformer_config,
         override_ddp_config,
     ):
-        from siirl.engine.actor.optimizer import (
-            get_megatron_optimizer,
-            get_megatron_optimizer_param_scheduler,
-            init_megatron_optim_config,
-        )
-        from siirl.utils.megatron.megatron_utils import (
-            McoreModuleWrapperConfig,
-            make_megatron_module,
-        )
+        from siirl.engine.actor.optimizer import get_megatron_optimizer, get_megatron_optimizer_param_scheduler, init_megatron_optim_config
+        from siirl.utils.megatron.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
 
         self._init_hf_config_and_tf_config(
             model_path,
@@ -647,9 +614,7 @@ class CriticWorker:
 
         optim_config_megatron = init_megatron_optim_config(optim_config)
         critic_optimizer = get_megatron_optimizer(model=critic_module, config=optim_config_megatron)
-        critic_optimizer_scheduler = get_megatron_optimizer_param_scheduler(
-            optimizer=critic_optimizer, config=optim_config
-        )
+        critic_optimizer_scheduler = get_megatron_optimizer_param_scheduler(optimizer=critic_optimizer, config=optim_config)
 
         get_torch_device().empty_cache()
         return (
@@ -1251,8 +1216,8 @@ class MegatronPPOCritic:
         batch = data.select(*select_keys)
         dataloader = batch.split(self.local_ppo_mini_batch_size)
 
-        for epoch in range(self.critic_config.ppo_epochs):
-            for batch_idx, data in enumerate(dataloader):
+        for _ in range(self.critic_config.ppo_epochs):
+            for _, data in enumerate(dataloader):
                 self.critic_optimizer.zero_grad()
                 for chunk in self.critic_module:
                     chunk.zero_grad_buffer()

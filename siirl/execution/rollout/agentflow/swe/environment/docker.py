@@ -59,8 +59,8 @@ class DockerEnv(ContainerEnv):
         self,
         cmd: str,
         cwd: str | None = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
     ) -> ContainerOutput:
         """Execute command and return combined output (not implemented for DockerEnv)."""
@@ -71,14 +71,18 @@ class DockerEnv(ContainerEnv):
         cmd: str,
         stdin: BinaryIO | None = None,
         cwd: str | None = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
         check=True,
     ) -> ContainerOutput:
         if self._closed:
             raise RuntimeError("Container environment is closed")
 
+        if env is None:
+            env = {}
+        if forward_env is None:
+            forward_env = []
         merged_env = self._merge_env(env, forward_env)
         effective_cwd = cwd or self.default_cwd
         docker_args = self._build_docker_exec_args(self.container_id, effective_cwd, merged_env)
@@ -99,10 +103,10 @@ class DockerEnv(ContainerEnv):
                     process.communicate(input=stdin_data),
                     timeout=timeout,
                 )
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
                 process.kill()
                 await process.wait()
-                raise TimeoutError(f"Command timed out after {timeout}s")
+                raise TimeoutError(f"Command timed out after {timeout}s") from e
 
             returncode = process.returncode if process.returncode is not None else 127
 
@@ -192,8 +196,8 @@ class DockerEnv(ContainerEnv):
                 error_msg = stderr.decode("utf-8", errors="replace").strip()
                 raise Exception(f"docker cp failed (exit code {returncode}): {error_msg}")
 
-        except asyncio.TimeoutError:
-            raise TimeoutError("Copy operation timed out after 180s")
+        except asyncio.TimeoutError as e:
+            raise TimeoutError("Copy operation timed out after 180s") from e
 
     async def cleanup(self):
         if self._closed:
@@ -249,9 +253,7 @@ class DockerEnvBuilder(ContainerEnvBuilder):
             if "cpus" in args.resource_limits:
                 build_args.extend(["--cpus", str(args.resource_limits["cpus"])])
 
-        logger.debug(
-            f"[DockerEnvBuilder] Building Docker image {args.tag} from {args.build_dir} with Dockerfile {dockerfile_path}"
-        )
+        logger.debug(f"[DockerEnvBuilder] Building Docker image {args.tag} from {args.build_dir} with Dockerfile {dockerfile_path}")
 
         timeout = args.timeout if args.timeout > 0 else None
 
@@ -266,9 +268,7 @@ class DockerEnvBuilder(ContainerEnvBuilder):
             returncode = process.returncode if process.returncode is not None else 127
 
             if returncode != 0:
-                raise Exception(
-                    f"Docker build failed (exit code {returncode}): {stdout.decode(errors='replace')[:200]}"
-                )
+                raise Exception(f"Docker build failed (exit code {returncode}): {stdout.decode(errors='replace')[:200]}")
 
             # Optionally push the image
             if args.push:
@@ -283,15 +283,13 @@ class DockerEnvBuilder(ContainerEnvBuilder):
                 push_stdout, _ = await asyncio.wait_for(push_process.communicate(), timeout=timeout)
                 push_returncode = push_process.returncode if push_process.returncode is not None else 127
                 if push_returncode != 0:
-                    raise Exception(
-                        f"Docker push failed (exit code {push_returncode}): {push_stdout.decode(errors='replace')[:200]}"
-                    )
+                    raise Exception(f"Docker push failed (exit code {push_returncode}): {push_stdout.decode(errors='replace')[:200]}")
                 return {"output": stdout + push_stdout, "returncode": 0, "pushed": True}
             else:
                 return {"output": stdout, "returncode": 0, "pushed": False}
 
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Docker build timed out after {timeout}s")
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(f"Docker build timed out after {timeout}s") from e
 
     async def start(self, args: ContainerStartArgs) -> DockerEnv:
         # Generate unique container name

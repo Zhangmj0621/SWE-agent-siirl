@@ -207,7 +207,7 @@ class TensorDictLoader:
 def compare_matrix(current, reference, keywords=None):
     if keywords is None:
         keywords = ["metrics"]
-    if not isinstance(keywords, (list, tuple)):
+    if not isinstance(keywords, list | tuple):
         keywords = [keywords]
 
     for keyword in keywords:
@@ -278,12 +278,10 @@ def check_precision(name, current, reference, rtol=1e-5, atol=1e-8) -> bool:
         return True
 
     # 3. 标量比较 (int/float)
-    elif isinstance(current, (int, float)):
+    elif isinstance(current, int | float):
         if not math.isclose(current, reference, rel_tol=rtol, abs_tol=atol):
             diff = abs(current - reference)
-            logger.warning(
-                f"❌ Rank {rank} [{name}] Scalar mismatch: cur {current} vs ref {reference}, diff {diff:.6f}"
-            )
+            logger.warning(f"❌ Rank {rank} [{name}] Scalar mismatch: cur {current} vs ref {reference}, diff {diff:.6f}")
             return False
 
         logger.info(f"✅ Rank {rank} [{name}] Scalar match")

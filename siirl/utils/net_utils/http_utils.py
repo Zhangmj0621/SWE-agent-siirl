@@ -54,9 +54,7 @@ def wait_until_ok(
     while time.monotonic() < deadline:
         # Check if server process is still alive
         if process and not process.is_alive():
-            raise RuntimeError(
-                f"Server process terminated unexpectedly. Process: {process}, Alive status: {process.is_alive()}"
-            )
+            raise RuntimeError(f"Server process terminated unexpectedly. Process: {process}, Alive status: {process.is_alive()}")
         try:
             # Send health check request
             if requests.get(url, timeout=timeout, headers=extra_headers or {}).status_code == 200:
@@ -178,9 +176,7 @@ class GlobalAsyncHTTPClient:
             # Exponential backoff for retries
             if attempt < use_max_attempts - 1:
                 sleep_time = use_retry_delay * (2**attempt)
-                logger.debug(
-                    f"Retrying request to {url} in {sleep_time:.2f} seconds (attempt {attempt_num + 1}/{use_max_attempts})"
-                )
+                logger.debug(f"Retrying request to {url} in {sleep_time:.2f} seconds (attempt {attempt_num + 1}/{use_max_attempts})")
                 await asyncio.sleep(sleep_time)
 
         # All retry attempts failed

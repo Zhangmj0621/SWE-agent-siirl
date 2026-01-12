@@ -144,9 +144,7 @@ def compute_data_metric(data: TensorDict) -> dict[str, float]:
             # Compute explained variance if returns are also available
             if "returns" in data:
                 valid_returns = (
-                    torch.masked_select(data["returns"], response_mask)
-                    if "response_mask" in data
-                    else data["returns"].flatten()
+                    torch.masked_select(data["returns"], response_mask) if "response_mask" in data else data["returns"].flatten()
                 )
                 if valid_returns.numel() > 0:
                     return_diff_var = torch.var(valid_returns - valid_values)
@@ -167,9 +165,7 @@ def compute_data_metric(data: TensorDict) -> dict[str, float]:
             metrics["response/length/mean"] = torch.mean(response_length).detach().item()
             metrics["response/length/max"] = torch.max(response_length).detach().item()
             metrics["response/length/min"] = torch.min(response_length).detach().item()
-            metrics["response/clip_ratio/mean"] = (
-                torch.mean(torch.eq(response_length, max_response_length).float()).detach().item()
-            )
+            metrics["response/clip_ratio/mean"] = torch.mean(torch.eq(response_length, max_response_length).float()).detach().item()
 
             metrics["prompt/length/mean"] = torch.mean(prompt_length).detach().item()
             metrics["prompt/length/max"] = torch.max(prompt_length).detach().item()
@@ -254,9 +250,7 @@ def compute_throughput_metrics(batch: TensorDict, timing_raw: dict[str, float], 
         global_token_num = batch["global_token_num"]
         if hasattr(global_token_num, "data"):
             # NonTensorData wrapper
-            total_num_tokens = (
-                sum(global_token_num.data) if isinstance(global_token_num.data, list) else global_token_num.data
-            )
+            total_num_tokens = sum(global_token_num.data) if isinstance(global_token_num.data, list) else global_token_num.data
         elif isinstance(global_token_num, list):
             total_num_tokens = sum(global_token_num)
         else:
@@ -399,9 +393,7 @@ def extract_rollout_timing_metrics(data: TensorDict) -> dict[str, Any]:
 
 
 # validate metrics, inherited from siirl
-def _calculate_bootstrap_metrics(
-    group: pd.DataFrame, variable_name: str, subset_size: int, n_bootstrap: int = 1000
-) -> dict[str, Any]:
+def _calculate_bootstrap_metrics(group: pd.DataFrame, variable_name: str, subset_size: int, n_bootstrap: int = 1000) -> dict[str, Any]:
     """Performs fully vectorized bootstrap sampling to estimate statistics.
 
     This is the core computational engine. It avoids all Python loops by using

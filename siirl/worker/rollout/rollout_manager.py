@@ -256,10 +256,7 @@ class RolloutManager:
                     # First actor in TP group: generate and cache dist_init_addr
                     dist_init_addr = ray.get(self.worker_handle[worker_idx].get_ip_port.remote())
                     self._dist_init_addrs[tp_group_idx] = dist_init_addr
-                    logger.info(
-                        f"TP Group {tp_group_idx}: Cross-node TP with {nnodes} nodes, "
-                        f"dist_init_addr={dist_init_addr}"
-                    )
+                    logger.info(f"TP Group {tp_group_idx}: Cross-node TP with {nnodes} nodes, " f"dist_init_addr={dist_init_addr}")
                 else:
                     # Other actors in TP group: use cached dist_init_addr
                     dist_init_addr = self._dist_init_addrs[tp_group_idx]
@@ -367,9 +364,7 @@ class RolloutManager:
         for worker_idx in range(self.num_workers):
             if worker_idx % self.rollout_per_tp_group == 0:
                 futures.append(
-                    self.worker_handle[worker_idx].start_rollout.remote(
-                        self.router_address, self.data_coordinator, self.dp_size
-                    )
+                    self.worker_handle[worker_idx].start_rollout.remote(self.router_address, self.data_coordinator, self.dp_size)
                 )
         ray.get(futures)
 
@@ -435,9 +430,7 @@ class RolloutManager:
                     await self.validate(val_num_batch, dp_val_batch)
                     val_before_train = False
                 self.global_steps += 1
-                if self.config.trainer.test_freq > 0 and (
-                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
-                ):
+                if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     await self.validate(val_num_batch, dp_val_batch)
                 logger.info(f"Start Rollout Step {self.global_steps}")
                 await self.data_coordinator.run_dataloader.remote(epoch)
@@ -456,10 +449,7 @@ class RolloutManager:
             await self.data_coordinator.run_dataloader.remote(is_validate=True)
         logger.info("Starting validate rollout...")
         rollout_workers = self.get_rollout_worker_on_tp0()
-        futures = [
-            rollout_worker.validate.remote(val_batch_size * val_num_batch, self.global_steps)
-            for rollout_worker in rollout_workers
-        ]
+        futures = [rollout_worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for rollout_worker in rollout_workers]
         await asyncio.gather(*futures)
         val_metrics = await self.metric_worker.wait_final_res.remote()
         logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")

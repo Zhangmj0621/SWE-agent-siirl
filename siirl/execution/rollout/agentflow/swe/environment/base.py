@@ -133,8 +133,8 @@ class ContainerEnv(ABC):
         self,
         cmd: str,
         cwd: str | None = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
     ) -> ContainerOutput:
         """TODO: design a Popen class like interface, that supports async interaction with
@@ -148,8 +148,8 @@ class ContainerEnv(ABC):
         cmd: str,
         stdin: BinaryIO | None = None,
         cwd: str | None = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
         check: bool = True,
     ) -> ContainerOutput:
@@ -159,8 +159,8 @@ class ContainerEnv(ABC):
             cmd: The command to execute.
             stdin: The stdin put to command. Defaults to None.
             cwd: Working directory in which to execute the command. Defaults to None.
-            env: Environment variables to set for the command. Defaults to {}.
-            forward_env: Environment variables to forward from the host. Defaults to [].
+            env: Environment variables to set for the command. Defaults to None.
+            forward_env: Environment variables to forward from the host. Defaults to None.
             timeout: Maximum time in seconds to wait for command completion. Defaults to 180.0.
             check: Raise on non-0 return code if set to True. Defaults to True.
 

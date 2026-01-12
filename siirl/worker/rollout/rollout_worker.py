@@ -177,11 +177,7 @@ class RolloutWorker:
         samples, val_time_metrics = await self.executor.validate(val_batch_size)
         validate_samples = []
         for sample in samples:
-            if (
-                sample.extra_info
-                and isinstance(sample.extra_info, dict)
-                and sample.extra_info.get("padded_duplicate", None)
-            ):
+            if sample.extra_info and isinstance(sample.extra_info, dict) and sample.extra_info.get("padded_duplicate", None):
                 continue
             validate_samples.append(sample)
         val_metrics = aggregate_and_log_validation_metrics(validate_samples)
@@ -217,9 +213,7 @@ class RolloutWorker:
         return get_free_port(host)
 
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
-        return self.engine.init_param_sync_group(
-            master_address, master_port, rank_offset, world_size, group_name, backend
-        )
+        return self.engine.init_param_sync_group(master_address, master_port, rank_offset, world_size, group_name, backend)
 
     def param_sync_from_distributed(
         self,

@@ -286,15 +286,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             global_step: Current global step (used in path).
         """
         if self.arch is None:
-            logger.warning(
-                "Cannot save HF model: 'arch' not specified. " "Set arch parameter to enable HF model saving."
-            )
+            logger.warning("Cannot save HF model: 'arch' not specified. " "Set arch parameter to enable HF model saving.")
             return
 
         if self.hf_config is None:
-            logger.warning(
-                "Cannot save HF model: 'hf_config' not specified. " "Set hf_config parameter to enable HF model saving."
-            )
+            logger.warning("Cannot save HF model: 'hf_config' not specified. " "Set hf_config parameter to enable HF model saving.")
             return
 
         try:

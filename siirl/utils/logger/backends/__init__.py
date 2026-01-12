@@ -28,8 +28,6 @@ Usage:
     BackendRegistry.register("custom", MyCustomBackend)
 """
 
-from typing import Dict, Type
-
 from .base import BackendConfig, LoggerBackend
 
 

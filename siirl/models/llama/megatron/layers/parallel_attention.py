@@ -117,9 +117,9 @@ class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
         self.max_seq_len_cached = seq_len
 
         if seq_len > self.max_position_embeddings:
-            base = self.base * (
-                (self.scaling_factor * seq_len / self.max_position_embeddings) - (self.scaling_factor - 1)
-            ) ** (self.dim / (self.dim - 2))
+            base = self.base * ((self.scaling_factor * seq_len / self.max_position_embeddings) - (self.scaling_factor - 1)) ** (
+                self.dim / (self.dim - 2)
+            )
             inv_freq = 1.0 / (base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim))
             self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -139,9 +139,7 @@ class LlamaLlama3ScalingRotaryEmbedding(LlamaRotaryEmbedding):
         self.factor = config.rope_scaling["factor"]  # `8` in the original implementation
         self.high_freq_factor = config.rope_scaling["high_freq_factor"]  # `1` in the original implementation
         self.low_freq_factor = config.rope_scaling["low_freq_factor"]  # `4` in the original implementation
-        self.old_context_len = config.rope_scaling[
-            "original_max_position_embeddings"
-        ]  # `8192` in the original implementation
+        self.old_context_len = config.rope_scaling["original_max_position_embeddings"]  # `8192` in the original implementation
 
         low_freq_wavelen = self.old_context_len / self.low_freq_factor
         high_freq_wavelen = self.old_context_len / self.high_freq_factor
@@ -150,9 +148,7 @@ class LlamaLlama3ScalingRotaryEmbedding(LlamaRotaryEmbedding):
         # wavelen < high_freq_wavelen: do nothing; wavelen > low_freq_wavelen: divide by factor
         inv_freq_llama = torch.where(wavelen > low_freq_wavelen, self.inv_freq / self.factor, self.inv_freq)
         # otherwise: interpolate between the two, using a smooth factor
-        smooth_factor = (self.old_context_len / wavelen - self.low_freq_factor) / (
-            self.high_freq_factor - self.low_freq_factor
-        )
+        smooth_factor = (self.old_context_len / wavelen - self.low_freq_factor) / (self.high_freq_factor - self.low_freq_factor)
         smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama / self.factor + smooth_factor * inv_freq_llama
         is_medium_freq = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
         inv_freq = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
@@ -211,9 +207,7 @@ class ParallelLlamaAttention(nn.Module):
 
         # assign values after tp
         tp_size = mpu.get_tensor_model_parallel_world_size()
-        assert (
-            self.num_heads % tp_size == 0
-        ), f"num_head must be divisible by tp_size. Got num_head={self.num_heads}, tp_size={tp_size}"
+        assert self.num_heads % tp_size == 0, f"num_head must be divisible by tp_size. Got num_head={self.num_heads}, tp_size={tp_size}"
         assert (
             self.num_key_value_heads % tp_size == 0
         ), f"num_key_value_heads must be divisible by tp_size. Got num_key_value_heads={self.num_key_value_heads}, tp_size={tp_size}"
@@ -331,9 +325,7 @@ class ParallelLlamaAttention(nn.Module):
 
         if attention_mask is not None:
             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
+                raise ValueError(f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}")
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
@@ -419,9 +411,7 @@ class ParallelLlamaAttentionRmPad(ParallelLlamaAttention):
             total_nnz = total_nnz * mpu.get_tensor_model_parallel_world_size()
 
         qkv = self.qkv_proj(hidden_states)[0]
-        query_states, key_states, value_states = qkv.split(
-            [self.q_size, self.k_size, self.v_size], dim=-1
-        )  # (total_nnz, 1, hidden_size)
+        query_states, key_states, value_states = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)  # (total_nnz, 1, hidden_size)
 
         if self.megatron_config.sequence_parallel:
             sequence_parallel_pad = total_nnz - cu_seqlens[-1]

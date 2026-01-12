@@ -119,8 +119,7 @@ class GptOssToolParser(ToolParser):
         # <|start|>assistant may be pre-appended in prompts, so we need to remove it.
         self.partial_cot_pattern = regex.compile(r"<\|channel\|>analysis<\|message\|>(.*?)<\|end\|>", regex.DOTALL)
         self.tool_call_pattern = regex.compile(
-            r"<\|start\|>assistant<\|channel\|>[^<]* to=functions\.([^<]+) "
-            r"<\|constrain\|>json<\|message\|>(.*?)<\|call\|>",
+            r"<\|start\|>assistant<\|channel\|>[^<]* to=functions\.([^<]+) " r"<\|constrain\|>json<\|message\|>(.*?)<\|call\|>",
             regex.DOTALL,
         )
 

@@ -28,9 +28,7 @@ class CustomRewardArguments:
         default="reward_function",
         metadata={"help": "Function name in the custom reward file"},
     )
-    reward_kwargs: dict[str, Any] = field(
-        default_factory=dict, metadata={"help": "Keyword arguments for reward function"}
-    )
+    reward_kwargs: dict[str, Any] = field(default_factory=dict, metadata={"help": "Keyword arguments for reward function"})
 
 
 @dataclass

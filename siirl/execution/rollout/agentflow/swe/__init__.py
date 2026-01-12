@@ -53,7 +53,7 @@ def agentflow(config: dict, model: Model) -> AgentFlow:
             instance = cls(subconf)
             instances.append(instance)
         except Exception as e:
-            raise ImportError(f"Fail to initialize SWE agentflow {name} builder", e)
+            raise ImportError(f"Fail to initialize SWE agentflow {name} builder: {e}") from e
 
     return SWEAgentFlow(*instances, model=model)
 

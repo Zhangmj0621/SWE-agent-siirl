@@ -98,9 +98,7 @@ def _ensure_builtin_savers_registered() -> None:
         return
 
     try:
-        from siirl.models.llama.megatron.checkpoint_utils.llama_saver import (
-            merge_megatron_ckpt_llama,
-        )
+        from siirl.models.llama.megatron.checkpoint_utils.llama_saver import merge_megatron_ckpt_llama
 
         # Register Llama-based architectures
         # Llama and Qwen2 use the same saver since they have similar architectures

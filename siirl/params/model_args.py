@@ -28,9 +28,7 @@ class MegatronArguments:
     param_offload: bool = field(default=False, metadata={"help": "Offload parameters to CPU"})
     grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
-    override_transformer_config: dict[str, Any] = field(
-        default_factory=dict, metadata={"help": "Override transformer config"}
-    )
+    override_transformer_config: dict[str, Any] = field(default_factory=dict, metadata={"help": "Override transformer config"})
     override_ddp_config: dict[str, Any] = field(default_factory=dict, metadata={"help": "Override ddp config"})
     use_mbridge: bool = field(default=True, metadata={"help": "Whether to use mbridge"})
 
@@ -177,9 +175,7 @@ class RolloutArguments:
     calculate_log_probs: bool = field(default=True, metadata={"help": "Whether rollout calculate log probs"})
     multi_stage_wake_up: bool = field(
         default=False,
-        metadata={
-            "help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"
-        },
+        metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"},
     )
     router_ip: str = field(default=None, metadata={"help": "Rollout Router IP"})
     router_port: str = field(default=None, metadata={"help": "Rollout Router Port"})
@@ -199,9 +195,7 @@ class RolloutArguments:
 class RefArguments:
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     log_prob_micro_batch_size: int | None = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
-    log_prob_micro_batch_size_per_gpu: int | None = field(
-        default=None, metadata={"help": "Per-GPU log prob batch size"}
-    )
+    log_prob_micro_batch_size_per_gpu: int | None = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
     ppo_micro_batch_size_per_gpu: int | None = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     param_offload: bool = field(default=False, metadata={"help": "Enable param offload or not"})

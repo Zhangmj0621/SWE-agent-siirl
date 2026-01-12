@@ -20,15 +20,7 @@ from .config_converter import (
     hf_to_mcore_config_qwen3moe,
 )
 from .model_forward import gptmodel_forward
-from .model_initializer import (
-    BaseModelInitializer,
-    DeepseekV3Model,
-    DenseModel,
-    MixtralModel,
-    Qwen2MoEModel,
-    Qwen3MoEModel,
-    Qwen25VLModel,
-)
+from .model_initializer import BaseModelInitializer, DeepseekV3Model, DenseModel, MixtralModel, Qwen2MoEModel, Qwen3MoEModel, Qwen25VLModel
 
 
 class SupportedModel(Enum):
@@ -89,9 +81,7 @@ def get_supported_model(model_type: str) -> SupportedModel:
         return SupportedModel(model_type)
     except ValueError as err:
         supported_models = [e.value for e in SupportedModel]
-        raise NotImplementedError(
-            f"Model Type: {model_type} not supported. Supported models: {supported_models}"
-        ) from err
+        raise NotImplementedError(f"Model Type: {model_type} not supported. Supported models: {supported_models}") from err
 
 
 def hf_to_mcore_config(

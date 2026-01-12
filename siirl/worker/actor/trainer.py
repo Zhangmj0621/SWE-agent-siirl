@@ -488,7 +488,7 @@ class Trainer:
                 # Note: metrics from megatron_actor.py already have proper prefixes (e.g. "actor/pg_loss", "perf/mfu/actor")
                 # so we just merge them directly without adding another prefix
                 flat_metrics = {}
-                for prefix, result_dict in metrics.items():
+                for _, result_dict in metrics.items():
                     if isinstance(result_dict, dict):
                         flat_metrics.update(result_dict)
                 if flat_metrics:

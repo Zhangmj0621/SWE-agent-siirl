@@ -119,9 +119,7 @@ class PartitionedRLHFDataset(Dataset):
         self.return_raw_chat = self.data_args.return_raw_chat
         self.filter_overlong_prompts = self.data_args.filter_overlong_prompts
         self.num_workers = (
-            self.data_args.preprocessing_num_workers
-            if self.data_args.preprocessing_num_workers
-            else max(1, os.cpu_count() // 8)
+            self.data_args.preprocessing_num_workers if self.data_args.preprocessing_num_workers else max(1, os.cpu_count() // 8)
         )
         self.force_on_the_fly = config.data.force_on_the_fly
         # self.image_max_pixels = self.data_args.processor.image_max_pixels
@@ -137,9 +135,7 @@ class PartitionedRLHFDataset(Dataset):
         self.video_fps = None
         self.video_maxlen = None
 
-        self.is_trailing_rank = (
-            False  # Indicates trailing ranks that received one less data item in round-robin partitioning.
-        )
+        self.is_trailing_rank = False  # Indicates trailing ranks that received one less data item in round-robin partitioning.
 
         if self._rank == 0:
             logger.debug(
@@ -272,9 +268,7 @@ class PartitionedRLHFDataset(Dataset):
                     self.is_trailing_rank = True  # There is one less sample compared to the previous ranks.
 
             if start >= end:
-                raise RuntimeError(
-                    f"Rank {self.ddp_rank} assigned empty partition: start={start}, end={end}, total_rows={total_rows}"
-                )
+                raise RuntimeError(f"Rank {self.ddp_rank} assigned empty partition: start={start}, end={end}, total_rows={total_rows}")
 
             # Find which row groups overlap with [start, end)
             selected_chunks = []
@@ -305,9 +299,7 @@ class PartitionedRLHFDataset(Dataset):
                 tables.append(table)
 
             if not tables:
-                raise RuntimeError(
-                    f"DDP Rank {self.ddp_rank} assigned rows [{start}, {end}) but failed to read any data."
-                )
+                raise RuntimeError(f"DDP Rank {self.ddp_rank} assigned rows [{start}, {end}) but failed to read any data.")
 
             final_table = pa.concat_tables(tables)
             logger.debug(
@@ -317,9 +309,7 @@ class PartitionedRLHFDataset(Dataset):
             return datasets.Dataset(final_table)
 
         except Exception as e:
-            logger.error(
-                f"Failed during partitioned data loading for DDP rank {self.ddp_rank}: {dataset_files}. Error: {e}"
-            )
+            logger.error(f"Failed during partitioned data loading for DDP rank {self.ddp_rank}: {dataset_files}. Error: {e}")
             raise
 
     def _filter_overlong_prompts(self, raw_dataframe: datasets.Dataset) -> datasets.Dataset:
@@ -379,10 +369,7 @@ class PartitionedRLHFDataset(Dataset):
             multi_modal_data = {}
             images = None
             if self.image_key in processed_row:
-                images = [
-                    process_image(image, self.image_max_pixels, self.image_min_pixels)
-                    for image in processed_row.pop(self.image_key)
-                ]
+                images = [process_image(image, self.image_max_pixels, self.image_min_pixels) for image in processed_row.pop(self.image_key)]
                 multi_modal_data["image"] = images
             videos = None
             if self.video_key in processed_row:
@@ -474,8 +461,4 @@ class PartitionedRLHFDataset(Dataset):
         """
         if self.processed_dataframe is None:
             raise IndexError("Dataset is empty or not initialized properly.")
-        return (
-            self.processed_dataframe[item]
-            if not self.load_on_the_fly
-            else self._preprocess_function(self.processed_dataframe[item])
-        )
+        return self.processed_dataframe[item] if not self.load_on_the_fly else self._preprocess_function(self.processed_dataframe[item])

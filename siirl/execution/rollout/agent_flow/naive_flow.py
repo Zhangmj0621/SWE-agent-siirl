@@ -22,12 +22,7 @@ from loguru import logger
 from siirl.data_coordinator.sample import Sample
 from siirl.environment import EnvResponse, initialize_env
 from siirl.environment.tool_env.utils.tool_parser import FunctionCall, ToolParser
-from siirl.execution.rollout.utils import (
-    AgentData,
-    AgentState,
-    add_generation_prompt_for_gpt_oss,
-    format_gpt_oss_tool_response_manually,
-)
+from siirl.execution.rollout.utils import AgentData, AgentState, add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually
 from siirl.params import SiiRLArguments
 from siirl.utils.reward_score import default_compute_score
 
@@ -177,9 +172,7 @@ class NaiveFlow:
         else:
             response_ids = await loop.run_in_executor(
                 None,
-                lambda: self.engine.tokenizer.apply_chat_template(
-                    env_messages, add_generation_prompt=True, tokenize=True
-                ),
+                lambda: self.engine.tokenizer.apply_chat_template(env_messages, add_generation_prompt=True, tokenize=True),
             )
             response_ids = response_ids[len(self.system_prompt) :]
         if len(agent_data.response_mask) + len(response_ids) >= self.max_response_length:

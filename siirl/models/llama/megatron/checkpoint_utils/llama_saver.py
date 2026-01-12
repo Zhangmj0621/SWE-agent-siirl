@@ -56,9 +56,7 @@ def _megatron_calc_layer_map(config):
 
     for pp_rank_idx in range(pp_size):
         for virtual_pp_rank_idx in range(virtual_pp_size):
-            layer_offset = (
-                virtual_pp_rank_idx * (config.num_hidden_layers // virtual_pp_size) + pp_rank_idx * num_layers_per_model
-            )
+            layer_offset = virtual_pp_rank_idx * (config.num_hidden_layers // virtual_pp_size) + pp_rank_idx * num_layers_per_model
             for layer_idx in range(num_layers_per_model):
                 layer_map[layer_offset + layer_idx] = (
                     pp_rank_idx,
@@ -99,7 +97,7 @@ def merge_megatron_ckpt_llama(wrapped_models, config, dtype, is_value_model=Fals
         assert pp_rank == 0, f"pp_rank:[{pp_rank}] != 0 on rank #0"
         assert dp_rank == 0, f"dp_rank:[{dp_rank}] != 0 on rank #0"
 
-    if not isinstance(wrapped_models, (list, tuple)):
+    if not isinstance(wrapped_models, list | tuple):
         wrapped_models = list(wrapped_models)
 
     assert len(wrapped_models) == virtual_pp_size
@@ -112,9 +110,7 @@ def merge_megatron_ckpt_llama(wrapped_models, config, dtype, is_value_model=Fals
         models[i] = unwrap_model(wrapped_model, (torchDDP, LocalDDP, Float16Module))
         assert (
             len(models[i].model.layers) == num_layers_per_model
-        ), "len model layers {} not equal to num_layers_per_model {}".format(
-            len(models[i].model.layers), num_layers_per_model
-        )
+        ), f"len model layers {len(models[i].model.layers)} not equal to num_layers_per_model {num_layers_per_model}"
 
     state_dict = dict()
 

@@ -131,7 +131,7 @@ class SWEBenchBuiler(RuntimeBuilder):
     def parse_sampledata(self, sample: dict) -> SWESampleData:
         s = cast(SWEbenchInstance, sample)
         spec = make_test_spec(s)
-        spec.install_repo_script
+        _ = spec.install_repo_script  # Trigger property initialization
         image = get_swebench_docker_image_name(s["instance_id"])
         image = map_image_to_acr(image)
         # TODO: use prebuilt image by now

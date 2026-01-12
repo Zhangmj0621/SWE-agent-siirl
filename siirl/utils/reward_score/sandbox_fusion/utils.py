@@ -145,9 +145,7 @@ def call_sandbox_api(
             response.raise_for_status()
 
             # If successful (status code 2xx)
-            logger.info(
-                f"{log_prefix}Sandbox API call successful on attempt {attempt + 1}"
-            )  # <-- Use internal log_prefix
+            logger.info(f"{log_prefix}Sandbox API call successful on attempt {attempt + 1}")  # <-- Use internal log_prefix
             return response.json(), None
 
         except requests.exceptions.RequestException as e:
@@ -165,9 +163,7 @@ def call_sandbox_api(
     logger.error(f"{log_prefix}Sandbox API call failed. Last error: {last_error}")  # <-- Use internal log_prefix
     # Return the error message without the prefix, as the caller doesn't need the internal ID
     # Ensure API call failure returns error message, leading to -1 in check_correctness
-    return None, (
-        last_error.replace(log_prefix, "API Call Failed: ") if last_error else "API Call Failed after retries"
-    )
+    return None, (last_error.replace(log_prefix, "API Call Failed: ") if last_error else "API Call Failed after retries")
 
 
 def _process_single_case(
@@ -542,9 +538,7 @@ def check_correctness(
 
     # Post-processing for compile errors
     if first_compile_error_index != -1:
-        logger.warning(
-            f"Compile error detected in case {first_compile_error_index}. Marking subsequent cases as compile errors."
-        )
+        logger.warning(f"Compile error detected in case {first_compile_error_index}. Marking subsequent cases as compile errors.")
         for i in range(first_compile_error_index + 1, num_cases):
             # Only update if not already processed (though it should be None or have a result)
             if results[i] != -4:  # Avoid overwriting if it somehow already got -4

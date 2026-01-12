@@ -53,13 +53,8 @@ def get_model(
 ):
     """Build the model."""
     # Build model.
-    if (
-        mpu.get_pipeline_model_parallel_world_size() > 1
-        and mpu.get_virtual_pipeline_model_parallel_world_size() is not None
-    ):
-        assert (
-            model_type != ModelType.encoder_and_decoder
-        ), "Interleaved schedule not supported for model with both encoder and decoder"
+    if mpu.get_pipeline_model_parallel_world_size() > 1 and mpu.get_virtual_pipeline_model_parallel_world_size() is not None:
+        assert model_type != ModelType.encoder_and_decoder, "Interleaved schedule not supported for model with both encoder and decoder"
         model = []
         has_vp_stage = inspect.signature(mpu.is_pipeline_first_stage).parameters.get("vp_stage", None) is not None
         for i in range(mpu.get_virtual_pipeline_model_parallel_world_size()):
@@ -112,14 +107,10 @@ def get_model(
 
     # Print number of parameters.
     if mpu.get_data_parallel_rank() == 0:
-        print(
-            " > number of parameters on (tensor, pipeline) model parallel rank ({}, {}): {}".format(
-                mpu.get_tensor_model_parallel_rank(),
-                mpu.get_pipeline_model_parallel_rank(),
-                sum([sum([p.nelement() for p in model_module.parameters()]) for model_module in model]),
-            ),
-            flush=True,
-        )
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        pp_rank = mpu.get_pipeline_model_parallel_rank()
+        num_params = sum([sum([p.nelement() for p in model_module.parameters()]) for model_module in model])
+        print(f" > number of parameters on (tensor, pipeline) model parallel rank ({tp_rank}, {pp_rank}): {num_params}", flush=True)
 
     # GPU allocation.
     if transformer_config is None or (not transformer_config.use_cpu_initialization):
@@ -242,8 +233,7 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
     print(f"pipeline_dtype=megatron_config {dt}")
     qkv_bias = True if "Qwen2ForCausalLM" in hf_config.architectures else getattr(hf_config, "attention_bias", False)
     overlap_p2p_comm = (
-        mpu.get_virtual_pipeline_model_parallel_world_size() is not None
-        and mpu.get_virtual_pipeline_model_parallel_world_size() > 1
+        mpu.get_virtual_pipeline_model_parallel_world_size() is not None and mpu.get_virtual_pipeline_model_parallel_world_size() > 1
     )
     batch_p2p_comm = False
     transformer_config = TransformerConfig(
@@ -585,9 +575,7 @@ def default_tp_concat_fn(
         kv_size_per_tp = infer_params[0].shape[0] // (num_q_per_kv + 2)
         split_size = [kv_size_per_tp * num_q_per_kv, kv_size_per_tp, kv_size_per_tp]
         for infer_param in infer_params:
-            num_query_groups_per_partition = (
-                model_config.num_key_value_heads // mpu.get_tensor_model_parallel_world_size()
-            )
+            num_query_groups_per_partition = model_config.num_key_value_heads // mpu.get_tensor_model_parallel_world_size()
             for chunk in infer_param.chunk(num_query_groups_per_partition):
                 split_size = [
                     kv_size_per_tp * num_q_per_kv // num_query_groups_per_partition,
@@ -655,7 +643,7 @@ def per_tensor_generator(
             # there is a bug in megatron GPTModel
             # decoder.layers[n].mlp.router.expert_bias" in GPTModel is not registered in named_parameter, but in state_dict().
             # for now we patch it by adding those keys to extra_keys.
-            extra_keys = [x for x in model.state_dict().keys() if "_extra_state" not in x and x not in existing_keys]
+            extra_keys = [x for x in model.state_dict() if "_extra_state" not in x and x not in existing_keys]
             for name in extra_keys:
                 yield name, model.state_dict()[name].to(get_device_id())
 
@@ -667,7 +655,7 @@ def per_tensor_generator(
         for idx, (name, _) in enumerate(model.named_parameters()):
             existing_keys.add(name)
             meta_info.append((pp_rank, scan_vpp_idx, idx, name))
-        extra_keys = [x for x in model.state_dict().keys() if "_extra_state" not in x and x not in existing_keys]
+        extra_keys = [x for x in model.state_dict() if "_extra_state" not in x and x not in existing_keys]
         for name in extra_keys:
             meta_info.append((pp_rank, scan_vpp_idx, idx, name))
 
@@ -682,7 +670,7 @@ def per_tensor_generator(
     gen_func = tensor_generator()
 
     # lazy load tensor for full model
-    for cur_pp_rank, scan_vpp_idx, idx, name in layer_list_meta:
+    for cur_pp_rank, scan_vpp_idx, _, name in layer_list_meta:
         if model_config.tie_word_embeddings and ("output_layers" in name):
             import warnings
 
@@ -786,10 +774,7 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
     Extension to https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/transformer_layer.py::get_transformer_layer_offset"""
     '''
     if config.pipeline_model_parallel_size > 1:
-        if (
-            config.num_layers_in_first_pipeline_stage is not None
-            or config.num_layers_in_last_pipeline_stage is not None
-        ):
+        if config.num_layers_in_first_pipeline_stage is not None or config.num_layers_in_last_pipeline_stage is not None:
             # Calculate number of pipeline stages to distribute the remaining Transformer
             # layers after deducting the Transformer layers in the first or the last stages
             middle_pipeline_stages = config.pipeline_model_parallel_size
@@ -814,9 +799,7 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
                 0 if config.num_layers_in_last_pipeline_stage is None else config.num_layers_in_last_pipeline_stage
             )
 
-            middle_num_layers = (
-                config.num_layers - num_layers_in_first_pipeline_stage - num_layers_in_last_pipeline_stage
-            )
+            middle_num_layers = config.num_layers - num_layers_in_first_pipeline_stage - num_layers_in_last_pipeline_stage
 
             if mpu.get_virtual_pipeline_model_parallel_world_size() is not None:
                 vp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
@@ -826,15 +809,11 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
                 # num_layers_in_last_pipeline_stage are not set, all pipeline stages
                 # will be treated as middle pipeline stages in the calculation
                 num_layers_per_virtual_model_chunk_in_first_pipeline_stage = (
-                    0
-                    if config.num_layers_in_first_pipeline_stage is None
-                    else config.num_layers_in_first_pipeline_stage // vp_size
+                    0 if config.num_layers_in_first_pipeline_stage is None else config.num_layers_in_first_pipeline_stage // vp_size
                 )
 
                 num_layers_per_virtual_model_chunk_in_last_pipeline_stage = (
-                    0
-                    if config.num_layers_in_last_pipeline_stage is None
-                    else config.num_layers_in_last_pipeline_stage // vp_size
+                    0 if config.num_layers_in_last_pipeline_stage is None else config.num_layers_in_last_pipeline_stage // vp_size
                 )
 
                 num_layers_per_vritual_model_chunk_in_middle_pipeline_stage = middle_num_layers // vp_size
@@ -853,8 +832,7 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
                     offset = (
                         vp_rank * total_virtual_chunks
                         + num_layers_per_virtual_model_chunk_in_first_pipeline_stage
-                        + (pipeline_rank - 1)
-                        * (num_layers_per_vritual_model_chunk_in_middle_pipeline_stage // middle_pipeline_stages)
+                        + (pipeline_rank - 1) * (num_layers_per_vritual_model_chunk_in_middle_pipeline_stage // middle_pipeline_stages)
                     )
             else:
                 if middle_pipeline_stages > 0:
@@ -862,9 +840,7 @@ def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConf
                 else:
                     num_layers_per_pipeline_rank = 0
 
-                middle_pipeline_rank = (
-                    pipeline_rank if config.num_layers_in_first_pipeline_stage is None else pipeline_rank - 1
-                )
+                middle_pipeline_rank = pipeline_rank if config.num_layers_in_first_pipeline_stage is None else pipeline_rank - 1
 
                 if pipeline_rank == 0:
                     offset = 0

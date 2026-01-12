@@ -122,20 +122,14 @@ def Dict2Samples(data: TensorDict, async_mode: bool = False) -> list[Sample] | a
         local_sample.advantages = data["advantages"][index].numpy() if "advantages" in data else None
         local_sample.raw_prompt = data["raw_prompt"][index] if "raw_prompt" in data else None
         local_sample.returns = data["returns"][index].numpy() if "returns" in data else None
-        local_sample.token_level_rewards = (
-            data["token_level_rewards"][index].numpy() if "token_level_rewards" in data else None
-        )
-        local_sample.token_level_scores = (
-            data["token_level_scores"][index].numpy() if "token_level_scores" in data else None
-        )
+        local_sample.token_level_rewards = data["token_level_rewards"][index].numpy() if "token_level_rewards" in data else None
+        local_sample.token_level_scores = data["token_level_scores"][index].numpy() if "token_level_scores" in data else None
         local_sample.old_log_probs = data["old_log_probs"][index].numpy() if "old_log_probs" in data else None
         local_sample.ref_log_prob = data["ref_log_prob"][index].numpy() if "ref_log_prob" in data else None
         local_sample.extra_info = data["extra_info"][index] if "extra_info" in data else None
         if "multi_modal_inputs" in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
-        local_sample.uid = (
-            data["uid"][index].item() if isinstance(data["uid"][index], torch.Tensor) else data["uid"][index]
-        )
+        local_sample.uid = data["uid"][index].item() if isinstance(data["uid"][index], torch.Tensor) else data["uid"][index]
         return local_sample
 
     async def async_wrapper(data):
@@ -156,7 +150,7 @@ def Dict2Samples(data: TensorDict, async_mode: bool = False) -> list[Sample] | a
 def Samples2Dict(samples: list[Sample]) -> TensorDict:
     # convert to tensordict
     fields = Sample.model_fields
-    sample_fields = [name for name in fields.keys()]
+    sample_fields = list(fields)
 
     aggregated: dict[str, list[Any]] = {}
     for sample in samples:
@@ -165,11 +159,11 @@ def Samples2Dict(samples: list[Sample]) -> TensorDict:
         for field in sample_fields:
             val = getattr(sample, field)
             if val is not None:
-                if isinstance(val, (torch.Tensor, list, np.ndarray, dict, str)):
+                if isinstance(val, torch.Tensor | list | np.ndarray | dict | str):
                     if field not in aggregated:
                         aggregated[field] = []
                     aggregated[field].append(val)
-                elif isinstance(val, (int, float, bool)):
+                elif isinstance(val, int | float | bool):
                     # Collect scalar values in a list for batching
                     if field not in aggregated:
                         aggregated[field] = []
@@ -185,9 +179,7 @@ def Samples2Dict(samples: list[Sample]) -> TensorDict:
 
             # if internal val is not ""/ {} ...
             if isinstance(first_val, np.ndarray):
-                tensordict_data[key] = (
-                    np.stack(values, axis=0) if first_val.ndim >= 1 else np.concatenate(values, axis=0)
-                )
+                tensordict_data[key] = np.stack(values, axis=0) if first_val.ndim >= 1 else np.concatenate(values, axis=0)
                 default_type = fields[key].annotation
                 if get_origin(default_type) is Union:
                     args = get_args(default_type)
@@ -199,7 +191,7 @@ def Samples2Dict(samples: list[Sample]) -> TensorDict:
             elif isinstance(first_val, str):
                 if first_val:
                     tensordict_data[key] = values
-            elif isinstance(first_val, (int, float, bool)):
+            elif isinstance(first_val, int | float | bool):
                 # Convert scalar values to tensor
                 tensordict_data[key] = torch.tensor(values)
             else:
@@ -254,7 +246,7 @@ def filter_tensordict(batch: TensorDict, indices: list[int]) -> TensorDict:
                     else:
                         # This is metadata (length doesn't match batch_size) - keep as is
                         filtered_dict[key] = value
-                elif isinstance(value.data, (list, tuple)):
+                elif isinstance(value.data, list | tuple):
                     # list/tuple wrapped in NonTensorData
                     data_len = len(value.data)
                     if data_len == original_batch_size:

@@ -40,9 +40,7 @@ def update_model_config(module_config, override_config_kwargs):
 def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, trust_remote_code=False) -> dict:
     if override_config_kwargs is None:
         override_config_kwargs = {}
-    assert isinstance(
-        override_config_kwargs, dict
-    ), f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
+    assert isinstance(override_config_kwargs, dict), f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
     module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
     update_model_config(module_config, override_config_kwargs)
 
@@ -87,7 +85,7 @@ def normalize_model_name(name, pp_rank, vpp_rank, transformer_config, layer_name
     if layer_name in name:  # belong to an intermediate layer
         split_name = name.split(".")
         # find the num next to split_name
-        for i, name in enumerate(split_name):
+        for i, name in enumerate(split_name):  # noqa: B007 (i used after loop)
             if name == layer_name:
                 break
         layer_num_idx = i + 1
@@ -143,9 +141,7 @@ def _load_hf_model(config, model_config, is_value_model, local_cache_path):
             )  # use score head instead of lm_head
             state_dict = model.state_dict()
             state_dict["lm_head.weight"] = state_dict["score.weight"]
-            state_dict["model.embed_tokens.weight"] = state_dict["model.embed_tokens.weight"][
-                :32000
-            ]  # workaround, 32001 -> 32000
+            state_dict["model.embed_tokens.weight"] = state_dict["model.embed_tokens.weight"][:32000]  # workaround, 32001 -> 32000
             is_value_model = True
         else:
             model = AutoModelForCausalLM.from_pretrained(

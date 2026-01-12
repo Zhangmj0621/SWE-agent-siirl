@@ -9,7 +9,7 @@ import heapq
 import unittest
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional
 
 # ============================================================
 # Minimal reimplementation of required functions for testing
@@ -150,9 +150,7 @@ class MockObjectRef:
 # ============================================================
 
 
-def apply_length_balancing_with_group_n(
-    batch_items: list[tuple[MockSampleInfo, MockObjectRef]], k_partitions: int
-) -> list[MockObjectRef]:
+def apply_length_balancing_with_group_n(batch_items: list[tuple[MockSampleInfo, MockObjectRef]], k_partitions: int) -> list[MockObjectRef]:
     """
     Apply length balancing with Group N support.
     Samples with the same uid will be kept together.
@@ -382,7 +380,7 @@ class TestGroupNBalancing(unittest.TestCase):
 
             groups_data[uid] = {"scores": scores, "mean": mean_score, "std": std_score}
 
-            for i, tokens in enumerate(token_counts):
+            for _, tokens in enumerate(token_counts):
                 sample_info = MockSampleInfo(uid=uid, sum_tokens=tokens)
                 batch_items.append((sample_info, MockObjectRef(sample_id)))
                 sample_id += 1
@@ -445,7 +443,7 @@ class TestGroupNBalancing(unittest.TestCase):
         print(f"  Groups per partition: {[len(p) for p in uid_partitions]}")
 
         # Each partition should have 8 groups
-        for i, uid_set in enumerate(uid_partitions):
+        for _, uid_set in enumerate(uid_partitions):
             self.assertEqual(len(uid_set), num_prompts // k_partitions)
 
         # No overlap

@@ -85,9 +85,7 @@ class ClearMLBackend:
                 self._task.connect_configuration(self._config.config, name="Hyperparameters")
 
             self._initialized = True
-            logger.success(
-                f"ClearML initialized: project={self._config.project_name}, task={self._config.experiment_name}"
-            )
+            logger.success(f"ClearML initialized: project={self._config.project_name}, task={self._config.experiment_name}")
             return True
 
         except ImportError:
@@ -126,7 +124,7 @@ class ClearMLBackend:
                 else:
                     title, series = "metrics", k
 
-                if isinstance(v, (int, float, np.floating, np.integer)):
+                if isinstance(v, int | float | np.floating | np.integer):
                     clearml_logger.report_scalar(
                         title=title,
                         series=series,

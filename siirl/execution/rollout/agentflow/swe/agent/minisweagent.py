@@ -101,9 +101,7 @@ class MiniSWEAgent(Agent):
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config)
-        return Template(template, undefined=StrictUndefined).render(
-            **kwargs, **template_vars, **self.extra_template_vars
-        )
+        return Template(template, undefined=StrictUndefined).render(**kwargs, **template_vars, **self.extra_template_vars)
 
     def parse_action(self, response: ModelResponse) -> str:
         """Parse the action from the message. Returns the action cmd."""
@@ -116,10 +114,8 @@ class MiniSWEAgent(Agent):
         try:
             output = await env.execute(cmd, check=False)
         except (TimeoutError, subprocess.TimeoutExpired) as e:
-            output = (
-                e.output.decode("utf-8", errors="replace") if isinstance(e, subprocess.TimeoutExpired) else e.strerror
-            )
-            raise ExecutionTimeoutError(self.render_template(self.config.timeout_template, action=cmd, output=output))
+            output = e.output.decode("utf-8", errors="replace") if isinstance(e, subprocess.TimeoutExpired) else e.strerror
+            raise ExecutionTimeoutError(self.render_template(self.config.timeout_template, action=cmd, output=output)) from e
         self.has_finished(output)
         return output
 

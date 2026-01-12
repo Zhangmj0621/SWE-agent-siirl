@@ -79,9 +79,7 @@ class FlopsCounter:
 
     def __init__(self, config: PretrainedConfig, forward_only: bool = False):
         if config.model_type not in VALID_CONFIG_TYPE:
-            print(
-                f"Only support config type of {VALID_CONFIG_TYPE}, but got {config.model_type}. MFU will always be zero."
-            )
+            print(f"Only support config type of {VALID_CONFIG_TYPE}, but got {config.model_type}. MFU will always be zero.")
 
         self.estimate_func = {
             "qwen2": self._estimate_qwen2_flops,
@@ -195,11 +193,7 @@ class FlopsCounter:
             attn_linear_N += num_query_heads * q_head_dim * self.config.q_lora_rank
 
         attn_linear_N += hidden_size * (self.config.kv_lora_rank + self.config.qk_rope_head_dim)
-        attn_linear_N += (
-            num_query_heads
-            * (q_head_dim - self.config.qk_rope_head_dim + self.config.v_head_dim)
-            * self.config.kv_lora_rank
-        )
+        attn_linear_N += num_query_heads * (q_head_dim - self.config.qk_rope_head_dim + self.config.v_head_dim) * self.config.kv_lora_rank
         attn_linear_N += num_query_heads * self.config.v_head_dim * hidden_size
         emd_and_lm_head_N = vocab_size * hidden_size * 2
 
@@ -271,9 +265,9 @@ class FlopsCounter:
         # Normalize batch_seqlens to a flat list of integers
         def flatten_to_ints(data):
             """Recursively flatten nested lists/tuples to a flat list of integers."""
-            if isinstance(data, (int, float)):
+            if isinstance(data, int | float):
                 return [int(data)]
-            elif isinstance(data, (list, tuple)):
+            elif isinstance(data, list | tuple):
                 result = []
                 for item in data:
                     result.extend(flatten_to_ints(item))

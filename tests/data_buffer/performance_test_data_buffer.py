@@ -110,9 +110,7 @@ async def main():
 
     samples_per_producer = TOTAL_SAMPLES // NUM_PRODUCERS
     if TOTAL_SAMPLES % NUM_PRODUCERS != 0:
-        log_with_time(
-            "Warning: Total samples not evenly divisible by producers. Some producers will generate more samples."
-        )
+        log_with_time("Warning: Total samples not evenly divisible by producers. Some producers will generate more samples.")
 
     start_time = time.perf_counter()
 
@@ -180,9 +178,7 @@ async def main():
     get_throughput = total_retrieved_samples / total_get_time
     avg_batch_latency = (total_get_time / num_batches_to_get) * 1000  # ms per batch
 
-    log_with_time(
-        f"  - Total time for consumer to fetch {total_retrieved_samples} samples: {total_get_time:.4f} seconds"
-    )
+    log_with_time(f"  - Total time for consumer to fetch {total_retrieved_samples} samples: {total_get_time:.4f} seconds")
     log_with_time(f"  - Consumer Throughput: {get_throughput:.2f} samples/sec")
     log_with_time(f"  - Average Batch Latency: {avg_batch_latency:.4f} ms/batch")
 

@@ -22,13 +22,9 @@ for GRPO and similar algorithms that require group-relative advantage computatio
 
 import unittest
 from collections import defaultdict
-from typing import List, Tuple
 
 from siirl.data_coordinator.sample import SampleInfo
-from siirl.utils.model_utils.seqlen_balancing import (
-    calculate_workload,
-    get_seqlen_balanced_partitions,
-)
+from siirl.utils.model_utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions
 
 
 class MockObjectRef:
@@ -125,9 +121,7 @@ class TestGroupNBalancing(unittest.TestCase):
             # Fallback
             seqlen_list = [item[0].sum_tokens for item in batch_items]
             workload_lst_single = calculate_workload(seqlen_list)
-            partitions = get_seqlen_balanced_partitions(
-                workload_lst_single, k_partitions=k_partitions, equal_size=False
-            )
+            partitions = get_seqlen_balanced_partitions(workload_lst_single, k_partitions=k_partitions, equal_size=False)
             reordered_refs = []
             for partition in partitions:
                 for idx in partition:
@@ -135,9 +129,7 @@ class TestGroupNBalancing(unittest.TestCase):
             return reordered_refs
 
         equal_size = num_groups % k_partitions == 0
-        group_partitions = get_seqlen_balanced_partitions(
-            workload_lst, k_partitions=k_partitions, equal_size=equal_size
-        )
+        group_partitions = get_seqlen_balanced_partitions(workload_lst, k_partitions=k_partitions, equal_size=equal_size)
 
         # ========== Step 4: Expand groups to samples ==========
         reordered_refs = []
@@ -362,8 +354,7 @@ class TestGroupNBalancing(unittest.TestCase):
                 self.assertNotIn(
                     uid,
                     seen_uids,
-                    f"Group {uid} appeared again after we left it! "
-                    f"This means the group was split. Sequence: {uid_sequence}",
+                    f"Group {uid} appeared again after we left it! " f"This means the group was split. Sequence: {uid_sequence}",
                 )
                 if current_uid is not None:
                     seen_uids.add(current_uid)

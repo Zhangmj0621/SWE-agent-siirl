@@ -3,6 +3,7 @@ import os
 import time
 
 import ray
+from test_utils.test_trainer_group import TestTrainerGroup
 
 from siirl.engine.actor.megatron_actor import ActorWorker
 from siirl.engine.param_sync.update_weight import ParamSyncDistributed
@@ -19,7 +20,6 @@ from siirl.params.model_args import (
 )
 from siirl.utils.distributed_utils import init_gloo_group
 from siirl.worker.ray_utils import allocate_resources
-from test_utils.test_trainer_group import TestTrainerGroup
 
 
 def create_grpo_config(tp, pp, rollout_tp, model_path):

@@ -53,21 +53,15 @@ class ParamSyncDistributed(ParamSyncInterface):
         # from Train DP 0 to all worker
         # each pp rank has its own group
         self.rollout_workers = rollout_workers
-        self._is_pp_src_rank = (
-            mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
-        )
+        self._is_pp_src_rank = mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         if self._is_pp_src_rank:
             self._group_name = f"param_sync-pp_{pp_rank}"
 
         if self._is_pp_src_rank:
             if self._model_update_groups is not None:
-                disconnect_rollout_workers_from_distributed(
-                    self._group_name, self._model_update_groups, rollout_workers
-                )
-            self._model_update_groups = connect_rollout_workers_from_distributed(
-                self.config, self._group_name, rollout_workers
-            )
+                disconnect_rollout_workers_from_distributed(self._group_name, self._model_update_groups, rollout_workers)
+            self._model_update_groups = connect_rollout_workers_from_distributed(self.config, self._group_name, rollout_workers)
             self.rollout_worker_connected.clear()
             self.update_rollout_worker_connected(rollout_workers)
             logger.info(f"self._model_update_groups=={self._model_update_groups.size()}")

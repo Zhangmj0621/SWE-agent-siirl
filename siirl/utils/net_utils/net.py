@@ -15,9 +15,7 @@ def get_net_interface_ip():
 
     # pick interfaces to scan
     targets = (
-        [(ifname, addrs[ifname])]
-        if ifname in addrs
-        else [(n, addrs[n]) for n in addrs if n not in ("lo", "Loopback Pseudo-Interface 1")]
+        [(ifname, addrs[ifname])] if ifname in addrs else [(n, addrs[n]) for n in addrs if n not in ("lo", "Loopback Pseudo-Interface 1")]
     )
 
     # IPv4 first, then IPv6

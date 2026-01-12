@@ -3,7 +3,6 @@ import datetime
 import statistics
 import time
 import uuid
-from typing import List, Tuple
 
 import ray
 import torch
@@ -153,9 +152,7 @@ async def main():
     log_with_time(
         f"  - Time to `ray.put` {BATCH_SIZE_FOR_SIM} samples INDIVIDUALLY: {equivalent_individual_time:.4f} seconds (estimated from Part 1)"
     )
-    log_with_time(
-        f"  - Time to `ray.put` {BATCH_SIZE_FOR_SIM} samples as a single BATCH: {batched_put_time:.4f} seconds"
-    )
+    log_with_time(f"  - Time to `ray.put` {BATCH_SIZE_FOR_SIM} samples as a single BATCH: {batched_put_time:.4f} seconds")
 
     if batched_put_time > 0:
         speedup_factor = equivalent_individual_time / batched_put_time
