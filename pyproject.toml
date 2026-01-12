@@ -124,11 +124,6 @@ select = [
 ignore = [
     "G004",   # logging f-string (loguru style)
     "B005",   # strip with multi-char string (intentional usage)
-    "SIM102", # nested if statements (sometimes more readable)
-    "SIM105", # contextlib.suppress (explicit try/except is clearer)
-    "SIM108", # ternary operator (if-else can be more readable)
-    "SIM116", # dict instead of if statements (refactoring)
-    "SIM117", # multiple with contexts (nested can be clearer)
 ]
 
 [tool.ruff.lint.per-file-ignores]

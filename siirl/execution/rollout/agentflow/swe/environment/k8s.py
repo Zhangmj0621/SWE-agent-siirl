@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -520,10 +521,8 @@ class K8sEnvBuilder(ContainerEnvBuilder):
         except Exception as e:
             self.logger.error(f"Failed to start pod {pod_name}: {e}")
             # Try to clean up if pod was created
-            try:
+            with contextlib.suppress(Exception):
                 await self._delete_pod(pod_name)
-            except Exception:
-                pass
             raise
 
     async def _delete_pod(self, pod_name: str):

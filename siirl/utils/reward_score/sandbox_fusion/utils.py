@@ -518,9 +518,8 @@ def check_correctness(
                 metadata_list[index] = metadata
 
                 # Check for compile error (-4)
-                if result_status == -4:
-                    if first_compile_error_index == -1 or index < first_compile_error_index:
-                        first_compile_error_index = index
+                if result_status == -4 and (first_compile_error_index == -1 or index < first_compile_error_index):
+                    first_compile_error_index = index
                     # Optimization: could potentially cancel futures for index > first_compile_error_index
                     # However, cancellation is not guaranteed. Post-processing is safer.
 

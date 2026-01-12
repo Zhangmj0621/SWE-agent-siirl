@@ -354,10 +354,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
         try:
             # Save to hf_model subdirectory if HF model is being saved
-            if self.should_save_hf_model:
-                save_path = os.path.join(local_path, "hf_model")
-            else:
-                save_path = local_path
+            save_path = os.path.join(local_path, "hf_model") if self.should_save_hf_model else local_path
 
             os.makedirs(save_path, exist_ok=True)
 

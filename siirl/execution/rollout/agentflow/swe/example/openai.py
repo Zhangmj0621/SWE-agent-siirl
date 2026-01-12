@@ -39,15 +39,17 @@ class OpenaiModel(Model):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
                 f"{self.api_url}/v1/chat/completions",
                 json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                resp.raise_for_status()
-                result: dict = await resp.json()
+            ) as resp,
+        ):
+            resp.raise_for_status()
+            result: dict = await resp.json()
 
         output_content: str = result["choices"][0]["message"]["content"]
         output_tokens = self.tokenizer.encode(output_content)

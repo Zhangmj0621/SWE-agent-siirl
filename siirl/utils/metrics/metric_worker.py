@@ -17,6 +17,7 @@ MetricWorker and MetricClient for distributed metrics collection.
 """
 
 import asyncio
+import contextlib
 from typing import Any
 
 import ray
@@ -192,10 +193,8 @@ class MetricWorker:
         self.is_running = False
         if self.process_task:
             self.process_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self.process_task
-            except asyncio.CancelledError:
-                pass
 
     async def compute_metric(self, metric_name: str, metrics: list[Metric]):
         """

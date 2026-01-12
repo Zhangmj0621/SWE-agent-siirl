@@ -335,10 +335,7 @@ class TrainingRunner:
             if mpu.is_initialized() and mpu.get_pipeline_model_parallel_world_size() > 1:
                 last_pp_rank = mpu.get_pipeline_model_parallel_last_rank()
 
-                if dist.get_rank() == last_pp_rank:
-                    metrics_list = [metrics]
-                else:
-                    metrics_list = [None]
+                metrics_list = [metrics] if dist.get_rank() == last_pp_rank else [None]
 
                 dist.broadcast_object_list(metrics_list, src=last_pp_rank)
                 return metrics_list[0]

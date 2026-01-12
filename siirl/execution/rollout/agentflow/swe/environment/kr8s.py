@@ -141,10 +141,7 @@ class Kr8sEnv(ContainerEnv):
                 },
             ) as ws:
                 # Send stdin data
-                if isinstance(stdin, str):
-                    stdin_data = stdin.encode()
-                else:
-                    stdin_data = stdin.read()
+                stdin_data = stdin.encode() if isinstance(stdin, str) else stdin.read()
 
                 # Send stdin with channel prefix
                 await ws.send_bytes(b"\x00" + stdin_data)

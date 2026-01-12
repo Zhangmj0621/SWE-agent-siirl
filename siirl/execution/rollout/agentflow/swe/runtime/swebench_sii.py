@@ -111,10 +111,7 @@ def map_image_to_acr(image: str) -> str:
         image_part = "/".join(segments[1:])
 
     # Replace "/" with "--" to flatten into a single repo tag
-    if tag in image:
-        acr_tag = image_part.replace("/", "--") + f"--{tag}"
-    else:
-        acr_tag = image_part.replace("/", "--")
+    acr_tag = image_part.replace("/", "--") + f"--{tag}" if tag in image else image_part.replace("/", "--")
     return f"{ACR_REGISTRY}/{ACR_NAMESPACE}:{acr_tag}"
 
 

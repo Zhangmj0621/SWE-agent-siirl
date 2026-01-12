@@ -48,10 +48,7 @@ def _compute_response_info(batch: TensorDict) -> dict[str, Any]:
     response_length = batch["responses"].shape[-1]
     prompt_mask = batch["attention_mask"][:, :-response_length]
 
-    if "response_mask" not in batch:
-        response_mask = batch["attention_mask"][:, -response_length:]
-    else:
-        response_mask = batch["response_mask"]
+    response_mask = batch["attention_mask"][:, -response_length:] if "response_mask" not in batch else batch["response_mask"]
 
     prompt_length = prompt_mask.sum(-1).float()
     response_length = response_mask.sum(-1).float()
@@ -257,10 +254,7 @@ def compute_throughput_metrics(batch: TensorDict, timing_raw: dict[str, float], 
             total_num_tokens = global_token_num
     else:
         # Fallback: estimate from attention mask
-        if "attention_mask" in batch:
-            total_num_tokens = torch.sum(batch["attention_mask"]).item()
-        else:
-            total_num_tokens = 0
+        total_num_tokens = torch.sum(batch["attention_mask"]).item() if "attention_mask" in batch else 0
 
     time = timing_raw.get("step", 1.0)
 

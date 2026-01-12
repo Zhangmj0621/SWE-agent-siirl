@@ -143,10 +143,7 @@ class CheckpointManager:
         max_critic_keep = self.config.trainer.max_critic_ckpt_to_keep
 
         # If critic doesn't exist, just use actor limit
-        if self.critic_worker is None:
-            max_keep = max_actor_keep
-        else:
-            max_keep = min(max_actor_keep, max_critic_keep)
+        max_keep = max_actor_keep if self.critic_worker is None else min(max_actor_keep, max_critic_keep)
 
         # Skip cleanup if max_keep is not set or <= 0
         if max_keep <= 0:

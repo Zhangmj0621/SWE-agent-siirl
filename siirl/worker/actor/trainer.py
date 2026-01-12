@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import os
 import time
 import datetime
@@ -213,9 +214,8 @@ class Trainer:
                 backends = [logger_backends]
 
         # Check for wandb proxy
-        if hasattr(self.config, "trainer") and hasattr(self.config.trainer, "wandb_proxy"):
-            if self.config.trainer.wandb_proxy:
-                backend_configs["wandb"] = {"proxy": self.config.trainer.wandb_proxy}
+        if hasattr(self.config, "trainer") and hasattr(self.config.trainer, "wandb_proxy") and self.config.trainer.wandb_proxy:
+            backend_configs["wandb"] = {"proxy": self.config.trainer.wandb_proxy}
 
         # Get project and experiment names
         project_name = getattr(self.config.trainer, "project_name", "siirl_agentic")
@@ -636,10 +636,8 @@ class Trainer:
             # Ensure all pending metrics are submitted before exiting
             # Only ranks that submitted metrics need to wait
             if self.metric_client is not None and self.should_submit_metrics:
-                try:
+                with contextlib.suppress(Exception):
                     self.metric_client.wait_submit()
-                except Exception:
-                    pass
 
             # Close MetricTracker (only rank=0 has one)
             if self.tracker is not None:

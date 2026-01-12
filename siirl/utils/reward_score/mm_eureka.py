@@ -1,3 +1,4 @@
+import contextlib
 import re
 
 from loguru import logger
@@ -39,10 +40,8 @@ def accuracy_reward_func(completion, answer):
                 ExprExtractionConfig(),
             ],
         )
-        try:
+        with contextlib.suppress(Exception):
             reward = float(verify(answer_parsed, gold_parsed))
-        except Exception:
-            pass
 
         if reward == 0.0:
             try:
@@ -50,11 +49,10 @@ def accuracy_reward_func(completion, answer):
                 student_answer = content_match.group(1).strip() if content_match else content.strip()
                 student_answer = student_answer.replace("</answer>", "").replace("<answer>", "").strip()
                 for answer in gold_parsed:
-                    if str(answer).lower() in choices:
-                        if str(answer).lower() in student_answer.lower():
-                            choices_other = [choice for choice in choices if choice != str(answer).lower()]
-                            if all(choice not in student_answer.lower() for choice in choices_other):
-                                reward = 1.0
+                    if str(answer).lower() in choices and str(answer).lower() in student_answer.lower():
+                        choices_other = [choice for choice in choices if choice != str(answer).lower()]
+                        if all(choice not in student_answer.lower() for choice in choices_other):
+                            reward = 1.0
             except Exception:
                 pass
     else:

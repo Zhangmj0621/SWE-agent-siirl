@@ -184,10 +184,7 @@ def is_correct_minerva(
     pred = normalize_final_answer(extracted_answer)
 
     # Process ground truth
-    if gt_need_extract:
-        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
-    else:
-        gt = normalize_final_answer(gt)
+    gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt))) if gt_need_extract else normalize_final_answer(gt)
 
     return (pred == gt), pred
 

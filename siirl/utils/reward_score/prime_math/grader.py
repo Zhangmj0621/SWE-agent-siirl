@@ -277,7 +277,7 @@ def math_equal(
                 return True
         except Exception:
             pass
-    elif "\begin{pmatrix}" in reference and prediction.startswith("[") and prediction.endswith("]"):
+    elif "\begin{pmatrix}" in reference and prediction.startswith("[") and prediction.endswith("]"):  # noqa: SIM102
         if isinstance(eval(prediction), list):
             try:
                 pred_matrix = eval(prediction)
@@ -343,18 +343,19 @@ def format_intervals(prediction):
         "Interval.open(": r"^Interval\.open\((.*)\)$",
     }
 
+    # Mapping from interval type to format string
+    interval_formats = {
+        "Interval(": "[{}]",  # Interval(a, b) == [a, b]
+        "Interval.Ropen(": "[{})",  # Interval.Ropen(a, b) == [a, b)
+        "Interval.Lopen(": "({}]",  # Interval.Lopen(a, b) == (a, b]
+        "Interval.open(": "({})",  # Interval.open(a, b) == (a, b)
+    }
+
     for key, pattern in patterns.items():
         match = re.match(pattern, prediction)
         if match:
             inner_content = match.group(1)
-
-            if key == "Interval(":  # Intarval(a, b) == [a, b]
-                return f"[{inner_content}]"
-            elif key == "Interval.Ropen(":  # Intarval.Ropen(a, b) == [a, b)
-                return f"[{inner_content})"
-            elif key == "Interval.Lopen(":  # Intarval.Lopen(a, b) == (a, b]
-                return f"({inner_content}]"
-            elif key == "Interval.open(":  # Intarval.open(a, b) == (a, b)
-                return f"({inner_content})"
+            if key in interval_formats:
+                return interval_formats[key].format(inner_content)
 
     return prediction

@@ -19,6 +19,7 @@ Provides a single entry point for logging metrics, text, and tables to
 multiple backends (console, wandb, tensorboard) simultaneously.
 """
 
+import contextlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -345,7 +346,5 @@ class MetricTracker:
     def __del__(self):
         """Destructor - last resort cleanup."""
         if not self._closed:
-            try:
+            with contextlib.suppress(Exception):
                 self.finish()
-            except Exception:
-                pass  # Ignore errors in destructor

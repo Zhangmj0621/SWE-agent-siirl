@@ -40,10 +40,9 @@ class BaseModelInitializer(ABC):
     def get_rope_scaling_args(self) -> dict:
         """Get rope scaling args."""
         rope_scaling_args = {}
-        if "rope_scaling" in self.hf_config:
-            if self.hf_config.rope_scaling is not None:
-                # assert self.hf_config.rope_scaling["type"] == "linear", "only linear scaling is supported for now"
-                rope_scaling_args["seq_len_interpolation_factor"] = self.hf_config.rope_scaling["factor"]
+        if "rope_scaling" in self.hf_config and self.hf_config.rope_scaling is not None:
+            # assert self.hf_config.rope_scaling["type"] == "linear", "only linear scaling is supported for now"
+            rope_scaling_args["seq_len_interpolation_factor"] = self.hf_config.rope_scaling["factor"]
         return rope_scaling_args
 
     def initialize(
