@@ -74,7 +74,13 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Share GPUs between training and rollout (colocated mode)"}
     )
-
+    tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
+    pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
+    context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})
+    expert_model_parallel_size: int = field(default=1, metadata={"help": "Expert model parallelism size"})
+    expert_tensor_parallel_size: int = field(default=1, metadata={"help": "Expert tensor parallelism size"})
+    virtual_pipeline_model_parallel_size: Optional[int] = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
+    sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 

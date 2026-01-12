@@ -1,5 +1,4 @@
 import os
-import datetime
 from functools import partial
 
 # Disable Transformer Engine to avoid ABI compatibility issues
@@ -9,19 +8,19 @@ os.environ.setdefault('NVTE_FRAMEWORK', 'none')
 import torch
 import torch.distributed
 from torch import nn
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 from tensordict import TensorDict, NonTensorData
 
 from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
 
-from siirl.engine.actor.utils import append_to_dict, set_random_seed
+from siirl.engine.actor.utils import append_to_dict
 from siirl.algorithm.loss import agg_loss, get_policy_loss_fn, compute_value_loss
 from siirl.algorithm.kl_penalty import kl_penalty
-from siirl.params.model_args import ActorRefArguments
+from siirl.params import SiiRLArguments
 
-from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
+from siirl.utils.backend.device import get_device_id, get_device_name, get_torch_device
 from siirl.utils.timer import Timer
 from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
 from siirl.utils.model_utils.flops_counter import FlopsCounter
@@ -38,40 +37,9 @@ from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_p
 from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 
 
-
-def global_initialize_model_parallel(config: ActorRefArguments):
-    """Initialize Megatron model parallel groups"""
-    megatron_config = config.megatron
-
-    rank = int(os.environ["LOCAL_RANK"])
-    if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(
-            backend=get_nccl_backend(),
-            timeout=datetime.timedelta(seconds=600),
-            init_method=os.environ.get("DIST_INIT_METHOD", None),
-        )
-        get_torch_device().set_device(rank)
-
-        if megatron_config.sequence_parallel:
-            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-
-        mpu.initialize_model_parallel(
-            tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
-            pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
-            virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
-            use_sharp=False,
-            context_parallel_size=megatron_config.context_parallel_size,
-            expert_model_parallel_size=megatron_config.expert_model_parallel_size,
-            expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
-            nccl_communicator_config_path=None,
-        )
-        set_random_seed(seed=megatron_config.seed)
-
-
 class ActorWorker:
-    def __init__(self, config: DictConfig):
-        assert isinstance(config, ActorRefArguments)
+    def __init__(self, config: SiiRLArguments):
+        assert isinstance(config, SiiRLArguments)
         self.rank = 0
         self.hf_config = None
         self.tf_config = None
@@ -82,15 +50,12 @@ class ActorWorker:
         self.share_embeddings_and_output_weights = False
 
         self.config = config
-        global_initialize_model_parallel(self.config.actor)
+        self.actor_ref_config = config.actor_ref
+        # global_initialize_model_parallel(self.config.actor)
 
-        # Normalize config
-        self.config.actor.ppo_mini_batch_size *= self.config.actor.n
-        self.config.actor.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
-
-        self._is_offload_param = self.config.actor.megatron.param_offload
-        self._is_offload_grad = self.config.actor.megatron.grad_offload
-        self._is_offload_optimizer = self.config.actor.megatron.optimizer_offload
+        self._is_offload_param = self.actor_ref_config.actor.megatron.param_offload
+        self._is_offload_grad = self.actor_ref_config.actor.megatron.grad_offload
+        self._is_offload_optimizer = self.actor_ref_config.actor.megatron.optimizer_offload
 
     def _init_hf_config_and_tf_config(
         self,
@@ -158,15 +123,15 @@ class ActorWorker:
 
         self._init_hf_config_and_tf_config(
             model_path, model_path, self.dtype, override_model_config,
-            override_transformer_config, self.config.model.trust_remote_code,
-            self.config.actor.megatron.use_mbridge,
+            override_transformer_config, self.actor_ref_config.model.trust_remote_code,
+            self.actor_ref_config.actor.megatron.use_mbridge,
         )
 
         wrap_config = McoreModuleWrapperConfig(
             is_value_model=False,
             share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             wrap_with_ddp=True,
-            use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
+            use_distributed_optimizer=self.actor_ref_config.actor.megatron.use_distributed_optimizer,
         )
 
         actor_module = make_megatron_module(
@@ -175,12 +140,12 @@ class ActorWorker:
             override_ddp_config=override_ddp_config,
         )
 
-        if self.config.actor.load_weight:
+        if self.actor_ref_config.actor.load_weight:
             if self.bridge is not None:
-                local_model_path = get_hf_model_path(self.config)
+                local_model_path = get_hf_model_path(self.actor_ref_config)
                 self.bridge.load_weights(actor_module, local_model_path)
             else:
-                load_megatron_gptmodel_weights(self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False)
+                load_megatron_gptmodel_weights(self.actor_ref_config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False)
 
         optim_megatron_config = init_megatron_optim_config(optim_config)
         actor_optimizer = get_megatron_optimizer(model=actor_module, config=optim_megatron_config)
@@ -189,17 +154,17 @@ class ActorWorker:
         return actor_module, actor_optimizer, actor_optimizer_scheduler, self.hf_config, optim_config
 
     def init_model(self):
-        override_model_config = self.config.model.override_config
-        override_transformer_config = self.config.actor.megatron.override_transformer_config or OmegaConf.create()
-        override_ddp_config = self.config.actor.megatron.override_ddp_config or OmegaConf.create()
+        override_model_config = self.actor_ref_config.model.override_config
+        override_transformer_config = self.actor_ref_config.actor.megatron.override_transformer_config or OmegaConf.create()
+        override_ddp_config = self.actor_ref_config.actor.megatron.override_ddp_config or OmegaConf.create()
 
         self.param_dtype = torch.bfloat16
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
-        optim_config = self.config.actor.optim
+        optim_config = self.actor_ref_config.actor.optim
         self.actor_module, self.actor_optimizer, self.actor_optimizer_scheduler, self.actor_model_config, self.actor_optim_config = \
             self._build_actor_model_optimizer(
-                model_path=self.config.model.path,
+                model_path=self.actor_ref_config.model.path,
                 optim_config=optim_config,
                 override_model_config=override_model_config,
                 override_transformer_config=override_transformer_config,
@@ -212,7 +177,7 @@ class ActorWorker:
             offload_megatron_optimizer(self.actor_optimizer)
 
         self.actor = MegatronPPOActor(
-            config=self.config.actor,
+            config=self.config,
             hf_config=self.hf_config,
             tf_config=self.tf_config,
             actor_module=self.actor_module,
@@ -238,9 +203,9 @@ class ActorWorker:
             load_megatron_optimizer(self.actor_optimizer)
 
         data = data.to(get_device_name())
-        micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
+        micro_batch_size = self.actor_ref_config.actor.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
-        data["temperature"] = NonTensorData(self.config.actor.temperature)
+        data["temperature"] = NonTensorData(self.actor_ref_config.actor.temperature)
 
         # Time the update_policy call for MFU calculation
         with Timer("update_policy") as timer:
@@ -279,8 +244,8 @@ class ActorWorker:
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
 
-        data["micro_batch_size"] = NonTensorData(self.config.actor.ppo_micro_batch_size_per_gpu)
-        data["temperature"] = NonTensorData(self.config.actor.temperature)
+        data["micro_batch_size"] = NonTensorData(self.actor_ref_config.actor.ppo_micro_batch_size_per_gpu)
+        data["temperature"] = NonTensorData(self.actor_ref_config.actor.temperature)
         data = data.to(get_device_id())
 
         output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
@@ -319,8 +284,8 @@ class ActorWorker:
 
 
 class ReferenceWorker:
-    def __init__(self, config: DictConfig):
-        assert isinstance(config, ActorRefArguments)
+    def __init__(self, config: SiiRLArguments):
+        assert isinstance(config, SiiRLArguments)
         self.rank = 0
         self.hf_config = None
         self.tf_config = None
@@ -331,16 +296,18 @@ class ReferenceWorker:
         self.share_embeddings_and_output_weights = False
 
         self.config = config
-        global_initialize_model_parallel(self.config.actor)
+        self.actor_ref_config = config.actor_ref
+        ref_config = self.actor_ref_config.ref
+        # global_initialize_model_parallel(self.config.actor)
 
         # Normalize config
-        if self.config.ref.log_prob_micro_batch_size:
-            self.config.ref.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
-            self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
+        if ref_config.log_prob_micro_batch_size:
+            ref_config.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
+            ref_config.log_prob_micro_batch_size_per_gpu = ref_config.log_prob_micro_batch_size
         else:
-            assert self.config.ref.log_prob_micro_batch_size_per_gpu is not None
+            assert ref_config.log_prob_micro_batch_size_per_gpu is not None
 
-        self._ref_is_offload_param = self.config.ref.megatron.param_offload
+        self._ref_is_offload_param = ref_config.megatron.param_offload
 
     def _init_hf_config_and_tf_config(
         self,
@@ -407,15 +374,15 @@ class ReferenceWorker:
 
         self._init_hf_config_and_tf_config(
             model_path, model_path, self.dtype, override_model_config,
-            override_transformer_config, self.config.model.trust_remote_code,
-            self.config.actor.megatron.use_mbridge,
+            override_transformer_config, self.actor_ref_config.model.trust_remote_code,
+            self.actor_ref_config.actor.megatron.use_mbridge,
         )
 
         wrap_config = McoreModuleWrapperConfig(
             is_value_model=False,
             share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             wrap_with_ddp=False,
-            use_distributed_optimizer=self.config.ref.megatron.use_distributed_optimizer,
+            use_distributed_optimizer=self.actor_ref_config.ref.megatron.use_distributed_optimizer,
         )
 
         ref_module = make_megatron_module(
@@ -423,32 +390,31 @@ class ReferenceWorker:
             bridge=self.bridge, override_model_config=override_model_config,
         )
 
-        if self.config.ref.load_weight:
-            assert self.config.actor.load_weight == self.config.ref.load_weight
+        if self.actor_ref_config.ref.load_weight:
+            assert self.actor_ref_config.actor.load_weight == self.actor_ref_config.ref.load_weight
             if self.bridge is not None:
-                local_model_path = get_hf_model_path(self.config)
+                local_model_path = get_hf_model_path(self.actor_ref_config)
                 self.bridge.load_weights(ref_module, local_model_path)
             else:
-                load_megatron_gptmodel_weights(self.config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False)
+                load_megatron_gptmodel_weights(self.actor_ref_config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False)
 
         return ref_module, self.hf_config
 
     def init_model(self):
-
-        override_model_config = self.config.model.override_config
-        override_transformer_config = self.config.ref.megatron.override_transformer_config or OmegaConf.create()
+        override_model_config = self.actor_ref_config.model.override_config
+        override_transformer_config = self.actor_ref_config.ref.megatron.override_transformer_config or OmegaConf.create()
 
         self.param_dtype = torch.bfloat16
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         self.ref_module, self.ref_model_config = self._build_ref_model(
-            model_path=self.config.model.path,
+            model_path=self.actor_ref_config.model.path,
             override_model_config=override_model_config,
             override_transformer_config=override_transformer_config,
         )
 
         self.ref_policy = MegatronPPOActor(
-            config=self.config.ref,
+            config=self.config,
             hf_config=self.hf_config,
             tf_config=self.tf_config,
             actor_module=self.ref_module,
@@ -464,9 +430,9 @@ class ReferenceWorker:
         if self._ref_is_offload_param:
             load_megatron_model_to_gpu(self.ref_module, load_grad=False)
 
-        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
+        micro_batch_size = self.actor_ref_config.ref.log_prob_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
-        data["temperature"] = NonTensorData(self.config.ref.temperature)
+        data["temperature"] = NonTensorData(self.actor_ref_config.ref.temperature)
         data = data.to(get_device_id())
 
         output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
@@ -481,7 +447,7 @@ class ReferenceWorker:
 
 
 class CriticWorker:
-    def __init__(self, config):
+    def __init__(self, config:SiiRLArguments):
         self.rank = 0
         self.hf_config = None
         self.tf_config = None
@@ -490,16 +456,11 @@ class CriticWorker:
         self.processor = None
         self.architectures = None
         self.share_embeddings_and_output_weights = False
-
         self.config = config
-        global_initialize_model_parallel(self.config)
-        
-        self._is_offload_param = self.config.megatron.param_offload
-        self._is_offload_optimizer = self.config.megatron.optimizer_offload
+        self.critic_config = config.critic
 
-        # Normalize config
-        self.config.ppo_mini_batch_size *= self.config.rollout_n
-        self.config.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
+        self._is_offload_param = self.critic_config.megatron.param_offload
+        self._is_offload_optimizer = self.critic_config.megatron.optimizer_offload
 
     def _init_hf_config_and_tf_config(
         self,
@@ -564,18 +525,17 @@ class CriticWorker:
                                       override_transformer_config, override_ddp_config):
         from siirl.engine.actor.optimizer import get_megatron_optimizer, get_megatron_optimizer_param_scheduler, init_megatron_optim_config
         from siirl.utils.megatron.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
-
         self._init_hf_config_and_tf_config(
             model_path, model_path, self.dtype, override_model_config,
-            override_transformer_config, self.config.model.trust_remote_code,
-            self.config.megatron.use_mbridge,
+            override_transformer_config, self.critic_config.model.trust_remote_code,
+            self.critic_config.megatron.use_mbridge,
         )
 
         wrap_config = McoreModuleWrapperConfig(
             is_value_model=True,
             share_embeddings_and_output_weights=False,
             wrap_with_ddp=True,
-            use_distributed_optimizer=self.config.megatron.use_distributed_optimizer,
+            use_distributed_optimizer=self.critic_config.megatron.use_distributed_optimizer,
         )
 
         critic_module = make_megatron_module(
@@ -584,12 +544,12 @@ class CriticWorker:
             override_ddp_config=override_ddp_config,
         )
 
-        if self.config.load_weight:
+        if self.critic_config.load_weight:
             if self.bridge is not None:
-                local_model_path = get_hf_model_path(self.config)
+                local_model_path = get_hf_model_path(self.critic_config)
                 self.bridge.load_weights(critic_module, local_model_path)
             else:
-                load_megatron_gptmodel_weights(self.config, self.hf_config, critic_module, params_dtype=self.dtype, is_value_model=True)
+                load_megatron_gptmodel_weights(self.critic_config, self.hf_config, critic_module, params_dtype=self.dtype, is_value_model=True)
 
         optim_config_megatron = init_megatron_optim_config(optim_config)
         critic_optimizer = get_megatron_optimizer(model=critic_module, config=optim_config_megatron)
@@ -599,18 +559,17 @@ class CriticWorker:
         return critic_module, critic_optimizer, critic_optimizer_scheduler, self.hf_config, optim_config
 
     def init_model(self):
-
-        override_model_config = self.config.model.override_config
-        override_transformer_config = self.config.megatron.override_transformer_config or OmegaConf.create()
-        override_ddp_config = self.config.megatron.override_ddp_config or OmegaConf.create()
+        override_model_config = self.critic_config.model.override_config
+        override_transformer_config = self.critic_config.megatron.override_transformer_config or OmegaConf.create()
+        override_ddp_config = self.critic_config.megatron.override_ddp_config or OmegaConf.create()
 
         self.param_dtype = torch.bfloat16
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         self.critic_module, self.critic_optimizer, self.critic_optimizer_scheduler, self.critic_model_config, critic_optimizer_config = \
             self._build_critic_model_optimizer(
-                model_path=self.config.model.path,
-                optim_config=self.config.optim,
+                model_path=self.critic_config.model.path,
+                optim_config=self.critic_config.optim,
                 override_model_config=override_model_config,
                 override_transformer_config=override_transformer_config,
                 override_ddp_config=override_ddp_config,
@@ -640,7 +599,7 @@ class CriticWorker:
         )
 
     def compute_values(self, data: TensorDict):
-        micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
+        micro_batch_size = self.critic_config.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
         data = data.to(get_device_id())
 
@@ -717,22 +676,17 @@ class CriticWorker:
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
 
-
 class MegatronPPOActor():
     """Core PPO Actor implementation with Megatron backend"""
 
-    def __init__(self, config, hf_config, tf_config,
+    def __init__(self, config: SiiRLArguments, hf_config, tf_config,
                  actor_module: nn.ModuleList, actor_optimizer: DistributedOptimizer):
-        self._validate_config(config)
+        self.config = config
+        self.actor_config = config.actor_ref.actor
         self.hf_config = hf_config
         self.tf_config = tf_config
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
-
-    def _validate_config(self, config):
-        if config.megatron.tensor_model_parallel_size == 1:
-            config.megatron.sequence_parallel = False
-        self.config = config
 
     def compute_log_prob(self, data: TensorDict, calculate_entropy=False):
         """Compute log probability and optionally entropy"""
@@ -799,14 +753,14 @@ class MegatronPPOActor():
         response_mask = data["response_mask"].to(bool)
         old_log_prob = data["old_log_probs"]
         advantages = data["advantages"]
-        loss_agg_mode = self.config.loss_agg_mode
-        loss_mode = self.config.loss_mode
+        loss_agg_mode = self.actor_config.loss_agg_mode
+        loss_mode = self.actor_config.loss_mode
 
         # Policy gradient loss
         policy_loss_fn = get_policy_loss_fn(loss_mode)
         pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
             old_log_prob=old_log_prob, log_prob=log_prob, advantages=advantages,
-            response_mask=response_mask, loss_agg_mode=loss_agg_mode, config=self.config,
+            response_mask=response_mask, loss_agg_mode=loss_agg_mode, config=self.actor_config,
         )
 
         metrics.update({
@@ -820,16 +774,16 @@ class MegatronPPOActor():
         # Entropy loss
         if entropy is not None:
             entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-            policy_loss -= self.config.entropy_coeff * entropy_loss
+            policy_loss -= self.actor_config.entropy_coeff * entropy_loss
 
         # KL loss
-        if self.config.use_kl_loss:
+        if self.actor_config.use_kl_loss:
             ref_log_prob = data["ref_log_prob"]
-            kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
-            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=self.config.loss_agg_mode)
-            policy_loss += kl_loss * self.config.kl_loss_coef
+            kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.actor_config.kl_loss_type)
+            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=self.actor_config.loss_agg_mode)
+            policy_loss += kl_loss * self.actor_config.kl_loss_coef
             metrics["actor/kl_loss"] = kl_loss.detach().item()
-            metrics["actor/kl_coef"] = self.config.kl_loss_coef
+            metrics["actor/kl_coef"] = self.actor_config.kl_loss_coef
 
         return policy_loss, metrics
 
@@ -941,20 +895,23 @@ class MegatronPPOActor():
 
         select_keys = ["responses", "response_mask", "input_ids", "attention_mask",
                       "position_ids", "old_log_probs", "advantages"]
-        if self.config.use_kl_loss:
+        if self.actor_config.use_kl_loss:
             select_keys.append("ref_log_prob")
 
         batch = data.select(*select_keys)
 
-        dataloader = batch.split(self.config.ppo_mini_batch_size)
+        local_ppo_mini_batch_size = self.actor_config.ppo_mini_batch_size * self.config.rollout.n
+        self.local_ppo_mini_batch_size = local_ppo_mini_batch_size//mpu.get_data_parallel_world_size(with_context_parallel=False)
+
+        dataloader = batch.split(self.local_ppo_mini_batch_size)
 
         for data in dataloader:
             self.actor_optimizer.zero_grad()
             for chunk in self.actor_module:
                 chunk.zero_grad_buffer()
 
-            calculate_entropy = self.config.entropy_coeff != 0
-            micro_batch_size = data.get("micro_batch_size") or self.config.ppo_micro_batch_size_per_gpu
+            calculate_entropy = self.actor_config.entropy_coeff != 0
+            micro_batch_size = data.get("micro_batch_size") or self.actor_config.ppo_micro_batch_size_per_gpu
 
             metric_micro_batch = self.forward_backward_batch(
                 data, temperature=temperature, calculate_entropy=calculate_entropy,
@@ -980,20 +937,18 @@ class MegatronPPOActor():
 class MegatronPPOCritic():
     """Core PPO Critic implementation with Megatron backend"""
 
-    def __init__(self, config, hf_config, tf_config,
+    def __init__(self, config: SiiRLArguments, hf_config, tf_config,
                  critic_module: nn.ModuleList, critic_optimizer: DistributedOptimizer,
                  critic_optimizer_config):
-        self._validate_config(config)
+        self.config = config
+        self.critic_config = config.critic
         self.hf_config = hf_config
         self.tf_config = tf_config
         self.critic_module = critic_module
         self.critic_optimizer = critic_optimizer
         self.critic_optimizer_config = critic_optimizer_config
-
-    def _validate_config(self, config):
-        if config.megatron.tensor_model_parallel_size == 1:
-            config.megatron.sequence_parallel = False
-        self.config = config
+        local_ppo_mini_batch_size = self.critic_config.ppo_mini_batch_size * config.rollout.n
+        self.local_ppo_mini_batch_size = local_ppo_mini_batch_size // mpu.get_data_parallel_world_size(with_context_parallel=False)
 
     def compute_values(self, data: TensorDict):
         """Compute value predictions"""
@@ -1062,14 +1017,14 @@ class MegatronPPOCritic():
             returns = data["returns"]
             response_length = responses.size(1)
             response_mask = data["response_mask"]
-            cliprange_value = self.config.cliprange_value
+            cliprange_value = self.critic_config.cliprange_value
 
             vpreds = output[:, -response_length - 1 : -1]
 
             vf_loss, vf_clipfrac = compute_value_loss(
                 vpreds=vpreds, values=values, returns=returns,
                 response_mask=response_mask, cliprange_value=cliprange_value,
-                loss_agg_mode=self.config.loss_agg_mode,
+                loss_agg_mode=self.critic_config.loss_agg_mode,
             )
 
             stats = {
@@ -1120,15 +1075,15 @@ class MegatronPPOCritic():
                       "values", "returns", "response_mask"]
 
         batch = data.select(*select_keys)
-        dataloader = batch.split(self.config.ppo_mini_batch_size)
+        dataloader = batch.split(self.local_ppo_mini_batch_size)
 
-        for epoch in range(self.config.ppo_epochs):
+        for epoch in range(self.critic_config.ppo_epochs):
             for batch_idx, data in enumerate(dataloader):
                 self.critic_optimizer.zero_grad()
                 for chunk in self.critic_module:
                     chunk.zero_grad_buffer()
 
-                micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
+                micro_batch_size = self.critic_config.ppo_micro_batch_size_per_gpu
 
                 metric_micro_batch = self.forward_backward_batch(
                     data, forward_only=False, micro_batch_size=micro_batch_size, 
