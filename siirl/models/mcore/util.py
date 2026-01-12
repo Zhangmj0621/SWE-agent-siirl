@@ -172,7 +172,9 @@ def remove_left_padding(
     if pre_process:
         new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
     new_attention_mask = torch.zeros(
-        dtype=attention_mask.dtype, device=attention_mask.device, size=(batch_size, seq_len)
+        dtype=attention_mask.dtype,
+        device=attention_mask.device,
+        size=(batch_size, seq_len),
     )
     new_position_ids = torch.zeros(dtype=position_ids.dtype, device=position_ids.device, size=(batch_size, seq_len))
     for i in range(batch_size):

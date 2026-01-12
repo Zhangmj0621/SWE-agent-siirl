@@ -10,14 +10,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-import aiohttp
 import asyncio
-import traceback
-import os
 import datetime
+import json
+import os
+import traceback
 
-from typing import Dict, List, Literal, Callable, Optional
+import aiohttp
 
 # Global variable to store the path for failed submissions
 _failed_submissions_path = os.path.expanduser("~")
@@ -46,12 +45,14 @@ def get_failed_submissions_path() -> str:
     """
     return _failed_submissions_path
 
+
 async def call_one_submission(
-                        url: str,
-                        submission: Dict,
-                        session: aiohttp.ClientSession,
-                        max_retries: int = 4,
-                        backoff_factor: float = 0.5):
+    url: str,
+    submission: dict,
+    session: aiohttp.ClientSession,
+    max_retries: int = 4,
+    backoff_factor: float = 0.5,
+):
     attempt_count = 0
     result = None
     while attempt_count < max_retries:
@@ -77,12 +78,14 @@ async def call_one_submission(
             traceback.print_exc()
     return None
 
+
 async def call_long_batch(
-                        url: str,
-                        submissions: List[Dict],
-                        session: aiohttp.ClientSession,
-                        max_retries: int = 4,
-                        backoff_factor: float = 0.5):
+    url: str,
+    submissions: list[dict],
+    session: aiohttp.ClientSession,
+    max_retries: int = 4,
+    backoff_factor: float = 0.5,
+):
 
     sub_num = len(submissions)
     results = [None] * sub_num
@@ -92,19 +95,21 @@ async def call_long_batch(
     while submissions and attempt_count < max_retries:
         attempt_count += 1
         try:
-            data = {
-                "type": "batch",
-                "submissions": submissions
-            }
+            data = {"type": "batch", "submissions": submissions}
             queue_timeouts = []
             async with session.post(url, json=data) as response:
                 response.raise_for_status()
                 response_json = await response.json()
-                for sub_id, result, duration in zip(sub_ids, response_json['results'], response_json['duration_time']):
+                for sub_id, result, duration in zip(
+                    sub_ids, response_json["results"], response_json["duration_time"], strict=False
+                ):
                     results[sub_id] = result
                     duration_time[sub_id] = duration
             print(
-                f'Batch size: {sub_num}, duration time: min {f"{min(duration_time):.10f}" if duration_time else "N/A"}, max {f"{max(duration_time):.10f}" if duration_time else "N/A"}, avg {f"{sum(duration_time)/len(duration_time):.10f}" if duration_time else "N/A"}'
+                f"Batch size: {sub_num}, duration time: "
+                f'min {f"{min(duration_time):.10f}" if duration_time else "N/A"}, '
+                f'max {f"{max(duration_time):.10f}" if duration_time else "N/A"}, '
+                f'avg {f"{sum(duration_time)/len(duration_time):.10f}" if duration_time else "N/A"}'
             )
             submissions = [sub for _, sub in queue_timeouts]
             sub_ids = [sub_id for sub_id, _ in queue_timeouts]
@@ -127,17 +132,14 @@ async def call_long_batch(
             "timestamp": timestamp,
             "url": url,
             "max_retries": max_retries,
-            "failed_submissions": []
+            "failed_submissions": [],
         }
 
-        for sub_id, submission in zip(sub_ids, submissions):
-            failed_data["failed_submissions"].append({
-                "original_index": sub_id,
-                "submission": submission
-            })
+        for sub_id, submission in zip(sub_ids, submissions, strict=False):
+            failed_data["failed_submissions"].append({"original_index": sub_id, "submission": submission})
 
         try:
-            with open(failed_file, 'w', encoding='utf-8') as f:
+            with open(failed_file, "w", encoding="utf-8") as f:
                 json.dump(failed_data, f, indent=2, ensure_ascii=False)
             print(f"Saved {len(submissions)} failed submissions to: {failed_file}")
         except Exception as e:
@@ -145,11 +147,13 @@ async def call_long_batch(
 
     return results
 
+
 async def run_single_tool_call_on_server_async(
-                                    tool_call: Dict,
-                                    max_retries: int = 4,
-                                    backoff_factor: float = 0.5,
-                                    url: str = "http://localhost:8089"):
+    tool_call: dict,
+    max_retries: int = 4,
+    backoff_factor: float = 0.5,
+    url: str = "http://localhost:8089",
+):
     """
     Put the single tool-call task from distributed queue to centralized buffer on master node.
 
@@ -161,27 +165,28 @@ async def run_single_tool_call_on_server_async(
     """
 
     submission = None
-    if tool_call['name'] == 'sandbox_fusion':
+    if tool_call["name"] == "sandbox_fusion":
         from .sandbox_fusion_utils import generate_tool_call_code, generate_tool_call_input
+
         submission = {
-            "name": tool_call['name'],
+            "name": tool_call["name"],
             "solution": generate_tool_call_code(tool_call),
             "input": generate_tool_call_input(tool_call),
-            "start_time": tool_call['start_time'],
-            "code_type": tool_call.get('code_type', 'python')
+            "start_time": tool_call["start_time"],
+            "code_type": tool_call.get("code_type", "python"),
         }
-    elif tool_call['name'] == 'search':
+    elif tool_call["name"] == "search":
         submission = {
-            "name": tool_call['name'],
-            "query_list": tool_call['arguments']['query_list'],
-            "topk": tool_call['arguments']['topk'],
-            "start_time": tool_call['start_time']
+            "name": tool_call["name"],
+            "query_list": tool_call["arguments"]["query_list"],
+            "topk": tool_call["arguments"]["topk"],
+            "start_time": tool_call["start_time"],
         }
-    elif tool_call['name'] == 'gsm8k':
+    elif tool_call["name"] == "gsm8k":
         pass
     else:
         raise ValueError(f"Unsupported tool call type: {tool_call['name']}")
-    
+
     url = f"{url}/submit_request"
 
     async with aiohttp.ClientSession() as session:
@@ -213,13 +218,15 @@ async def run_single_tool_call_on_server_async(
 
     return result
 
+
 async def run_tool_calls_on_server_async(
-                                    tool_calls: List,
-                                    session: aiohttp.ClientSession,
-                                    max_retries: int = 4,
-                                    backoff_factor: float = 0.5,
-                                    host_addr: str = "localhost",
-                                    host_port: str = "8088"):
+    tool_calls: list,
+    session: aiohttp.ClientSession,
+    max_retries: int = 4,
+    backoff_factor: float = 0.5,
+    host_addr: str = "localhost",
+    host_port: str = "8088",
+):
     """
     Put the batch of tool-call tasks from distributed queue to centralized buffer on master node.
 
@@ -234,23 +241,28 @@ async def run_tool_calls_on_server_async(
     """
     submissions = []
     for tool_call in tool_calls:
-        if tool_call['name'] == 'search':
-            submissions.append({
-                "name": tool_call['name'],
-                "query_list": tool_call['arguments']['query_list'],
-                "topk": tool_call['arguments']['topk'],
-                "start_time": tool_call['start_time']
-            })
-        elif tool_call['name'] == 'sandbox_fusion':
+        if tool_call["name"] == "search":
+            submissions.append(
+                {
+                    "name": tool_call["name"],
+                    "query_list": tool_call["arguments"]["query_list"],
+                    "topk": tool_call["arguments"]["topk"],
+                    "start_time": tool_call["start_time"],
+                }
+            )
+        elif tool_call["name"] == "sandbox_fusion":
             from .sandbox_fusion_utils import generate_tool_call_code, generate_tool_call_input
-            submissions.append({
-                "name": tool_call['name'],
-                "solution": generate_tool_call_code(tool_call),
-                "input": generate_tool_call_input(tool_call),
-                "start_time": tool_call['start_time'],
-                "code_type": tool_call.get('code_type', 'python')
-            })
-        elif tool_call['name'] == 'gsm8k':
+
+            submissions.append(
+                {
+                    "name": tool_call["name"],
+                    "solution": generate_tool_call_code(tool_call),
+                    "input": generate_tool_call_input(tool_call),
+                    "start_time": tool_call["start_time"],
+                    "code_type": tool_call.get("code_type", "python"),
+                }
+            )
+        elif tool_call["name"] == "gsm8k":
             pass
         else:
             raise ValueError(f"Unsupported tool call type: {tool_call['name']}")
@@ -262,12 +274,14 @@ async def run_tool_calls_on_server_async(
         failed_indices = [i for i, result in enumerate(results) if result is None]
         # throw an error if any tool call failed after max retries
         if len(failed_indices) > 0:
-            print(f"run_tool_calls_on_server_async failed for {len(failed_indices)} tool calls after {max_retries} attempts.")
+            print(
+                f"run_tool_calls_on_server_async failed for {len(failed_indices)} tool calls after {max_retries} attempts."
+            )
 
     for i in range(len(results)):
         # only need to contain stdout and stderr here
         # align with verl/tools/utils/sandbox_fusion_tools.py
-        metadata = results[i]['metadata']
+        metadata = results[i]["metadata"]
 
         # we should always expect this since we don't have correct answer
         # sandbox_fusion
@@ -284,6 +298,5 @@ async def run_tool_calls_on_server_async(
             results[i] = metadata
         else:
             pass
-
 
     return results

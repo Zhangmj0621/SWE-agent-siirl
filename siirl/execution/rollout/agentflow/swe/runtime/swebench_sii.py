@@ -1,19 +1,19 @@
 # Support swebench verified dataset, using sii configs (with prebuilt images)
 
-from io import BytesIO
-from pydantic import BaseModel
-from dataclasses import dataclass
-from typing import cast
-import tempfile
 import os
+import tempfile
+from dataclasses import dataclass
+from io import BytesIO
+from typing import cast
 
-from .base import SWESampleData, Runtime, RuntimeBuilder
-from ..environment import ContainerStartArgs, ContainerEnv
-from ..base import SWESample
-
-from swebench.harness.grading import get_eval_report
-from swebench.harness.test_spec.test_spec import make_test_spec, TestSpec
+from pydantic import BaseModel
 from swebench.harness.constants import SWEbenchInstance
+from swebench.harness.grading import get_eval_report
+from swebench.harness.test_spec.test_spec import TestSpec, make_test_spec
+
+from ..base import SWESample
+from ..environment import ContainerEnv, ContainerStartArgs
+from .base import Runtime, RuntimeBuilder, SWESampleData
 
 
 @dataclass(frozen=True)
@@ -107,9 +107,7 @@ def map_image_to_acr(image: str) -> str:
 
     # Strip registry prefix if present (e.g., docker.io/, ghcr.io/, quay.io/, localhost:5000/)
     segments = image_part.split("/")
-    if len(segments) > 1 and (
-        "." in segments[0] or ":" in segments[0] or segments[0] == "localhost"
-    ):
+    if len(segments) > 1 and ("." in segments[0] or ":" in segments[0] or segments[0] == "localhost"):
         image_part = "/".join(segments[1:])
 
     # Replace "/" with "--" to flatten into a single repo tag

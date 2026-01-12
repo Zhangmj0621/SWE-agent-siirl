@@ -14,11 +14,9 @@
 
 import os
 import re
-
-from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
-from tqdm import tqdm
-from typing import Dict, Optional, Sequence
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 import datasets
 import numpy as np
@@ -27,11 +25,12 @@ import pyarrow.parquet as pq
 import torch
 from loguru import logger
 from torch.utils.data import Dataset
+from tqdm import tqdm
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 import siirl.utils.model_utils.torch_functional as F
-from siirl.utils.model_utils.model import compute_position_id_with_mask
 from siirl.params import SiiRLArguments
+from siirl.utils.model_utils.model import compute_position_id_with_mask
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -93,11 +92,11 @@ class PartitionedRLHFDataset(Dataset):
         self,
         config: SiiRLArguments,
         tokenizer: PreTrainedTokenizer,
-        processor: Optional[ProcessorMixin] = None,
+        processor: ProcessorMixin | None = None,
         ddp_rank: int = 0,
         ddp_world_size: int = 1,
         is_eval: bool = False,
-        drop_last: Optional[bool] = None,
+        drop_last: bool | None = None,
     ):
         super().__init__()
         self.tokenizer = tokenizer
@@ -119,7 +118,11 @@ class PartitionedRLHFDataset(Dataset):
         self.truncation = self.data_args.truncation
         self.return_raw_chat = self.data_args.return_raw_chat
         self.filter_overlong_prompts = self.data_args.filter_overlong_prompts
-        self.num_workers = self.data_args.preprocessing_num_workers if self.data_args.preprocessing_num_workers else max(1, os.cpu_count() // 8)
+        self.num_workers = (
+            self.data_args.preprocessing_num_workers
+            if self.data_args.preprocessing_num_workers
+            else max(1, os.cpu_count() // 8)
+        )
         self.force_on_the_fly = config.data.force_on_the_fly
         # self.image_max_pixels = self.data_args.processor.image_max_pixels
         # self.image_min_pixels = self.data_args.processor.image_min_pixels
@@ -133,15 +136,25 @@ class PartitionedRLHFDataset(Dataset):
         self.video_min_pixels = None
         self.video_fps = None
         self.video_maxlen = None
-        
-        
-        self.is_trailing_rank = False  # Indicates trailing ranks that received one less data item in round-robin partitioning.
+
+        self.is_trailing_rank = (
+            False  # Indicates trailing ranks that received one less data item in round-robin partitioning.
+        )
 
         if self._rank == 0:
-            logger.debug(f"Initializing PartitionedRLHFDataset with DDP rank {self.ddp_rank}, world size {self.ddp_world_size}, is_eval={self.is_eval}, drop_last={self.drop_last}")
+            logger.debug(
+                f"Initializing PartitionedRLHFDataset with DDP rank {self.ddp_rank}, "
+                f"world size {self.ddp_world_size}, is_eval={self.is_eval}, drop_last={self.drop_last}"
+            )
 
             if self.processor is not None:
-                logger.info(f"Set image_max_pixels={self.image_max_pixels}, image_min_pixels={self.image_min_pixels}, video_max_pixels={self.video_max_pixels}, video_min_pixels={self.video_min_pixels}, you can change these values via data.processor.image_max_pixels, etc.")
+                logger.info(
+                    f"Set image_max_pixels={self.image_max_pixels}, "
+                    f"image_min_pixels={self.image_min_pixels}, "
+                    f"video_max_pixels={self.video_max_pixels}, "
+                    f"video_min_pixels={self.video_min_pixels}, "
+                    f"you can change these values via data.processor.image_max_pixels, etc."
+                )
 
         # 1. Load the raw data partition for the current DDP rank
         dataset_files = self.data_args.val_files if is_eval else self.data_args.train_files
@@ -154,7 +167,7 @@ class PartitionedRLHFDataset(Dataset):
 
         # 2. Filter out prompts that are too long from the loaded partition
         raw_dataframe = self._filter_overlong_prompts(raw_dataframe)
-        
+
         # If this rank received fewer samples due to uneven partitioning, pad by duplicating the last row.
         if self.is_trailing_rank and raw_dataframe is not None and len(raw_dataframe) > 0:
             try:
@@ -166,11 +179,13 @@ class PartitionedRLHFDataset(Dataset):
                     last_row["extra_info"] = {"padded_duplicate": True}
                 last_row_ds = datasets.Dataset.from_list([last_row])
                 raw_dataframe = datasets.concatenate_datasets([raw_dataframe, last_row_ds])
-                logger.debug(f"DDP rank {self.ddp_rank} is a trailing rank, duplicating last row to pad partition. New length: {len(raw_dataframe)}")
+                logger.debug(
+                    f"DDP rank {self.ddp_rank} is a trailing rank, duplicating last row to pad partition. New length: {len(raw_dataframe)}"
+                )
             except Exception:
                 # We can safely ignore this exception because we mainly rely on the 'padded_duplicate' flag to identify padded elements.
                 pass
-            
+
         # 3. Preprocess the entire partition using multiple processes
         # By only removing the specific prompt_key, we ensure that other columns,
         # including complex types like dicts and strings from the original dataset,
@@ -182,15 +197,21 @@ class PartitionedRLHFDataset(Dataset):
             self.processed_dataframe = raw_dataframe
         else:
             if self._rank == 0:
-                logger.warning("Currently preloading and preprocessing the entire dataset. If you encounter Out-Of-Memory issues, please set data.force_on_the_fly=True to enable on-the-fly loading mode.")
+                logger.warning(
+                    "Currently preloading and preprocessing the entire dataset. "
+                    "If you encounter Out-Of-Memory issues, please set data.force_on_the_fly=True "
+                    "to enable on-the-fly loading mode."
+                )
             with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-                self.processed_dataframe = list(tqdm(
-                    executor.map(self._preprocess_function, raw_dataframe),
-                    total=len(raw_dataframe),
-                    desc="Processing"
-                ))
+                self.processed_dataframe = list(
+                    tqdm(
+                        executor.map(self._preprocess_function, raw_dataframe),
+                        total=len(raw_dataframe),
+                        desc="Processing",
+                    )
+                )
 
-    def _load_partitioned_raw_data(self, dataset_files: Sequence[str]) -> Optional[datasets.Dataset]:
+    def _load_partitioned_raw_data(self, dataset_files: Sequence[str]) -> datasets.Dataset | None:
         """
         Loads a partition of Parquet data for the current DDP rank.
         """
@@ -206,14 +227,24 @@ class PartitionedRLHFDataset(Dataset):
             for file_idx, pq_file in enumerate(pq_files):
                 for rg_idx in range(pq_file.num_row_groups):
                     num_rows = pq_file.metadata.row_group(rg_idx).num_rows
-                    row_group_infos.append({"file_idx": file_idx, "row_group_idx": rg_idx, "num_rows": num_rows, "start_row_idx_global": total_rows})
+                    row_group_infos.append(
+                        {
+                            "file_idx": file_idx,
+                            "row_group_idx": rg_idx,
+                            "num_rows": num_rows,
+                            "start_row_idx_global": total_rows,
+                        }
+                    )
                     total_rows += num_rows
 
             if self._rank == 0:
                 logger.debug(f"DDP rank={self.ddp_rank}, row group infos: {row_group_infos}")
 
             if total_rows < self.ddp_world_size:
-                raise RuntimeError(f"Total rows ({total_rows}) is less than DDP world size ({self.ddp_world_size}),  cannot partition data across ranks. Please ensure enough data is available.")
+                raise RuntimeError(
+                    f"Total rows ({total_rows}) is less than DDP world size ({self.ddp_world_size}), "
+                    f"cannot partition data across ranks. Please ensure enough data is available."
+                )
 
             # Compute partition indices
             if self.drop_last:
@@ -223,7 +254,10 @@ class PartitionedRLHFDataset(Dataset):
                 end = start + rows_per_rank
                 if self._rank == 0:
                     logger.warning(
-                        f"DDP Rank {self.ddp_rank} using drop_last=True, partitioning rows into {self.ddp_world_size} ranks with {rows_per_rank} rows each. Total used rows: {total_used_rows}, start={start}, end={end}. Total rows: {total_rows}, total dropped rows: {total_rows - total_used_rows}."
+                        f"DDP Rank {self.ddp_rank} using drop_last=True, partitioning rows into "
+                        f"{self.ddp_world_size} ranks with {rows_per_rank} rows each. "
+                        f"Total used rows: {total_used_rows}, start={start}, end={end}. "
+                        f"Total rows: {total_rows}, total dropped rows: {total_rows - total_used_rows}."
                     )
             else:
                 # Distribute the remainder to the first (total_rows % ddp_world_size) ranks
@@ -235,10 +269,12 @@ class PartitionedRLHFDataset(Dataset):
                 else:
                     start = remainder * (rows_per_rank + 1) + (self.ddp_rank - remainder) * rows_per_rank
                     end = start + rows_per_rank
-                    self.is_trailing_rank = True # There is one less sample compared to the previous ranks.
+                    self.is_trailing_rank = True  # There is one less sample compared to the previous ranks.
 
             if start >= end:
-                raise RuntimeError(f"Rank {self.ddp_rank} assigned empty partition: start={start}, end={end}, total_rows={total_rows}")
+                raise RuntimeError(
+                    f"Rank {self.ddp_rank} assigned empty partition: start={start}, end={end}, total_rows={total_rows}"
+                )
 
             # Find which row groups overlap with [start, end)
             selected_chunks = []
@@ -250,7 +286,14 @@ class PartitionedRLHFDataset(Dataset):
                     # Compute local slice within this row group
                     local_start = max(0, start - rg_start)
                     local_end = min(info["num_rows"], end - rg_start)
-                    selected_chunks.append({"file_idx": info["file_idx"], "row_group_idx": info["row_group_idx"], "local_start": local_start, "local_end": local_end})
+                    selected_chunks.append(
+                        {
+                            "file_idx": info["file_idx"],
+                            "row_group_idx": info["row_group_idx"],
+                            "local_start": local_start,
+                            "local_end": local_end,
+                        }
+                    )
 
             # Read and slice the necessary row groups
             tables = []
@@ -262,21 +305,29 @@ class PartitionedRLHFDataset(Dataset):
                 tables.append(table)
 
             if not tables:
-                raise RuntimeError(f"DDP Rank {self.ddp_rank} assigned rows [{start}, {end}) but failed to read any data.")
+                raise RuntimeError(
+                    f"DDP Rank {self.ddp_rank} assigned rows [{start}, {end}) but failed to read any data."
+                )
 
             final_table = pa.concat_tables(tables)
-            logger.debug(f"DDP rank={self.ddp_rank} loaded {len(final_table)} rows from {len(tables)} row groups. start={start}, end={end}, total_rows={total_rows}.")
+            logger.debug(
+                f"DDP rank={self.ddp_rank} loaded {len(final_table)} rows from {len(tables)} row groups. "
+                f"start={start}, end={end}, total_rows={total_rows}."
+            )
             return datasets.Dataset(final_table)
 
         except Exception as e:
-            logger.error(f"Failed during partitioned data loading for DDP rank {self.ddp_rank}: {dataset_files}. Error: {e}")
+            logger.error(
+                f"Failed during partitioned data loading for DDP rank {self.ddp_rank}: {dataset_files}. Error: {e}"
+            )
             raise
 
     def _filter_overlong_prompts(self, raw_dataframe: datasets.Dataset) -> datasets.Dataset:
         if self.filter_overlong_prompts:
             original_len = len(raw_dataframe)
             raw_dataframe = raw_dataframe.filter(
-                lambda doc: len(self.tokenizer.apply_chat_template(doc[self.prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
+                lambda doc: len(self.tokenizer.apply_chat_template(doc[self.prompt_key], add_generation_prompt=True))
+                <= self.max_prompt_length,
                 num_proc=self.num_workers,
                 desc=f"Rank {self.ddp_rank} filtering prompts longer than {self.max_prompt_length} tokens",
             )
@@ -308,7 +359,7 @@ class PartitionedRLHFDataset(Dataset):
                 message["content"] = content_list
         return messages
 
-    def _preprocess_function(self, row_dict: Dict) -> Dict:
+    def _preprocess_function(self, row_dict: dict) -> dict:
         """
         The core preprocessing logic applied to each sample via `datasets.map()`.
         """
@@ -328,11 +379,23 @@ class PartitionedRLHFDataset(Dataset):
             multi_modal_data = {}
             images = None
             if self.image_key in processed_row:
-                images = [process_image(image, self.image_max_pixels, self.image_min_pixels) for image in processed_row.pop(self.image_key)]
+                images = [
+                    process_image(image, self.image_max_pixels, self.image_min_pixels)
+                    for image in processed_row.pop(self.image_key)
+                ]
                 multi_modal_data["image"] = images
             videos = None
             if self.video_key in processed_row:
-                videos = [process_video(video, fps=self.video_fps, fps_max_frames=self.video_maxlen, max_pixels=self.video_max_pixels, min_pixels=self.video_min_pixels) for video in processed_row.pop(self.video_key)]
+                videos = [
+                    process_video(
+                        video,
+                        fps=self.video_fps,
+                        fps_max_frames=self.video_maxlen,
+                        max_pixels=self.video_max_pixels,
+                        min_pixels=self.video_min_pixels,
+                    )
+                    for video in processed_row.pop(self.video_key)
+                ]
                 multi_modal_data["video"] = [video.numpy() for video in videos]
 
             model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
@@ -405,10 +468,14 @@ class PartitionedRLHFDataset(Dataset):
         # add index for each prompt
         return processed_row
 
-    def __getitem__(self, item: int) -> Dict:
+    def __getitem__(self, item: int) -> dict:
         """
         Returns a preprocessed item from the dataset.
         """
         if self.processed_dataframe is None:
             raise IndexError("Dataset is empty or not initialized properly.")
-        return self.processed_dataframe[item] if not self.load_on_the_fly else self._preprocess_function(self.processed_dataframe[item])
+        return (
+            self.processed_dataframe[item]
+            if not self.load_on_the_fly
+            else self._preprocess_function(self.processed_dataframe[item])
+        )

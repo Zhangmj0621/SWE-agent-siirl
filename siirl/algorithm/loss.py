@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
 
 import torch
+
 from siirl.utils.model_utils.torch_functional import masked_mean
 
 
@@ -67,19 +67,25 @@ def compute_policy_loss_vanilla(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[object] = None,
-    rollout_is_weights: Optional[torch.Tensor] = None,
+    config: object | None = None,
+    rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute vanilla PPO clipped policy loss (Dual-clip PPO).
-    
+
     Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
     """
     assert config is not None
 
     clip_ratio = config.clip_ratio
-    clip_ratio_low = config.clip_ratio_low if hasattr(config, 'clip_ratio_low') and config.clip_ratio_low is not None else clip_ratio
-    clip_ratio_high = config.clip_ratio_high if hasattr(config, 'clip_ratio_high') and config.clip_ratio_high is not None else clip_ratio
-    clip_ratio_c = config.clip_ratio_c if hasattr(config, 'clip_ratio_c') else 3.0
+    clip_ratio_low = (
+        config.clip_ratio_low if hasattr(config, "clip_ratio_low") and config.clip_ratio_low is not None else clip_ratio
+    )
+    clip_ratio_high = (
+        config.clip_ratio_high
+        if hasattr(config, "clip_ratio_high") and config.clip_ratio_high is not None
+        else clip_ratio
+    )
+    clip_ratio_c = config.clip_ratio_c if hasattr(config, "clip_ratio_c") else 3.0
 
     cliprange = clip_ratio
     cliprange_low = clip_ratio_low
@@ -115,9 +121,7 @@ def compute_policy_loss_vanilla(
     # Dual-clip: additional lower bound for negative advantages
     pg_losses3 = -advantages * clip_ratio_c
     clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-    pg_clipfrac_lower = masked_mean(
-        torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask
-    )
+    pg_clipfrac_lower = masked_mean(torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask)
 
     # Select based on advantage sign
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)

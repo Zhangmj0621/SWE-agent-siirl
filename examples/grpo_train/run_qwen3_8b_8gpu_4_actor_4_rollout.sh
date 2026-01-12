@@ -200,7 +200,7 @@ main() {
     export RAY_MASTER_PORT=${RAY_MASTER_PORT:-6379}
     export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
     export RAY_MASTER_ADDR=$MASTER_ADDR
-    
+
     start_ray_cluster
 
     if [ "$NNODES" -gt 1 ] && [ "$NODE_RANK" = "0" ]; then
@@ -244,4 +244,3 @@ except:
 
 # --- Script Entrypoint ---
 main "$@"
-

@@ -14,6 +14,7 @@
 
 import copy
 import heapq
+
 import torch
 
 
@@ -22,7 +23,7 @@ def calculate_workload(seqlen_list: list[int]):
     Calculate the workload for a dense transformer block based on sequence length.
     FLOPs = 12 * hidden_size^2 * seqlen + 2 * hidden_size * seqlen^2
     Hardcodes the constants by a 7B model (hidden_size=4096),
-    so the FLOPs are propotional to (6 * 4096 * seqlen + seqlen^2).
+    so the FLOPs are proportional to (6 * 4096 * seqlen + seqlen^2).
     """
     if not isinstance(seqlen_list, torch.Tensor):
         seqlen_list = torch.tensor(seqlen_list, dtype=torch.int64)
@@ -127,9 +128,9 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     partitions = final_state.get_partitions()
     if equal_size:
         for i, partition in enumerate(partitions):
-            assert len(partition) * k_partitions == len(seqlen_list), (
-                f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
-            )
+            assert len(partition) * k_partitions == len(
+                seqlen_list
+            ), f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
     return partitions
 
 
@@ -231,7 +232,6 @@ def ceildiv(a, b):
 
 def roundup_divisible(a, b):
     return ((a + b - 1) // b) * b
-
 
 
 def get_reverse_idx(idx_map):

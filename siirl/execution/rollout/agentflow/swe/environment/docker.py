@@ -1,12 +1,13 @@
 import asyncio
 import os
-import logging
 import uuid
-from typing import Optional, BinaryIO
+from typing import BinaryIO
+
 from loguru import logger
+
 from siirl.execution.rollout.agentflow.swe.environment.base import ContainerBuildArgs
 
-from .base import ContainerEnv, ContainerEnvBuilder, ContainerStartArgs, ContainerOutput
+from .base import ContainerEnv, ContainerEnvBuilder, ContainerOutput, ContainerStartArgs
 
 
 class DockerEnv(ContainerEnv):
@@ -16,9 +17,9 @@ class DockerEnv(ContainerEnv):
         self,
         container_id: str,
         image: str,
-        default_cwd: Optional[str] = None,
-        default_env: Optional[dict[str, str]] = None,
-        default_forward_env: Optional[list[str]] = None,
+        default_cwd: str | None = None,
+        default_env: dict[str, str] | None = None,
+        default_forward_env: list[str] | None = None,
     ):
         self.container_id = container_id
         self.image = image
@@ -42,7 +43,7 @@ class DockerEnv(ContainerEnv):
     def _build_docker_exec_args(
         self,
         container_id: str,
-        cwd: Optional[str],
+        cwd: str | None,
         env: dict[str, str],
     ) -> list[str]:
         """Build docker exec arguments for working directory and environment variables."""
@@ -57,7 +58,7 @@ class DockerEnv(ContainerEnv):
     async def popen(
         self,
         cmd: str,
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         env: dict[str, str] = {},
         forward_env: list[str] = [],
         timeout: float = 180.0,
@@ -68,8 +69,8 @@ class DockerEnv(ContainerEnv):
     async def execute(
         self,
         cmd: str,
-        stdin: Optional[BinaryIO] = None,
-        cwd: Optional[str] = None,
+        stdin: BinaryIO | None = None,
+        cwd: str | None = None,
         env: dict[str, str] = {},
         forward_env: list[str] = [],
         timeout: float = 180.0,
@@ -80,9 +81,7 @@ class DockerEnv(ContainerEnv):
 
         merged_env = self._merge_env(env, forward_env)
         effective_cwd = cwd or self.default_cwd
-        docker_args = self._build_docker_exec_args(
-            self.container_id, effective_cwd, merged_env
-        )
+        docker_args = self._build_docker_exec_args(self.container_id, effective_cwd, merged_env)
         docker_args += ["/bin/sh", "-c", cmd]
         logger.debug("[DockerEnv] running", docker_args)
 
@@ -107,14 +106,10 @@ class DockerEnv(ContainerEnv):
 
             returncode = process.returncode if process.returncode is not None else 127
 
-            logger.debug(
-                f"[Dockerenv] Command completed with exit code {returncode}, output length: {len(stdout)}"
-            )
+            logger.debug(f"[Dockerenv] Command completed with exit code {returncode}, output length: {len(stdout)}")
 
             if check and returncode != 0:
-                raise Exception(
-                    f"docker exec failed (exit code {returncode}): {stdout.decode(errors='replace')[:200]}"
-                )
+                raise Exception(f"docker exec failed (exit code {returncode}): {stdout.decode(errors='replace')[:200]}")
 
             return ContainerOutput(output=stdout, returncode=returncode)
 
@@ -140,7 +135,7 @@ class DockerEnv(ContainerEnv):
         src: str,
         dst: str,
         upload: bool = True,
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         timeout=180.0,
     ):
         if self._closed:
@@ -195,9 +190,7 @@ class DockerEnv(ContainerEnv):
 
             if returncode != 0:
                 error_msg = stderr.decode("utf-8", errors="replace").strip()
-                raise Exception(
-                    f"docker cp failed (exit code {returncode}): {error_msg}"
-                )
+                raise Exception(f"docker cp failed (exit code {returncode}): {error_msg}")
 
         except asyncio.TimeoutError:
             raise TimeoutError("Copy operation timed out after 180s")
@@ -217,9 +210,7 @@ class DockerEnv(ContainerEnv):
             )
             await asyncio.wait_for(process.communicate(), timeout=30.0)
         except Exception as e:
-            logger.debug(
-                f"[DockerEnv] Failed to delete container {self.container_id}: {e}"
-            )
+            logger.debug(f"[DockerEnv] Failed to delete container {self.container_id}: {e}")
         finally:
             self._closed = True
 
@@ -238,9 +229,7 @@ class DockerEnvBuilder(ContainerEnvBuilder):
         """
         Build a Docker image using the provided build arguments.
         """
-        dockerfile_path = args.dockerfile_path or os.path.join(
-            args.build_dir, "Dockerfile"
-        )
+        dockerfile_path = args.dockerfile_path or os.path.join(args.build_dir, "Dockerfile")
         build_args = [
             "build",
             "-t",
@@ -291,14 +280,8 @@ class DockerEnvBuilder(ContainerEnvBuilder):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                 )
-                push_stdout, _ = await asyncio.wait_for(
-                    push_process.communicate(), timeout=timeout
-                )
-                push_returncode = (
-                    push_process.returncode
-                    if push_process.returncode is not None
-                    else 127
-                )
+                push_stdout, _ = await asyncio.wait_for(push_process.communicate(), timeout=timeout)
+                push_returncode = push_process.returncode if push_process.returncode is not None else 127
                 if push_returncode != 0:
                     raise Exception(
                         f"Docker push failed (exit code {push_returncode}): {push_stdout.decode(errors='replace')[:200]}"
@@ -313,9 +296,7 @@ class DockerEnvBuilder(ContainerEnvBuilder):
     async def start(self, args: ContainerStartArgs) -> DockerEnv:
         # Generate unique container name
         container_name = f"swebench-{uuid.uuid4().hex[:8]}"
-        logger.info(
-            f"[DockerEnvBuilder] Creating container {container_name} with image {args.image}"
-        )
+        logger.info(f"[DockerEnvBuilder] Creating container {container_name} with image {args.image}")
         env_args = []
         for env_key in args.forward_env:
             if env_key in os.environ:

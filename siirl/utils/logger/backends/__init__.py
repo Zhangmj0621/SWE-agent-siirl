@@ -19,58 +19,59 @@ Provides a factory pattern for creating logger backends.
 
 Usage:
     from siirl.utils.logger.backends import BackendRegistry, BackendConfig
-    
+
     # Create a backend
     config = BackendConfig(project_name="project", experiment_name="exp")
     backend = BackendRegistry.create("wandb", config)
-    
+
     # Register a custom backend
     BackendRegistry.register("custom", MyCustomBackend)
 """
 
 from typing import Dict, Type
-from .base import LoggerBackend, BackendConfig
+
+from .base import BackendConfig, LoggerBackend
 
 
 class BackendRegistry:
     """
     Registry for logger backends.
-    
+
     Supports dynamic registration and creation of backends.
     """
-    
-    _backends: Dict[str, Type] = {}
-    
+
+    _backends: dict[str, type] = {}
+
     @classmethod
-    def register(cls, name: str, backend_class: Type) -> None:
+    def register(cls, name: str, backend_class: type) -> None:
         """
         Register a new backend.
-        
+
         Args:
             name: Backend identifier
             backend_class: Backend class to register
         """
         cls._backends[name] = backend_class
-    
+
     @classmethod
     def create(cls, name: str, config: BackendConfig) -> LoggerBackend:
         """
         Create a backend instance.
-        
+
         Args:
             name: Backend identifier
             config: Backend configuration
-            
+
         Returns:
             Backend instance
-            
+
         Raises:
             ValueError: If backend is not registered
         """
         if name not in cls._backends:
             raise ValueError(f"Unknown backend: {name}. Available: {list(cls._backends.keys())}")
         return cls._backends[name](config)
-    
+
     @classmethod
     def available(cls) -> list:
         """Get list of available backend names."""
@@ -79,14 +80,14 @@ class BackendRegistry:
 
 def _register_builtin_backends():
     """Register built-in backends."""
+    from .clearml import ClearMLBackend
     from .console import ConsoleBackend
-    from .wandb import WandBBackend
-    from .tensorboard import TensorBoardBackend
     from .mlflow import MLflowBackend
     from .swanlab import SwanLabBackend
-    from .clearml import ClearMLBackend
+    from .tensorboard import TensorBoardBackend
     from .vemlp_wandb import VemlpWandBBackend
-    
+    from .wandb import WandBBackend
+
     BackendRegistry.register("console", ConsoleBackend)
     BackendRegistry.register("wandb", WandBBackend)
     BackendRegistry.register("tensorboard", TensorBoardBackend)
@@ -100,4 +101,3 @@ def _register_builtin_backends():
 _register_builtin_backends()
 
 __all__ = ["BackendRegistry", "BackendConfig", "LoggerBackend"]
-

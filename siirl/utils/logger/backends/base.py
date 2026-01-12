@@ -18,33 +18,34 @@ Logger Backend Protocol and Configuration
 Defines the interface that all logger backends must implement.
 """
 
-from typing import Protocol, Dict, List, Any, Optional
 from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 
 @dataclass
 class BackendConfig:
     """
     Configuration for logger backends.
-    
+
     Attributes:
         project_name: Project name (e.g., "siirl_agentic")
         experiment_name: Experiment name (e.g., "gsm8k_grpo_exp1")
         config: Training configuration dictionary to log
         extra: Backend-specific configuration (e.g., {"proxy": "..."} for wandb)
     """
+
     project_name: str
     experiment_name: str
-    config: Optional[Dict[str, Any]] = None
-    extra: Optional[Dict[str, Any]] = field(default_factory=dict)
+    config: dict[str, Any] | None = None
+    extra: dict[str, Any] | None = field(default_factory=dict)
 
 
 class LoggerBackend(Protocol):
     """
     Protocol defining the interface for logger backends.
-    
+
     All backends must implement these methods to ensure consistency.
-    
+
     Methods:
         name: Backend identifier property
         log: Log scalar metrics
@@ -52,37 +53,37 @@ class LoggerBackend(Protocol):
         log_table: Log tabular data
         finish: Clean up resources
     """
-    
+
     @property
     def name(self) -> str:
         """Backend name identifier."""
         ...
-    
-    def log(self, data: Dict[str, float], step: int) -> None:
+
+    def log(self, data: dict[str, float], step: int) -> None:
         """
         Log scalar metrics.
-        
+
         Args:
             data: Dictionary of metric names to values
             step: Current training step
         """
         ...
-    
+
     def log_text(self, tag: str, text: str, step: int) -> None:
         """
         Log text content.
-        
+
         Args:
             tag: Tag/label for the text
             text: Text content to log
             step: Current training step
         """
         ...
-    
-    def log_table(self, tag: str, columns: List[str], data: List[List[Any]], step: int) -> None:
+
+    def log_table(self, tag: str, columns: list[str], data: list[list[Any]], step: int) -> None:
         """
         Log tabular data.
-        
+
         Args:
             tag: Tag/label for the table
             columns: List of column names
@@ -90,12 +91,11 @@ class LoggerBackend(Protocol):
             step: Current training step
         """
         ...
-    
+
     def finish(self) -> None:
         """
         Clean up resources and close connections.
-        
+
         Should be called when logging is complete.
         """
         ...
-

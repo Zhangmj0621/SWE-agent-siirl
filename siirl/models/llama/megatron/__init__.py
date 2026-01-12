@@ -12,15 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .modeling_llama_megatron import (
+from .modeling_llama_megatron import (  # rmpad with megatron; rmpad with megatron and pipeline parallelism; original model with megatron
     ParallelLlamaForCausalLM,
-    # rmpad with megatron
     ParallelLlamaForCausalLMRmPad,
-    # rmpad with megatron and pipeline parallelism
     ParallelLlamaForCausalLMRmPadPP,
     ParallelLlamaForValueRmPad,
     ParallelLlamaForValueRmPadPP,
-    # original model with megatron
     ParallelLlamaModel,
 )
 

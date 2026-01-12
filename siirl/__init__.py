@@ -27,8 +27,13 @@ Log configuration can be customized via environment variables:
 
 from siirl.utils.logger.logging_utils import set_basic_config
 
+try:
+    from siirl._version import __version__
+except ImportError:
+    from siirl.__version__ import __version__
+
 # Automatically configure logging when siirl is imported
 # This ensures consistent logging across all processes (main process and Ray actors)
 set_basic_config()
 
-__all__ = []
+__all__ = ["__version__"]

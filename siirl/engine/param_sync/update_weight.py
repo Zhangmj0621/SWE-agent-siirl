@@ -1,6 +1,6 @@
 import socket
 from abc import abstractmethod
-from typing import Sequence
+from collections.abc import Sequence
 
 import ray
 import torch
@@ -13,9 +13,6 @@ from tqdm import tqdm
 
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.distributed_utils import get_gloo_group, init_process_group
-import debugpy
-
-from . import mbridge_patch
 
 
 class ParamSyncInterface:
@@ -24,7 +21,7 @@ class ParamSyncInterface:
         self.model = model
         self.bridge = bridge
         if self.bridge is not None:
-            from . import mbridge_patch
+            pass
         self.weight_version = 0
         self._model_update_groups = None
 
@@ -35,6 +32,7 @@ class ParamSyncInterface:
     @abstractmethod
     def update_weights(self) -> None:
         pass
+
 
 class ParamSyncDistributed(ParamSyncInterface):
     def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
@@ -115,9 +113,11 @@ class ParamSyncDistributed(ParamSyncInterface):
 
     def _check_weight_version(self):
         version_list = ray.get([worker.weight_version.remote() for worker in self.rollout_workers])
-        for idx,v in enumerate(version_list):
+        for idx, v in enumerate(version_list):
             if v != self.weight_version:
-                raise ValueError(f"Weight version mismatch!, {idx}th rollout weight version: {v}, trainer weight version: {self.weight_version}")
+                raise ValueError(
+                    f"Weight version mismatch!, {idx}th rollout weight version: {v}, trainer weight version: {self.weight_version}"
+                )
         return True
 
     def _update_param_sync_bucket(

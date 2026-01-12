@@ -1,0 +1,42 @@
+# MANIFEST.in
+# Specifies additional files to include in the source distribution
+
+# Include important documentation files
+include README.md
+include LICENSE
+include CONTRIBUTING.md
+include INSTALL.md
+
+# Include configuration files
+include pyproject.toml
+include setup.py
+include requirements.txt
+include .pre-commit-config.yaml
+
+# Include all YAML configuration files
+recursive-include siirl *.yaml
+recursive-include siirl *.yml
+
+# Include type hints marker
+include siirl/py.typed
+
+# Include version information
+include siirl/__version__.py
+
+# Exclude unnecessary files
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude *.dylib
+global-exclude .DS_Store
+global-exclude *.log
+
+# Exclude test and development files
+prune tests
+prune docs
+prune examples
+prune .git
+prune .github
+prune build
+prune dist
+prune *.egg-info

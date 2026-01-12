@@ -22,24 +22,23 @@ HuggingFace format.
 
 Usage:
     from siirl.models.weight_loader_registry import get_weight_saver
-    
+
     weight_saver = get_weight_saver("llama")
     state_dict = weight_saver(model, hf_config, dtype=torch.bfloat16)
 """
 
-from typing import Callable, Dict, Optional
+from collections.abc import Callable
 
 from loguru import logger
 
-
 # Global registry for weight savers
-_WEIGHT_SAVERS: Dict[str, Callable] = {}
+_WEIGHT_SAVERS: dict[str, Callable] = {}
 
 
 def register_weight_saver(arch: str, saver: Callable) -> None:
     """
     Register a weight saver function for a model architecture.
-    
+
     Args:
         arch: Architecture name (e.g., "llama", "qwen2").
         saver: Function that converts Megatron weights to HuggingFace format.
@@ -55,21 +54,21 @@ def register_weight_saver(arch: str, saver: Callable) -> None:
 def get_weight_saver(arch: str) -> Callable:
     """
     Get the weight saver function for the given architecture.
-    
+
     Args:
         arch: Architecture name (e.g., "llama", "qwen2").
-    
+
     Returns:
         The weight saver function for the architecture.
-    
+
     Raises:
         ValueError: If the architecture is not supported.
     """
     arch_lower = arch.lower()
-    
+
     # Lazy registration of built-in weight savers
     _ensure_builtin_savers_registered()
-    
+
     if arch_lower not in _WEIGHT_SAVERS:
         raise ValueError(
             f"Unsupported architecture for weight saving: {arch}. "
@@ -82,7 +81,7 @@ def get_weight_saver(arch: str) -> Callable:
 def list_supported_architectures() -> list:
     """
     List all supported architectures for weight saving.
-    
+
     Returns:
         List of supported architecture names.
     """
@@ -97,12 +96,12 @@ def _ensure_builtin_savers_registered() -> None:
     """
     if _WEIGHT_SAVERS:
         return
-    
+
     try:
         from siirl.models.llama.megatron.checkpoint_utils.llama_saver import (
             merge_megatron_ckpt_llama,
         )
-        
+
         # Register Llama-based architectures
         # Llama and Qwen2 use the same saver since they have similar architectures
         _WEIGHT_SAVERS["llama"] = merge_megatron_ckpt_llama
@@ -110,8 +109,7 @@ def _ensure_builtin_savers_registered() -> None:
         _WEIGHT_SAVERS["llama3"] = merge_megatron_ckpt_llama
         _WEIGHT_SAVERS["qwen2"] = merge_megatron_ckpt_llama
         _WEIGHT_SAVERS["qwen3"] = merge_megatron_ckpt_llama
-        
+
         logger.debug("Registered built-in weight savers for: llama, llama2, llama3, qwen2, qwen3")
     except ImportError as e:
         logger.warning(f"Failed to register built-in weight savers: {e}")
-

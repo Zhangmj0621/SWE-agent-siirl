@@ -24,7 +24,6 @@ import glob
 import os
 import shutil
 import warnings
-from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -34,25 +33,22 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from siirl.params.model_args import CheckpointArguments
 from siirl.utils.checkpoint.base_checkpoint_manager import BaseCheckpointManager
-from siirl.utils.megatron.dist_checkpointing import (
-    load_dist_checkpointing,
-    save_dist_checkpointing,
-)
+from siirl.utils.megatron.dist_checkpointing import load_dist_checkpointing, save_dist_checkpointing
 
 
 class MegatronCheckpointManager(BaseCheckpointManager):
     """
     Megatron checkpoint manager with configurable save/load contents.
-    
+
     This manager handles saving and loading of Megatron distributed checkpoints,
     with optional support for converting and saving in HuggingFace format.
-    
+
     Key features:
         - Distributed checkpoint saving/loading using Megatron's dist_checkpointing
         - Optional HuggingFace format model saving (when 'hf_model' in save_contents)
         - Support for tensor parallel, pipeline parallel configurations
         - Automatic cleanup of old checkpoints
-    
+
     Example:
         ```python
         # Create manager with HF saving enabled
@@ -69,7 +65,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             model_path="/path/to/model",
             arch="llama",
         )
-        
+
         # Save checkpoint (will also save HF format)
         manager.save_checkpoint(local_path="checkpoints/actor", global_step=100)
         ```
@@ -80,7 +76,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         model,
         optimizer,
         lr_scheduler=None,
-        processing_class: Union[PreTrainedTokenizer, ProcessorMixin] = None,
+        processing_class: PreTrainedTokenizer | ProcessorMixin = None,
         checkpoint_config: CheckpointArguments = None,
         hf_config=None,
         model_path: str = None,
@@ -91,7 +87,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
     ):
         """
         Initialize Megatron checkpoint manager.
-        
+
         Args:
             model: Megatron model or list of models (for virtual pipeline).
             optimizer: Megatron optimizer.
@@ -112,10 +108,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             processing_class=processing_class,
             checkpoint_config=checkpoint_config,
         )
-        
+
         # Ensure model is a list for virtual pipeline support
         self.model = model if isinstance(model, list) else [model]
-        
+
         # HF model saving related attributes
         self.hf_config = hf_config
         self.model_path = model_path
@@ -133,11 +129,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
     ) -> None:
         """
         Save checkpoint using Megatron distributed checkpointing.
-        
+
         This method saves the model, optimizer, and scheduler states in Megatron's
         distributed checkpoint format. If 'hf_model' is in save_contents, it will
         also save the model in HuggingFace format.
-        
+
         Args:
             local_path: Local directory path to save the checkpoint.
             hdfs_path: HDFS path (not implemented, reserved for future use).
@@ -146,7 +142,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                              Note: global_step_* cleanup is handled by upper-level manager.
         """
         self.previous_global_step = global_step
-        
+
         dist_checkpoint_path = os.path.join(local_path, f"step_{global_step}")
 
         # Create directory on all ranks before saving
@@ -192,7 +188,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
     ) -> None:
         """
         Load checkpoint using Megatron distributed checkpointing.
-        
+
         Args:
             local_path: Local directory path to load the checkpoint from.
             hdfs_path: HDFS path (not implemented, reserved for future use).
@@ -232,7 +228,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
     def _generate_state_dict(self) -> dict:
         """
         Generate sharded state dict for save/load operations.
-        
+
         Returns:
             Dictionary containing model, optimizer, and lr_scheduler states.
         """
@@ -268,9 +264,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
     def _load_state_dict(self, state_dict: dict) -> None:
         """
         Load state dict into lr_scheduler.
-        
+
         Note: Model and optimizer states are loaded automatically by load_dist_checkpointing.
-        
+
         Args:
             state_dict: Dictionary containing loaded states.
         """
@@ -281,25 +277,23 @@ class MegatronCheckpointManager(BaseCheckpointManager):
     def _save_hf_model(self, local_path: str, global_step: int) -> None:
         """
         Convert Megatron weights to HuggingFace format and save.
-        
+
         This method uses the registered weight saver for the model architecture
         to merge sharded parameters and save in HuggingFace format.
-        
+
         Args:
             local_path: Base path for saving the HF model.
             global_step: Current global step (used in path).
         """
         if self.arch is None:
             logger.warning(
-                "Cannot save HF model: 'arch' not specified. "
-                "Set arch parameter to enable HF model saving."
+                "Cannot save HF model: 'arch' not specified. " "Set arch parameter to enable HF model saving."
             )
             return
 
         if self.hf_config is None:
             logger.warning(
-                "Cannot save HF model: 'hf_config' not specified. "
-                "Set hf_config parameter to enable HF model saving."
+                "Cannot save HF model: 'hf_config' not specified. " "Set hf_config parameter to enable HF model saving."
             )
             return
 
@@ -311,7 +305,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             logger.warning(f"Cannot save HF model: {e}")
             return
 
-        logger.info(f"Converting Megatron checkpoint to HuggingFace format...")
+        logger.info("Converting Megatron checkpoint to HuggingFace format...")
 
         # Merge sharded weights into a single state dict
         state_dict = weight_saver(
@@ -355,7 +349,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
     def _save_tokenizer_and_config(self, local_path: str) -> None:
         """
         Save tokenizer and HF config to the checkpoint directory.
-        
+
         Args:
             local_path: Base path for saving.
         """
@@ -385,9 +379,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 try:
                     from transformers import GenerationConfig
 
-                    generation_config = GenerationConfig.from_pretrained(
-                        self.hf_config.name_or_path
-                    )
+                    generation_config = GenerationConfig.from_pretrained(self.hf_config.name_or_path)
                     generation_config.save_pretrained(save_path)
                 except Exception:
                     # Generation config may not be available for all models
@@ -396,16 +388,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         except Exception as e:
             logger.warning(f"Failed to save tokenizer/config: {e}")
 
-    def _cleanup_old_step_checkpoints(
-        self, local_path: str, max_ckpt_to_keep: int
-    ) -> None:
+    def _cleanup_old_step_checkpoints(self, local_path: str, max_ckpt_to_keep: int) -> None:
         """
         Remove old step_* subdirectories to save disk space.
-        
+
         Note: This only cleans up step_* directories within the local_path.
         The cleanup of global_step_* directories is handled by the upper-level
         CheckpointManager.
-        
+
         Args:
             local_path: Base path containing step_* directories.
             max_ckpt_to_keep: Maximum number of step_* directories to keep.

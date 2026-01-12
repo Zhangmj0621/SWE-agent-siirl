@@ -11,16 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 import importlib
+import os
 import sys
+from collections.abc import Callable
 from functools import partial
+
 from loguru import logger
-from typing import Optional, Callable
 
 from siirl.params import SiiRLArguments
 
-def load_custom_reward_function(config: SiiRLArguments) -> Optional[Callable]:
+
+def load_custom_reward_function(config: SiiRLArguments) -> Callable | None:
     """
     Dynamically loads a custom reward function from a user-specified file.
 

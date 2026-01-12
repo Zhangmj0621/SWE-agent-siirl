@@ -1,31 +1,31 @@
+import datetime
 import os
 from functools import partial
 
 # Disable Transformer Engine to avoid ABI compatibility issues
 # This is needed when transformer_engine is compiled for a different PyTorch version
-os.environ.setdefault('NVTE_FRAMEWORK', 'none')
+os.environ.setdefault("NVTE_FRAMEWORK", "none")
 
 import torch
 import torch.distributed
-from torch import nn
-from omegaconf import OmegaConf
-from tensordict import TensorDict, NonTensorData
-
 from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
+from omegaconf import DictConfig, OmegaConf
+from tensordict import NonTensorData, TensorDict
+from torch import nn
 
-from siirl.engine.actor.utils import append_to_dict
-from siirl.algorithm.loss import agg_loss, get_policy_loss_fn, compute_value_loss
 from siirl.algorithm.kl_penalty import kl_penalty
+from siirl.algorithm.loss import agg_loss, compute_value_loss, get_policy_loss_fn
+from siirl.engine.actor.utils import append_to_dict, set_random_seed
 from siirl.params import SiiRLArguments
-
-from siirl.utils.backend.device import get_device_id, get_device_name, get_torch_device
-from siirl.utils.timer import Timer
-from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
-from siirl.utils.model_utils.flops_counter import FlopsCounter
-from siirl.utils.model_utils.torch_dtypes import PrecisionType
-from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean
+from siirl.utils.backend.device import (
+    get_device_id,
+    get_device_name,
+    get_nccl_backend,
+    get_torch_device,
+)
+from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from siirl.utils.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
@@ -33,9 +33,15 @@ from siirl.utils.megatron.megatron_utils import (
     offload_megatron_optimizer,
 )
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
-from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
-from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
-
+from siirl.utils.megatron.tensor_parallel import (
+    vocab_parallel_entropy,
+    vocab_parallel_log_probs_from_logits,
+)
+from siirl.utils.model_utils.flops_counter import FlopsCounter
+from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
+from siirl.utils.model_utils.torch_dtypes import PrecisionType
+from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean
+from siirl.utils.timer import Timer
 
 class ActorWorker:
     def __init__(self, config: SiiRLArguments):
@@ -69,12 +75,13 @@ class ActorWorker:
     ):
         """Initialize HuggingFace and Transformer configs"""
         from transformers import AutoConfig
-        from siirl.models.mcore import hf_to_mcore_config
+
         from siirl.models.loader import load_tokenizer
+        from siirl.models.mcore import hf_to_mcore_config
         from siirl.utils.model_utils.model import update_model_config
 
         # Initialize tokenizer
-        self.local_path=model_path
+        self.local_path = model_path
         if tokenizer_or_path is None:
             self.tokenizer = load_tokenizer(path=model_path)
         elif isinstance(tokenizer_or_path, str):
@@ -104,7 +111,9 @@ class ActorWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
+                print(
+                    "mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`"
+                )
 
             bridge = AutoBridge.from_config(hf_config)
             bridge.set_extra_args(**override_transformer_config)
@@ -116,14 +125,31 @@ class ActorWorker:
         self.hf_config = hf_config
         self.tf_config = tf_config
 
-    def _build_actor_model_optimizer(self, model_path, optim_config, override_model_config,
-                                     override_transformer_config, override_ddp_config):
-        from siirl.utils.megatron.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
-        from siirl.engine.actor.optimizer import get_megatron_optimizer, get_megatron_optimizer_param_scheduler, init_megatron_optim_config
+    def _build_actor_model_optimizer(
+        self,
+        model_path,
+        optim_config,
+        override_model_config,
+        override_transformer_config,
+        override_ddp_config,
+    ):
+        from siirl.engine.actor.optimizer import (
+            get_megatron_optimizer,
+            get_megatron_optimizer_param_scheduler,
+            init_megatron_optim_config,
+        )
+        from siirl.utils.megatron.megatron_utils import (
+            McoreModuleWrapperConfig,
+            make_megatron_module,
+        )
 
         self._init_hf_config_and_tf_config(
-            model_path, model_path, self.dtype, override_model_config,
-            override_transformer_config, self.actor_ref_config.model.trust_remote_code,
+            model_path,
+            model_path,
+            self.dtype,
+            override_model_config,
+            override_transformer_config,
+            self.actor_ref_config.model.trust_remote_code,
             self.actor_ref_config.actor.megatron.use_mbridge,
         )
 
@@ -135,8 +161,11 @@ class ActorWorker:
         )
 
         actor_module = make_megatron_module(
-            wrap_config=wrap_config, tf_config=self.tf_config, hf_config=self.hf_config,
-            bridge=self.bridge, override_model_config=override_model_config,
+            wrap_config=wrap_config,
+            tf_config=self.tf_config,
+            hf_config=self.hf_config,
+            bridge=self.bridge,
+            override_model_config=override_model_config,
             override_ddp_config=override_ddp_config,
         )
 
@@ -145,13 +174,27 @@ class ActorWorker:
                 local_model_path = get_hf_model_path(self.actor_ref_config)
                 self.bridge.load_weights(actor_module, local_model_path)
             else:
-                load_megatron_gptmodel_weights(self.actor_ref_config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False)
+                load_megatron_gptmodel_weights(
+                    self.actor_ref_config,
+                    self.hf_config,
+                    actor_module,
+                    params_dtype=self.dtype,
+                    is_value_model=False,
+                )
 
         optim_megatron_config = init_megatron_optim_config(optim_config)
         actor_optimizer = get_megatron_optimizer(model=actor_module, config=optim_megatron_config)
-        actor_optimizer_scheduler = get_megatron_optimizer_param_scheduler(optimizer=actor_optimizer, config=optim_config)
+        actor_optimizer_scheduler = get_megatron_optimizer_param_scheduler(
+            optimizer=actor_optimizer, config=optim_config
+        )
 
-        return actor_module, actor_optimizer, actor_optimizer_scheduler, self.hf_config, optim_config
+        return (
+            actor_module,
+            actor_optimizer,
+            actor_optimizer_scheduler,
+            self.hf_config,
+            optim_config,
+        )
 
     def init_model(self):
         override_model_config = self.actor_ref_config.model.override_config
@@ -162,14 +205,19 @@ class ActorWorker:
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         optim_config = self.actor_ref_config.actor.optim
-        self.actor_module, self.actor_optimizer, self.actor_optimizer_scheduler, self.actor_model_config, self.actor_optim_config = \
-            self._build_actor_model_optimizer(
-                model_path=self.actor_ref_config.model.path,
-                optim_config=optim_config,
-                override_model_config=override_model_config,
-                override_transformer_config=override_transformer_config,
-                override_ddp_config=override_ddp_config,
-            )
+        (
+            self.actor_module,
+            self.actor_optimizer,
+            self.actor_optimizer_scheduler,
+            self.actor_model_config,
+            self.actor_optim_config,
+        ) = self._build_actor_model_optimizer(
+            model_path=self.actor_ref_config.model.path,
+            optim_config=optim_config,
+            override_model_config=override_model_config,
+            override_transformer_config=override_transformer_config,
+            override_ddp_config=override_ddp_config,
+        )
 
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
@@ -187,9 +235,8 @@ class ActorWorker:
         self.checkpoint_manager = MegatronCheckpointManager(
             model=self.actor_module,
             optimizer=self.actor_optimizer,
-            lr_scheduler=self.actor_optimizer_scheduler
+            lr_scheduler=self.actor_optimizer_scheduler,
         )
-
 
         # Initialize FlopsCounter for MFU calculation
         self.flops_counter = FlopsCounter(self.hf_config, forward_only=False)
@@ -217,13 +264,13 @@ class ActorWorker:
         # only computes 1/TP of the model FLOPs. So we need to divide by TP world size.
         if "global_token_num" in data:
             global_token_num = data["global_token_num"]
-            if hasattr(global_token_num, 'data'):
+            if hasattr(global_token_num, "data"):
                 global_token_num = global_token_num.data
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
             if promised_flops > 0:
                 tp_world_size = mpu.get_tensor_model_parallel_world_size()
                 metrics["perf/mfu/actor"] = estimated_flops / promised_flops / tp_world_size
-        
+
         metrics["perf/delta_time/actor"] = delta_time
 
         # Add GPU memory metrics
@@ -266,7 +313,7 @@ class ActorWorker:
         self.checkpoint_manager.save_checkpoint(
             local_path=local_path,
             global_step=global_step,
-            max_ckpt_to_keep=max_ckpt_to_keep
+            max_ckpt_to_keep=max_ckpt_to_keep,
         )
 
         if self._is_offload_param:
@@ -321,12 +368,13 @@ class ReferenceWorker:
     ):
         """Initialize HuggingFace and Transformer configs"""
         from transformers import AutoConfig
-        from siirl.models.mcore import hf_to_mcore_config
+
         from siirl.models.loader import load_tokenizer
+        from siirl.models.mcore import hf_to_mcore_config
         from siirl.utils.model_utils.model import update_model_config
 
         # Initialize tokenizer
-        self.local_path=model_path
+        self.local_path = model_path
         if tokenizer_or_path is None:
             self.tokenizer = load_tokenizer(path=model_path)
         elif isinstance(tokenizer_or_path, str):
@@ -356,8 +404,9 @@ class ReferenceWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
-
+                print(
+                    "mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`"
+                )
 
             bridge = AutoBridge.from_config(hf_config)
             bridge.set_extra_args(**override_transformer_config)
@@ -370,11 +419,18 @@ class ReferenceWorker:
         self.tf_config = tf_config
 
     def _build_ref_model(self, model_path, override_model_config, override_transformer_config):
-        from siirl.utils.megatron.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
+        from siirl.utils.megatron.megatron_utils import (
+            McoreModuleWrapperConfig,
+            make_megatron_module,
+        )
 
         self._init_hf_config_and_tf_config(
-            model_path, model_path, self.dtype, override_model_config,
-            override_transformer_config, self.actor_ref_config.model.trust_remote_code,
+            model_path,
+            model_path,
+            self.dtype,
+            override_model_config,
+            override_transformer_config,
+            self.actor_ref_config.model.trust_remote_code,
             self.actor_ref_config.actor.megatron.use_mbridge,
         )
 
@@ -386,8 +442,11 @@ class ReferenceWorker:
         )
 
         ref_module = make_megatron_module(
-            wrap_config=wrap_config, tf_config=self.tf_config, hf_config=self.hf_config,
-            bridge=self.bridge, override_model_config=override_model_config,
+            wrap_config=wrap_config,
+            tf_config=self.tf_config,
+            hf_config=self.hf_config,
+            bridge=self.bridge,
+            override_model_config=override_model_config,
         )
 
         if self.actor_ref_config.ref.load_weight:
@@ -396,7 +455,13 @@ class ReferenceWorker:
                 local_model_path = get_hf_model_path(self.actor_ref_config)
                 self.bridge.load_weights(ref_module, local_model_path)
             else:
-                load_megatron_gptmodel_weights(self.actor_ref_config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False)
+                load_megatron_gptmodel_weights(
+                    self.actor_ref_config,
+                    self.hf_config,
+                    ref_module,
+                    params_dtype=self.dtype,
+                    is_value_model=False,
+                )
 
         return ref_module, self.hf_config
 
@@ -474,11 +539,12 @@ class CriticWorker:
     ):
         """Initialize HuggingFace and Transformer configs"""
         from transformers import AutoConfig
-        from siirl.models.mcore import hf_to_mcore_config
+
         from siirl.models.loader import load_tokenizer
+        from siirl.models.mcore import hf_to_mcore_config
         from siirl.utils.model_utils.model import update_model_config
 
-        self.local_path=model_path
+        self.local_path = model_path
         if tokenizer_or_path is None:
             self.tokenizer = load_tokenizer(path=model_path)
         elif isinstance(tokenizer_or_path, str):
@@ -508,8 +574,9 @@ class CriticWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
-
+                print(
+                    "mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`"
+                )
 
             bridge = AutoBridge.from_config(hf_config)
             bridge.set_extra_args(**override_transformer_config)
@@ -521,13 +588,31 @@ class CriticWorker:
         self.hf_config = hf_config
         self.tf_config = tf_config
 
-    def _build_critic_model_optimizer(self, model_path, optim_config, override_model_config,
-                                      override_transformer_config, override_ddp_config):
-        from siirl.engine.actor.optimizer import get_megatron_optimizer, get_megatron_optimizer_param_scheduler, init_megatron_optim_config
-        from siirl.utils.megatron.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
+    def _build_critic_model_optimizer(
+        self,
+        model_path,
+        optim_config,
+        override_model_config,
+        override_transformer_config,
+        override_ddp_config,
+    ):
+        from siirl.engine.actor.optimizer import (
+            get_megatron_optimizer,
+            get_megatron_optimizer_param_scheduler,
+            init_megatron_optim_config,
+        )
+        from siirl.utils.megatron.megatron_utils import (
+            McoreModuleWrapperConfig,
+            make_megatron_module,
+        )
+
         self._init_hf_config_and_tf_config(
-            model_path, model_path, self.dtype, override_model_config,
-            override_transformer_config, self.critic_config.model.trust_remote_code,
+            model_path,
+            model_path,
+            self.dtype,
+            override_model_config,
+            override_transformer_config,
+            self.critic_config.model.trust_remote_code,
             self.critic_config.megatron.use_mbridge,
         )
 
@@ -539,8 +624,11 @@ class CriticWorker:
         )
 
         critic_module = make_megatron_module(
-            wrap_config=wrap_config, tf_config=self.tf_config, hf_config=self.hf_config,
-            bridge=self.bridge, override_model_config=override_model_config,
+            wrap_config=wrap_config,
+            tf_config=self.tf_config,
+            hf_config=self.hf_config,
+            bridge=self.bridge,
+            override_model_config=override_model_config,
             override_ddp_config=override_ddp_config,
         )
 
@@ -549,14 +637,28 @@ class CriticWorker:
                 local_model_path = get_hf_model_path(self.critic_config)
                 self.bridge.load_weights(critic_module, local_model_path)
             else:
-                load_megatron_gptmodel_weights(self.critic_config, self.hf_config, critic_module, params_dtype=self.dtype, is_value_model=True)
+                load_megatron_gptmodel_weights(
+                    self.critic_config,
+                    self.hf_config,
+                    critic_module,
+                    params_dtype=self.dtype,
+                    is_value_model=True,
+                )
 
         optim_config_megatron = init_megatron_optim_config(optim_config)
         critic_optimizer = get_megatron_optimizer(model=critic_module, config=optim_config_megatron)
-        critic_optimizer_scheduler = get_megatron_optimizer_param_scheduler(optimizer=critic_optimizer, config=optim_config)
+        critic_optimizer_scheduler = get_megatron_optimizer_param_scheduler(
+            optimizer=critic_optimizer, config=optim_config
+        )
 
         get_torch_device().empty_cache()
-        return critic_module, critic_optimizer, critic_optimizer_scheduler, self.hf_config, optim_config
+        return (
+            critic_module,
+            critic_optimizer,
+            critic_optimizer_scheduler,
+            self.hf_config,
+            optim_config,
+        )
 
     def init_model(self):
         override_model_config = self.critic_config.model.override_config
@@ -566,14 +668,19 @@ class CriticWorker:
         self.param_dtype = torch.bfloat16
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
-        self.critic_module, self.critic_optimizer, self.critic_optimizer_scheduler, self.critic_model_config, critic_optimizer_config = \
-            self._build_critic_model_optimizer(
-                model_path=self.critic_config.model.path,
-                optim_config=self.critic_config.optim,
-                override_model_config=override_model_config,
-                override_transformer_config=override_transformer_config,
-                override_ddp_config=override_ddp_config,
-            )
+        (
+            self.critic_module,
+            self.critic_optimizer,
+            self.critic_optimizer_scheduler,
+            self.critic_model_config,
+            critic_optimizer_config,
+        ) = self._build_critic_model_optimizer(
+            model_path=self.critic_config.model.path,
+            optim_config=self.critic_config.optim,
+            override_model_config=override_model_config,
+            override_transformer_config=override_transformer_config,
+            override_ddp_config=override_ddp_config,
+        )
 
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
@@ -595,7 +702,7 @@ class CriticWorker:
         self.checkpoint_manager = MegatronCheckpointManager(
             model=self.critic_module,
             optimizer=self.critic_optimizer,
-            lr_scheduler=self.critic_optimizer_scheduler
+            lr_scheduler=self.critic_optimizer_scheduler,
         )
 
     def compute_values(self, data: TensorDict):
@@ -633,13 +740,13 @@ class CriticWorker:
         # only computes 1/TP of the model FLOPs. So we need to divide by TP world size.
         if "global_token_num" in data:
             global_token_num = data["global_token_num"]
-            if hasattr(global_token_num, 'data'):
+            if hasattr(global_token_num, "data"):
                 global_token_num = global_token_num.data
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_token_num, delta_time)
             if promised_flops > 0:
                 tp_world_size = mpu.get_tensor_model_parallel_world_size()
                 metrics["perf/mfu/critic"] = estimated_flops / promised_flops / tp_world_size
-        
+
         metrics["perf/delta_time/critic"] = delta_time
 
         data["metrics"] = NonTensorData(metrics)
@@ -660,7 +767,7 @@ class CriticWorker:
         self.checkpoint_manager.save_checkpoint(
             local_path=local_path,
             global_step=global_step,
-            max_ckpt_to_keep=max_ckpt_to_keep
+            max_ckpt_to_keep=max_ckpt_to_keep,
         )
 
         if self._is_offload_param:
@@ -676,11 +783,18 @@ class CriticWorker:
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
 
-class MegatronPPOActor():
+
+class MegatronPPOActor:
     """Core PPO Actor implementation with Megatron backend"""
 
-    def __init__(self, config: SiiRLArguments, hf_config, tf_config,
-                 actor_module: nn.ModuleList, actor_optimizer: DistributedOptimizer):
+    def __init__(
+        self,
+        config: SiiRLArguments,
+        hf_config,
+        tf_config,
+        actor_module: nn.ModuleList,
+        actor_optimizer: DistributedOptimizer,
+    ):
         self.config = config
         self.actor_config = config.actor_ref.actor
         self.hf_config = hf_config
@@ -705,8 +819,11 @@ class MegatronPPOActor():
 
         with torch.no_grad():
             output = self.forward_backward_batch(
-                batch, temperature=temperature, forward_only=True,
-                calculate_entropy=calculate_entropy, micro_batch_size=micro_batch_size, 
+                batch,
+                temperature=temperature,
+                forward_only=True,
+                calculate_entropy=calculate_entropy,
+                micro_batch_size=micro_batch_size,
             )
 
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
@@ -717,9 +834,17 @@ class MegatronPPOActor():
                     entropys = torch.cat([o["entropy"] for o in output["output"]], dim=0).to(torch.float32)
 
             else:
-                log_probs = torch.empty(size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device)
+                log_probs = torch.empty(
+                    size=(batch_size, response_length),
+                    dtype=torch.float32,
+                    device=input_ids.device,
+                )
                 if calculate_entropy:
-                    entropys = torch.empty(size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device)
+                    entropys = torch.empty(
+                        size=(batch_size, response_length),
+                        dtype=torch.float32,
+                        device=input_ids.device,
+                    )
 
             # Broadcast across pipeline ranks
             log_probs = log_probs.to(get_device_id())
@@ -759,16 +884,22 @@ class MegatronPPOActor():
         # Policy gradient loss
         policy_loss_fn = get_policy_loss_fn(loss_mode)
         pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-            old_log_prob=old_log_prob, log_prob=log_prob, advantages=advantages,
-            response_mask=response_mask, loss_agg_mode=loss_agg_mode, config=self.actor_config,
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            config=self.actor_config,
         )
 
-        metrics.update({
-            "actor/pg_loss": pg_loss.detach().item(),
-            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-            "actor/ppo_kl": ppo_kl.detach().item(),
-            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-        })
+        metrics.update(
+            {
+                "actor/pg_loss": pg_loss.detach().item(),
+                "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                "actor/ppo_kl": ppo_kl.detach().item(),
+                "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+            }
+        )
         policy_loss = pg_loss
 
         # Entropy loss
@@ -779,16 +910,30 @@ class MegatronPPOActor():
         # KL loss
         if self.actor_config.use_kl_loss:
             ref_log_prob = data["ref_log_prob"]
-            kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.actor_config.kl_loss_type)
-            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=self.actor_config.loss_agg_mode)
+            kld = kl_penalty(
+                logprob=log_prob,
+                ref_logprob=ref_log_prob,
+                kl_penalty=self.actor_config.kl_loss_type,
+            )
+            kl_loss = agg_loss(
+                loss_mat=kld,
+                loss_mask=response_mask,
+                loss_agg_mode=self.actor_config.loss_agg_mode,
+            )
             policy_loss += kl_loss * self.actor_config.kl_loss_coef
             metrics["actor/kl_loss"] = kl_loss.detach().item()
             metrics["actor/kl_coef"] = self.actor_config.kl_loss_coef
 
         return policy_loss, metrics
 
-    def forward_backward_batch(self, data: TensorDict, temperature: float, forward_only=False,
-                               calculate_entropy=False, micro_batch_size=None):
+    def forward_backward_batch(
+        self,
+        data: TensorDict,
+        temperature: float,
+        forward_only=False,
+        calculate_entropy=False,
+        micro_batch_size=None,
+    ):
         """Execute forward-backward pass through pipeline parallel stages"""
         # Broadcast data across pipeline ranks
         data.to(get_device_id())
@@ -864,7 +1009,10 @@ class MegatronPPOActor():
 
             logits_processor_args = {"label": label, "label_mask": label_mask}
             output = forward_fn(
-                model, input_ids, attention_mask, position_ids,
+                model,
+                input_ids,
+                attention_mask,
+                position_ids,
                 sequence_parallel=self.tf_config.sequence_parallel,
                 logits_processor=logits_processor,
                 logits_processor_args=logits_processor_args,
@@ -893,8 +1041,15 @@ class MegatronPPOActor():
         metrics = {}
         temperature = data["temperature"]
 
-        select_keys = ["responses", "response_mask", "input_ids", "attention_mask",
-                      "position_ids", "old_log_probs", "advantages"]
+        select_keys = [
+            "responses",
+            "response_mask",
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "old_log_probs",
+            "advantages",
+        ]
         if self.actor_config.use_kl_loss:
             select_keys.append("ref_log_prob")
 
@@ -914,7 +1069,9 @@ class MegatronPPOActor():
             micro_batch_size = data.get("micro_batch_size") or self.actor_config.ppo_micro_batch_size_per_gpu
 
             metric_micro_batch = self.forward_backward_batch(
-                data, temperature=temperature, calculate_entropy=calculate_entropy,
+                data,
+                temperature=temperature,
+                calculate_entropy=calculate_entropy,
                 micro_batch_size=micro_batch_size,
             )
 
@@ -934,12 +1091,18 @@ class MegatronPPOActor():
         return metrics
 
 
-class MegatronPPOCritic():
+class MegatronPPOCritic:
     """Core PPO Critic implementation with Megatron backend"""
 
-    def __init__(self, config: SiiRLArguments, hf_config, tf_config,
-                 critic_module: nn.ModuleList, critic_optimizer: DistributedOptimizer,
-                 critic_optimizer_config):
+    def __init__(
+        self,
+        config: SiiRLArguments,
+        hf_config,
+        tf_config,
+        critic_module: nn.ModuleList,
+        critic_optimizer: DistributedOptimizer,
+        critic_optimizer_config,
+    ):
         self.config = config
         self.critic_config = config.critic
         self.hf_config = hf_config
@@ -961,10 +1124,7 @@ class MegatronPPOCritic():
         response_length = responses.size(1)
 
         with torch.no_grad():
-            output = self.forward_backward_batch(
-                data=data, forward_only=True,
-                micro_batch_size=micro_batch_size
-            )
+            output = self.forward_backward_batch(data=data, forward_only=True, micro_batch_size=micro_batch_size)
 
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 values = [o["vpreds"] for o in output["output"]]
@@ -995,7 +1155,7 @@ class MegatronPPOCritic():
         broadcast_dict_tensor(
             mini_batch,
             src=mpu.get_pipeline_model_parallel_last_rank(),
-            group=mpu.get_pipeline_model_parallel_group()
+            group=mpu.get_pipeline_model_parallel_group(),
         )
 
         mini_batch["attention_mask"] = mini_batch["attention_mask"].to(bool)
@@ -1022,8 +1182,11 @@ class MegatronPPOCritic():
             vpreds = output[:, -response_length - 1 : -1]
 
             vf_loss, vf_clipfrac = compute_value_loss(
-                vpreds=vpreds, values=values, returns=returns,
-                response_mask=response_mask, cliprange_value=cliprange_value,
+                vpreds=vpreds,
+                values=values,
+                returns=returns,
+                response_mask=response_mask,
+                cliprange_value=cliprange_value,
                 loss_agg_mode=self.critic_config.loss_agg_mode,
             )
 
@@ -1042,10 +1205,14 @@ class MegatronPPOCritic():
             position_ids = batch["position_ids"]
 
             from siirl.models.mcore import get_mcore_forward_fn
+
             forward_fn = get_mcore_forward_fn(self.hf_config)
 
             output = forward_fn(
-                model, input_ids, attention_mask, position_ids,
+                model,
+                input_ids,
+                attention_mask,
+                position_ids,
                 sequence_parallel=self.tf_config.sequence_parallel,
                 value_model=True,
             )
@@ -1071,8 +1238,15 @@ class MegatronPPOCritic():
     def update_critic(self, data: TensorDict):
         """Update critic using value loss"""
         metrics = {}
-        select_keys = ["input_ids", "responses", "attention_mask", "position_ids",
-                      "values", "returns", "response_mask"]
+        select_keys = [
+            "input_ids",
+            "responses",
+            "attention_mask",
+            "position_ids",
+            "values",
+            "returns",
+            "response_mask",
+        ]
 
         batch = data.select(*select_keys)
         dataloader = batch.split(self.local_ppo_mini_batch_size)
@@ -1086,7 +1260,9 @@ class MegatronPPOCritic():
                 micro_batch_size = self.critic_config.ppo_micro_batch_size_per_gpu
 
                 metric_micro_batch = self.forward_backward_batch(
-                    data, forward_only=False, micro_batch_size=micro_batch_size, 
+                    data,
+                    forward_only=False,
+                    micro_batch_size=micro_batch_size,
                 )
 
                 metric_micro_batch = metric_micro_batch["output"]

@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class OpenAIFunctionPropertySchema(BaseModel):
@@ -81,7 +81,10 @@ class OpenAIFunctionCallSchema(BaseModel):
             arguments = {}
             has_decode_error = True
 
-        return OpenAIFunctionCallSchema(name=parsed_schema.name, arguments=arguments), has_decode_error
+        return (
+            OpenAIFunctionCallSchema(name=parsed_schema.name, arguments=arguments),
+            has_decode_error,
+        )
 
 
 class OpenAIFunctionToolCall(BaseModel):
@@ -90,6 +93,7 @@ class OpenAIFunctionToolCall(BaseModel):
     id: str
     type: Literal["function"] = "function"
     function: OpenAIFunctionCallSchema
+
 
 class FunctionCall(BaseModel):
     arguments: str

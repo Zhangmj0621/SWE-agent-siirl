@@ -14,10 +14,10 @@
 
 from .megatron_actor import (
     ActorWorker,
-    ReferenceWorker,
     CriticWorker,
     MegatronPPOActor,
     MegatronPPOCritic,
+    ReferenceWorker,
 )
 
 __all__ = [

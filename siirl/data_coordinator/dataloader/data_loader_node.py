@@ -12,17 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Iterator, Optional
+from collections.abc import Iterator
+from typing import Any
 
 import torch
 from loguru import logger
-from torch.utils.data import RandomSampler, SequentialSampler
+from torch.utils.data import DistributedSampler, RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from siirl.data_coordinator.dataloader.partitioned_dataset import PartitionedRLHFDataset
 from siirl.models.loader import load_tokenizer
 from siirl.params import SiiRLArguments
-
-from siirl.data_coordinator.dataloader.partitioned_dataset import PartitionedRLHFDataset
 
 
 class RepeatDataset(torch.utils.data.Dataset):
@@ -62,14 +62,19 @@ class RepeatDataset(torch.utils.data.Dataset):
         return self.base_dataset[idx % len(self.base_dataset)]
 
 
-class DataLoaderNode():
+class DataLoaderNode:
     """
     Represents a data loader node in the DAG.
     This version uses the PartitionedRLHFDataset for efficient, memory-safe
     distributed data loading. Each rank only loads and processes its own data slice.
     """
 
-    def __init__(self, global_config: SiiRLArguments, config: Optional[Dict[str, Any]] = None, retry_limit: int = 0):
+    def __init__(
+        self,
+        global_config: SiiRLArguments,
+        config: dict[str, Any] | None = None,
+        retry_limit: int = 0,
+    ):
         """
         Initialize a data loader node.
 
@@ -84,11 +89,14 @@ class DataLoaderNode():
         # tokenizer_module = load_tokenizer(path=global_config.actor_ref.model.path, model_args=global_config.actor_ref.model)
         # self.tokenizer = tokenizer_module["tokenizer"]
         # self.processor = tokenizer_module["processor"]
-        self.tokenizer = load_tokenizer(path=global_config.actor_ref.model.path, model_args=global_config.actor_ref.model)
-        self.processor = None # todo: support multi-model
+        self.tokenizer = load_tokenizer(
+            path=global_config.actor_ref.model.path,
+            model_args=global_config.actor_ref.model,
+        )
+        self.processor = None  # todo: support multi-model
         # force load in main process for vision language model
         self.num_loader_workers = config.get("num_loader_workers", 8)
-        
+
         # Get group world size, rank, parallel size from config.
         #   Group world size means the rollout pytorch distributed group total gpus.
         #   Group rank means the process index in distributed group.
@@ -105,8 +113,8 @@ class DataLoaderNode():
         self.rollout_ddp_world_size = self.group_world_size // self.group_parallel_size
         self.rollout_ddp_rank = self.group_rank // self.group_parallel_size
 
-        self._current_train_iter: Optional[Iterator] = None
-        self._current_val_iter: Optional[Iterator] = None
+        self._current_train_iter: Iterator | None = None
+        self._current_val_iter: Iterator | None = None
         self._current_epoch: int = -1
 
         self._create_dataloader()
@@ -114,7 +122,7 @@ class DataLoaderNode():
         self.num_train_batches = len(self.train_dataloader) if self.train_dataloader else 0
         self.num_val_batches = len(self.val_dataloader) if self.val_dataloader else 0
 
-        logger.info(f"DataLoaderNode initialized:")
+        logger.info("DataLoaderNode initialized:")
         logger.info(f"  Group rank: {self.group_rank} / {self.group_world_size}")
         logger.info(f"  Rollout DDP rank: {self.rollout_ddp_rank} / {self.rollout_ddp_world_size}")
         logger.info(f"  Train batches per epoch for this rank: {self.num_train_batches}")
@@ -128,19 +136,31 @@ class DataLoaderNode():
         until at least one batch can be formed.
 
         This method performs the following steps:
-        1. Creates the training dataset (`PartitionedRLHFDataset`) with the provided configuration, tokenizer, processor, and distributed data parallel (DDP) settings.
+        1. Creates the training dataset (`PartitionedRLHFDataset`) with the provided
+           configuration, tokenizer, processor, and distributed data parallel (DDP) settings.
         2. Sets up the sampler for the training DataLoader:
             - Uses a `RandomSampler` with a seeded generator if shuffling is enabled in the configuration.
             - Uses a `SequentialSampler` otherwise.
         3. Configures the tokenizer's padding side to "left" to ensure correct sequence alignment.
         4. Creates the training DataLoader (`StatefulDataLoader`) with the specified batch size, number of workers, sampler, and collator.
-        5. Creates the validation dataset and DataLoader, using the full dataset as a single batch for evaluation.
+        5. Creates the validation dataset and DataLoader, using the full dataset as a
+           single batch for evaluation.
         6. Asserts that the training DataLoader contains at least one batch.
-        7. Calculates the total number of training steps based on the number of batches and epochs, or uses a user-specified value if provided.
-        8. Updates the total training steps in the optimizer configurations for both the actor and critic components.
+        7. Calculates the total number of training steps based on the number of batches
+           and epochs, or uses a user-specified value if provided.
+        8. Updates the total training steps in the optimizer configurations for both the
+           actor and critic components.
         """
         # Create the partitioned training dataset for this rank
-        self.train_dataset = PartitionedRLHFDataset(config=self.global_config, tokenizer=self.tokenizer, processor=self.processor, ddp_rank=self.rollout_ddp_rank, ddp_world_size=self.rollout_ddp_world_size, is_eval=False, drop_last=self.config.get("train_drop_last", True))
+        self.train_dataset = PartitionedRLHFDataset(
+            config=self.global_config,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            ddp_rank=self.rollout_ddp_rank,
+            ddp_world_size=self.rollout_ddp_world_size,
+            is_eval=False,
+            drop_last=self.config.get("train_drop_last", True),
+        )
 
         # Calculate batch size per rank
         train_batch_size = self.global_config.data.train_batch_size // self.rollout_ddp_world_size
@@ -152,7 +172,11 @@ class DataLoaderNode():
             repeat_factor = (train_batch_size + train_len - 1) // train_len
 
             self.train_dataset = RepeatDataset(self.train_dataset, repeat_factor)
-            logger.warning(f"Rank {self.rollout_ddp_rank}: Training dataset too small (size={train_len}), auto-repeating {repeat_factor} times to ensure at least one batch (batch_size={train_batch_size}). Now RepeatDataset size={len(self.train_dataset)}")
+            logger.warning(
+                f"Rank {self.rollout_ddp_rank}: Training dataset too small (size={train_len}), "
+                f"auto-repeating {repeat_factor} times to ensure at least one batch "
+                f"(batch_size={train_batch_size}). Now RepeatDataset size={len(self.train_dataset)}"
+            )
 
         # Choose sampler: RandomSampler with seed if shuffle enabled, else SequentialSampler
         if self.global_config.data.shuffle:
@@ -163,21 +187,48 @@ class DataLoaderNode():
             sampler = SequentialSampler(data_source=self.train_dataset)
 
         # Create the training dataloader with the specified batch size, workers, sampler, and collator
-        from siirl.data_coordinator.dataloader.partitioned_dataset import collate_fn as default_collate_fn
+        from siirl.data_coordinator.dataloader.partitioned_dataset import (
+            collate_fn as default_collate_fn,
+        )
 
-        self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset, batch_size=train_batch_size, num_workers=self.num_loader_workers, drop_last=True, collate_fn=default_collate_fn, sampler=sampler)
+        self.train_dataloader = StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=train_batch_size,
+            num_workers=self.num_loader_workers,
+            drop_last=True,
+            collate_fn=default_collate_fn,
+            sampler=sampler,
+        )
 
         # Create the partitioned validation dataset for this rank
-        self.val_dataset = PartitionedRLHFDataset(config=self.global_config, tokenizer=self.tokenizer, processor=self.processor, ddp_rank=self.rollout_ddp_rank, ddp_world_size=self.rollout_ddp_world_size, is_eval=True, drop_last=self.config.get("eval_drop_last", False))
+        self.val_dataset = PartitionedRLHFDataset(
+            config=self.global_config,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            ddp_rank=self.rollout_ddp_rank,
+            ddp_world_size=self.rollout_ddp_world_size,
+            is_eval=True,
+            drop_last=self.config.get("eval_drop_last", False),
+        )
 
         # Create the validation dataloader, loading the entire validation set as one batch
         val_batch_size = self.global_config.data.val_batch_size  # Prefer config value if set
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
-        self.val_dataloader = StatefulDataLoader(dataset=self.val_dataset, batch_size=val_batch_size, num_workers=self.num_loader_workers, shuffle=False, drop_last=False, collate_fn=default_collate_fn)
+        self.val_dataloader = StatefulDataLoader(
+            dataset=self.val_dataset,
+            batch_size=val_batch_size,
+            num_workers=self.num_loader_workers,
+            shuffle=False,
+            drop_last=False,
+            collate_fn=default_collate_fn,
+        )
         self.val_batch_size = val_batch_size
         # Assert that there is at least one batch for this rank
-        assert len(self.train_dataloader) >= 1, f"Not enough data for current rank (rank id: {self.rollout_ddp_rank}) to consume. Please increase the train datasets or reduce the number of GPUs."
+        assert len(self.train_dataloader) >= 1, (
+            f"Not enough data for current rank (rank id: {self.rollout_ddp_rank}) to consume. "
+            f"Please increase the train datasets or reduce the number of GPUs."
+        )
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
         # Calculate the number of batches and total training steps
         num_batches = len(self.train_dataloader) if self.train_dataloader else 0
@@ -191,7 +242,7 @@ class DataLoaderNode():
         # Update total training steps in optimizer configs for actor and critic
         self.global_config.actor_ref.actor.optim.total_training_steps = total_training_steps
         self.global_config.critic.optim.total_training_steps = total_training_steps
-        
+
         # Indicates the samples for this rank has already been expand
         self.is_val_trailing_rank = self.val_dataset.is_trailing_rank
 
@@ -213,7 +264,12 @@ class DataLoaderNode():
         """
         return self.val_dataloader
 
-    def run(self, epoch: Optional[int] = None, is_validation_step: bool = False, **kwargs: Any) -> Any:
+    def run(
+        self,
+        epoch: int | None = None,
+        is_validation_step: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """
         Executes the data loading process for a given step or validation.
 
@@ -246,17 +302,17 @@ class DataLoaderNode():
 
                 try:
                     batch = next(self._current_val_iter)
-                    logger.debug(f"Yielding validation batch.")
+                    logger.debug("Yielding validation batch.")
                     # Reset for next validation call, as it's one batch
                     self._current_val_iter = None
                 except StopIteration:
-                    logger.warning(f"Validation dataloader exhausted unexpectedly (should be one batch). Resetting.")
+                    logger.warning("Validation dataloader exhausted unexpectedly (should be one batch). Resetting.")
                     # This case should ideally not happen if batch_size = len(dataset) and it's not empty
                     self._current_val_iter = iter(self.val_dataloader)  # Get a fresh iterator
                     try:
                         batch = next(self._current_val_iter)
                     except StopIteration:
-                        logger.error(f"Validation dataloader is empty even after reset.")
+                        logger.error("Validation dataloader is empty even after reset.")
                         return None
             else:  # Training step
                 if epoch is None:
@@ -271,7 +327,9 @@ class DataLoaderNode():
                     logger.info(f" New epoch ({epoch}) or first step. Initializing train iterator.")
                     self._current_epoch = epoch
                     # Set epoch for DistributedSampler if applicable
-                    if hasattr(self.train_dataloader.sampler, "set_epoch") and isinstance(self.train_dataloader.sampler, DistributedSampler):
+                    if hasattr(self.train_dataloader.sampler, "set_epoch") and isinstance(
+                        self.train_dataloader.sampler, DistributedSampler
+                    ):
                         logger.debug(f" Setting epoch {epoch} for DistributedSampler.")
                         self.train_dataloader.sampler.set_epoch(epoch)
 
@@ -299,7 +357,7 @@ class DataLoaderNode():
             logger.exception(error_msg)  # Log with stack trace
             raise  # Re-raise the exception so the DAG executor can handle it
 
-    def state_dict(self) -> Dict[str, Any]:
+    def state_dict(self) -> dict[str, Any]:
         """
         Captures the state of the DataLoaderNode, primarily the training dataloader's state.
 
@@ -310,7 +368,7 @@ class DataLoaderNode():
             "train_dataloader_state": self.train_dataloader.state_dict(),
         }
 
-    def load_state_dict(self, state_dict: Dict[str, Any]):
+    def load_state_dict(self, state_dict: dict[str, Any]):
         """
         Restores the state of the DataLoaderNode from a state dictionary.
 
@@ -323,4 +381,6 @@ class DataLoaderNode():
             # sampler state. Setting it to None forces the run() method to create a new,
             # valid iterator that is synchronized with the restored state.
             self._current_train_iter = None
-            logger.info(f"(Rank {self.group_rank}): Successfully loaded train_dataloader state. Iterator will be reset on next call.")
+            logger.info(
+                f"(Rank {self.group_rank}): Successfully loaded train_dataloader state. Iterator will be reset on next call."
+            )

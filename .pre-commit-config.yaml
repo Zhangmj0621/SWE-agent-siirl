@@ -1,0 +1,55 @@
+default_stages: [pre-commit, pre-push, manual]
+
+default_language_version:
+  python: python3.12
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-ast
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: detect-private-key
+      - id: debug-statements
+      - id: no-commit-to-branch
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile=black"]
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.13.3
+    hooks:
+      # Ruff is lint-only; formatting is handled by Black.
+      # Do not add ruff-format to avoid conflicts with Black.
+      - id: ruff-check
+        args: [--output-format, github, --fix]
+        files: ^(siirl/|examples/|tests/)
+        exclude: \.ipynb$
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black-jupyter
+        # args: ["--config", "pyproject.toml"] # Assuming pyproject.toml is in root
+        # Black is the only formatter; keep Ruff formatting disabled.
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.1
+    hooks:
+      - id: codespell
+        additional_dependencies: ['tomli']
+        args: ['-L', 'cann,tensor,TE'] # Added tensor to ignore list just in case
+        # exclude: test/srt/test_reasoning_parser.py
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v18.1.8
+    hooks:
+    - id: clang-format
+      types_or: [c++, cuda]
+      args: [--style=file, --verbose]

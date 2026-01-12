@@ -1,11 +1,11 @@
 from typing import TYPE_CHECKING
 
-from transformers import AutoTokenizer
-
 from loguru import logger
+from transformers import AutoTokenizer
 
 if TYPE_CHECKING:
     from siirl.params import ModelArguments
+
 
 def set_pad_token_id(tokenizer):
     """Set pad_token_id to eos_token_id if it is None.
@@ -36,7 +36,7 @@ def load_tokenizer(
         tokenizer = AutoTokenizer.from_pretrained(
             path,
             use_fast=model_args.use_fast_tokenizer if model_args else True,
-            split_special_tokens=model_args.split_special_tokens if model_args else False,
+            split_special_tokens=(model_args.split_special_tokens if model_args else False),
             padding_side="right",
             **init_kwargs,
         )

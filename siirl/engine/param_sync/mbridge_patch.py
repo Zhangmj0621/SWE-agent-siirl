@@ -1,4 +1,4 @@
-from typing import Sequence
+from collections.abc import Sequence
 
 import torch
 from loguru import logger
@@ -68,7 +68,7 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
             ]
             global_expert_names = [f"{name_prefix}.weight{expert_id}" for expert_id in global_expert_ids]
 
-            for name, param in zip(global_expert_names, infer_params):
+            for name, param in zip(global_expert_names, infer_params, strict=False):
                 if self.mpu.etp_size > 1:
                     # gather etp
                     etp_params = [torch.empty_like(param) for _ in range(self.mpu.etp_size)]
@@ -79,7 +79,7 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
 
                 merge_params = self._weight_merge_across_tp(name, params, param)
                 converted_names, converted_params = self._weight_to_hf_format(name, merge_params)
-                yield from zip(converted_names, converted_params)
+                yield from zip(converted_names, converted_params, strict=False)
             continue
 
         # TP
@@ -96,7 +96,7 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
 
         converted_names, converted_params = self._weight_to_hf_format(name, infer_params)
 
-        yield from zip(converted_names, converted_params)
+        yield from zip(converted_names, converted_params, strict=False)
 
 
 logger.debug("patching mbridge with _export_weights_in_current_pipeline_stage")

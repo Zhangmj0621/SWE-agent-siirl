@@ -54,6 +54,7 @@ def get_device_id() -> int:
     """
     return get_torch_device().current_device()
 
+
 def get_nccl_backend() -> str:
     """Return nccl backend type based on the device type.
     Returns:
@@ -66,6 +67,7 @@ def get_nccl_backend() -> str:
     else:
         raise RuntimeError(f"No available nccl backend found on device type {get_device_name()}.")
     return get_torch_device().current_device()
+
 
 def device_synchronize():
     """
@@ -80,6 +82,7 @@ def device_synchronize():
         torch.cuda.synchronize()
     elif is_npu_available:
         torch.npu.synchronize()
+
 
 def set_expandable_segments(enable: bool) -> None:
     """Enable or disable expandable segments for cuda.

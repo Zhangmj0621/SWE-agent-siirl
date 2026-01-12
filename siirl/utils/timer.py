@@ -54,7 +54,7 @@ from __future__ import annotations
 import time
 from contextlib import ContextDecorator
 from dataclasses import dataclass, field
-from typing import Any, Callable, ClassVar, Optional
+from typing import Any, ClassVar
 
 
 def format_time(seconds: float) -> str:
@@ -80,22 +80,23 @@ def format_time(seconds: float) -> str:
 @dataclass
 class TimerStats:
     """Statistics for cumulative timer measurements."""
+
     count: int = 0
     total: float = 0.0
     min: float = float("inf")
     max: float = 0.0
     _values: list[float] = field(default_factory=list, repr=False)
-    
+
     @property
     def mean(self) -> float:
         """Average time per measurement."""
         return self.total / self.count if self.count > 0 else 0.0
-    
+
     @property
     def last(self) -> float:
         """Last recorded measurement."""
         return self._values[-1] if self._values else 0.0
-    
+
     def record(self, value: float) -> None:
         """Record a new measurement."""
         self.count += 1
@@ -103,7 +104,7 @@ class TimerStats:
         self.min = min(self.min, value)
         self.max = max(self.max, value)
         self._values.append(value)
-    
+
     def reset(self) -> None:
         """Reset all statistics."""
         self.count = 0
@@ -111,7 +112,7 @@ class TimerStats:
         self.min = float("inf")
         self.max = 0.0
         self._values.clear()
-    
+
     def __str__(self) -> str:
         if self.count == 0:
             return "TimerStats(no measurements)"
@@ -124,34 +125,34 @@ class TimerStats:
 class Timer(ContextDecorator):
     """
     High-precision timer for measuring code execution time.
-    
+
     Features:
         - Context manager: `with Timer("name") as t:`
         - Decorator: `@Timer("name")`
         - Manual start/stop
         - Cumulative mode with statistics
         - Global registry for shared timers
-    
+
     Attributes:
         name: Timer name for identification
         elapsed: Time elapsed in seconds (last measurement or running time)
         last: Alias for elapsed (codetiming compatibility)
         stats: TimerStats object (only in cumulative mode)
     """
-    
+
     # Global timer registry
     _registry: ClassVar[dict[str, Timer]] = {}
-    
+
     def __init__(
         self,
-        name: Optional[str] = None,
-        logger: Optional[Any] = None,
+        name: str | None = None,
+        logger: Any | None = None,
         log_level: str = "info",
         cumulative: bool = False,
     ):
         """
         Initialize timer.
-        
+
         Args:
             name: Optional name for identifying this timer
             logger: Optional logger instance (must have info/debug/etc methods)
@@ -162,32 +163,32 @@ class Timer(ContextDecorator):
         self.logger = logger
         self.log_level = log_level
         self.cumulative = cumulative
-        
-        self._start_time: Optional[float] = None
-        self._elapsed: Optional[float] = None
-        self._stats: Optional[TimerStats] = TimerStats() if cumulative else None
-    
+
+        self._start_time: float | None = None
+        self._elapsed: float | None = None
+        self._stats: TimerStats | None = TimerStats() if cumulative else None
+
     @classmethod
     def get(cls, name: str, **kwargs) -> Timer:
         """
         Get or create a timer from the global registry.
-        
+
         Args:
             name: Timer name
             **kwargs: Arguments passed to Timer() if creating new
-            
+
         Returns:
             Timer instance (shared if already exists)
         """
         if name not in cls._registry:
             cls._registry[name] = cls(name=name, **kwargs)
         return cls._registry[name]
-    
+
     @classmethod
     def clear_registry(cls) -> None:
         """Clear all timers from the global registry."""
         cls._registry.clear()
-    
+
     @property
     def elapsed(self) -> float:
         """Get elapsed time in seconds."""
@@ -196,45 +197,45 @@ class Timer(ContextDecorator):
         if self._start_time is not None:
             return time.perf_counter() - self._start_time
         return 0.0
-    
+
     @property
     def last(self) -> float:
         """Alias for elapsed (codetiming compatibility)."""
         return self.elapsed
-    
+
     @property
-    def stats(self) -> Optional[TimerStats]:
+    def stats(self) -> TimerStats | None:
         """Get statistics (only available in cumulative mode)."""
         return self._stats
-    
+
     @property
     def formatted(self) -> str:
         """Get elapsed time in human-readable format."""
         return format_time(self.elapsed)
-    
+
     def start(self) -> Timer:
         """Start the timer. Returns self for chaining."""
         self._start_time = time.perf_counter()
         self._elapsed = None
         return self
-    
+
     def stop(self) -> float:
         """Stop the timer and return elapsed time."""
         if self._start_time is None:
             raise RuntimeError("Timer has not been started. Call start() first.")
-        
+
         self._elapsed = time.perf_counter() - self._start_time
         self._start_time = None
-        
+
         # Record to stats if cumulative
         if self._stats is not None:
             self._stats.record(self._elapsed)
-        
+
         # Log if logger configured
         self._log()
-        
+
         return self._elapsed
-    
+
     def reset(self) -> Timer:
         """Reset the timer and statistics. Returns self for chaining."""
         self._start_time = None
@@ -242,26 +243,26 @@ class Timer(ContextDecorator):
         if self._stats is not None:
             self._stats.reset()
         return self
-    
+
     def _log(self) -> None:
         """Log the elapsed time if logger is configured."""
         if self.logger is None:
             return
-        
+
         name_part = f"{self.name}: " if self.name else ""
         msg = f"{name_part}{self.formatted}"
-        
+
         log_func = getattr(self.logger, self.log_level, None)
         if log_func and callable(log_func):
             log_func(msg)
-    
+
     def __enter__(self) -> Timer:
         self.start()
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.stop()
-    
+
     def __repr__(self) -> str:
         parts = []
         if self.name:
@@ -270,7 +271,7 @@ class Timer(ContextDecorator):
         if self._stats and self._stats.count > 0:
             parts.append(f"count={self._stats.count}")
         return f"Timer({', '.join(parts)})"
-    
+
     def __str__(self) -> str:
         if self.name:
             return f"{self.name}: {self.formatted}"
@@ -280,93 +281,93 @@ class Timer(ContextDecorator):
 class TimerCollection:
     """
     Collection of named timers for tracking multiple operations.
-    
+
     Provides dict-like access to timers with automatic creation.
-    
+
     Examples:
         timers = TimerCollection()
-        
+
         # Dict-like access
         with timers["operation1"]:
             do_op1()
-        
+
         # Method access
         with timers.time("operation2"):
             do_op2()
-        
+
         # Get results
         print(timers["operation1"].elapsed)  # 1.234
         print(timers.to_dict())  # {"operation1": 1.234, "operation2": 0.567}
     """
-    
+
     def __init__(self, cumulative: bool = False):
         """
         Initialize collection.
-        
+
         Args:
             cumulative: If True, all timers in collection use cumulative mode
         """
         self._timers: dict[str, Timer] = {}
         self._cumulative = cumulative
-    
+
     def __getitem__(self, name: str) -> Timer:
         """Get or create a timer by name."""
         if name not in self._timers:
             self._timers[name] = Timer(name=name, cumulative=self._cumulative)
         return self._timers[name]
-    
+
     def __contains__(self, name: str) -> bool:
         """Check if timer exists."""
         return name in self._timers
-    
+
     def __iter__(self):
         """Iterate over timer names."""
         return iter(self._timers)
-    
+
     def __len__(self) -> int:
         """Number of timers."""
         return len(self._timers)
-    
+
     def time(self, name: str) -> Timer:
         """Get or create a timer by name. Alias for __getitem__."""
         return self[name]
-    
+
     def get(self, name: str, default: float = 0.0) -> float:
         """Get elapsed time for a timer, or default if not exists."""
         if name in self._timers:
             return self._timers[name].elapsed
         return default
-    
+
     def to_dict(self) -> dict[str, float]:
         """Get all timer values as dict."""
         return {name: timer.elapsed for name, timer in self._timers.items()}
-    
+
     def get_all(self) -> dict[str, float]:
         """Alias for to_dict() for backward compatibility."""
         return self.to_dict()
-    
+
     def clear(self) -> None:
         """Clear all timers."""
         self._timers.clear()
-    
+
     def reset(self) -> None:
         """Reset all timers (keep them but reset values)."""
         for timer in self._timers.values():
             timer.reset()
-    
+
     def summary(self) -> str:
         """Get a summary string of all timers."""
         if not self._timers:
             return "TimerCollection(empty)"
-        
+
         lines = ["TimerCollection:"]
         for name, timer in sorted(self._timers.items()):
             lines.append(f"  {name}: {timer.formatted}")
         return "\n".join(lines)
-    
+
     def __repr__(self) -> str:
         return f"TimerCollection({self.to_dict()})"
-    
+
     def __str__(self) -> str:
         return self.summary()
 

@@ -1,12 +1,8 @@
 from types import MethodType
 from typing import TYPE_CHECKING
 
-from transformers import (
-    PreTrainedTokenizerBase,
-)
-
 from loguru import logger
-
+from transformers import PreTrainedTokenizerBase
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig, PreTrainedTokenizer
@@ -14,7 +10,11 @@ if TYPE_CHECKING:
     from siirl.params import ModelArguments
 
 
-def patch_tokenizer(tokenizer: "PreTrainedTokenizer", model_args: "ModelArguments", config: "PretrainedConfig") -> None:
+def patch_tokenizer(
+    tokenizer: "PreTrainedTokenizer",
+    model_args: "ModelArguments",
+    config: "PretrainedConfig",
+) -> None:
     if "PreTrainedTokenizerBase" not in str(tokenizer._pad.__func__):
         tokenizer._pad = MethodType(PreTrainedTokenizerBase._pad, tokenizer)
 
@@ -30,5 +30,3 @@ def patch_tokenizer(tokenizer: "PreTrainedTokenizer", model_args: "ModelArgument
         if num_added_tokens > 0 and not model_args.resize_vocab:
             model_args.resize_vocab = True
             logger.warning("New tokens have been added, changed `resize_vocab` to True.")
-
-

@@ -2,14 +2,15 @@ import asyncio
 import logging
 import os
 import time
-from typing import Optional, BinaryIO
+from typing import BinaryIO
 
 import kr8s
-from kr8s.asyncio.objects import Pod
 from kr8s._exec import Exec
+from kr8s.asyncio.objects import Pod
+
 from siirl.execution.rollout.agentflow.swe.environment.base import ContainerBuildArgs
 
-from .base import ContainerEnv, ContainerEnvBuilder, ContainerStartArgs, ContainerOutput
+from .base import ContainerEnv, ContainerEnvBuilder, ContainerOutput, ContainerStartArgs
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +23,11 @@ class Kr8sEnv(ContainerEnv):
         pod: Pod,
         container_name: str,
         namespace: str,
-        kubeconfig: Optional[str] = None,
-        context: Optional[str] = None,
-        default_cwd: Optional[str] = None,
-        default_env: Optional[dict[str, str]] = None,
-        default_forward_env: Optional[list[str]] = None,
+        kubeconfig: str | None = None,
+        context: str | None = None,
+        default_cwd: str | None = None,
+        default_env: dict[str, str] | None = None,
+        default_forward_env: list[str] | None = None,
     ):
         self.pod = pod
         self.container_name = container_name
@@ -60,9 +61,7 @@ class Kr8sEnv(ContainerEnv):
 
         return merged_env
 
-    def _build_shell_command(
-        self, cmd: str, cwd: Optional[str], env: dict[str, str]
-    ) -> str:
+    def _build_shell_command(self, cmd: str, cwd: str | None, env: dict[str, str]) -> str:
         """Build a shell command with working directory and environment variables."""
         parts = []
 
@@ -86,7 +85,7 @@ class Kr8sEnv(ContainerEnv):
     async def popen(
         self,
         cmd: str,
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         env: dict[str, str] = {},
         forward_env: list[str] = [],
         timeout: float = 180.0,
@@ -108,7 +107,7 @@ class Kr8sEnv(ContainerEnv):
     async def _exec_with_stdin_support(
         self,
         command: list[str],
-        stdin: Optional[BinaryIO] = None,
+        stdin: BinaryIO | None = None,
         check: bool = False,
     ):
         """Execute command with v5 protocol support for stdin.
@@ -200,8 +199,8 @@ class Kr8sEnv(ContainerEnv):
     async def execute(
         self,
         cmd: str,
-        stdin: Optional[BinaryIO] = None,
-        cwd: Optional[str] = None,
+        stdin: BinaryIO | None = None,
+        cwd: str | None = None,
         env: dict[str, str] = {},
         forward_env: list[str] = [],
         timeout: float = 180.0,
@@ -260,9 +259,7 @@ class Kr8sEnv(ContainerEnv):
             # kr8s exec returns a CompletedExec object with stdout, stderr, and returncode
             stdout = exec_result.stdout if hasattr(exec_result, "stdout") else b""
             stderr = exec_result.stderr if hasattr(exec_result, "stderr") else b""
-            returncode = (
-                exec_result.returncode if hasattr(exec_result, "returncode") else 0
-            )
+            returncode = exec_result.returncode if hasattr(exec_result, "returncode") else 0
 
             # Ensure bytes
             # if isinstance(stdout, str):
@@ -273,10 +270,7 @@ class Kr8sEnv(ContainerEnv):
             # Combine stdout and stderr
             combined_output = stdout + stderr
 
-            logger.debug(
-                f"Command completed with exit code {returncode}, "
-                f"output length: {len(combined_output)}"
-            )
+            logger.debug(f"Command completed with exit code {returncode}, " f"output length: {len(combined_output)}")
 
             return ContainerOutput(output=combined_output, returncode=returncode)
 
@@ -287,9 +281,7 @@ class Kr8sEnv(ContainerEnv):
             logger.error(f"Command execution failed: {e}")
             raise
 
-    async def _run_kubectl(
-        self, args: list[str], timeout: float = 60.0
-    ) -> tuple[bytes, bytes, int]:
+    async def _run_kubectl(self, args: list[str], timeout: float = 60.0) -> tuple[bytes, bytes, int]:
         """Run kubectl command and return stdout, stderr, returncode.
 
         Args:
@@ -319,9 +311,7 @@ class Kr8sEnv(ContainerEnv):
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=timeout
-            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
 
             returncode = process.returncode if process.returncode is not None else 0
 
@@ -338,7 +328,7 @@ class Kr8sEnv(ContainerEnv):
         src: str,
         dst: str,
         upload: bool = True,
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         timeout: float = 180.0,
     ):
         """Copy files between host and container using kubectl cp.
@@ -382,9 +372,7 @@ class Kr8sEnv(ContainerEnv):
                 check_cmd = f"test -e {src}"
                 result = await self.execute(check_cmd, timeout=10.0)
                 if result.returncode != 0:
-                    raise FileNotFoundError(
-                        f"Source file does not exist in container: {src}"
-                    )
+                    raise FileNotFoundError(f"Source file does not exist in container: {src}")
 
                 # Build kubectl cp command: kubectl cp <namespace>/<pod>:<src> <dst> -c <container>
                 pod_path = f"{self.namespace}/{self.pod.name}:{src}"
@@ -393,15 +381,11 @@ class Kr8sEnv(ContainerEnv):
                 logger.info(f"Downloading {pod_path} to {dst}")
 
             # Execute kubectl cp
-            stdout, stderr, returncode = await self._run_kubectl(
-                kubectl_args, timeout=300.0
-            )
+            stdout, stderr, returncode = await self._run_kubectl(kubectl_args, timeout=300.0)
 
             if returncode != 0:
                 error_msg = stderr.decode("utf-8", errors="replace").strip()
-                raise Exception(
-                    f"kubectl cp failed (exit code {returncode}): {error_msg}"
-                )
+                raise Exception(f"kubectl cp failed (exit code {returncode}): {error_msg}")
 
             logger.info("Copy operation completed successfully")
 
@@ -547,9 +531,7 @@ class Kr8sEnvBuilder(ContainerEnvBuilder):
             await pod.create()
 
             # Wait for pod to be ready
-            logger.info(
-                f"Waiting for pod {pod_name} to be ready (timeout: {args.startup_timeout}s)"
-            )
+            logger.info(f"Waiting for pod {pod_name} to be ready (timeout: {args.startup_timeout}s)")
             start_time = time.monotonic()
 
             while True:
@@ -559,9 +541,7 @@ class Kr8sEnvBuilder(ContainerEnvBuilder):
                 elapsed = time.monotonic() - start_time
                 if elapsed > args.startup_timeout:
                     await pod.delete()
-                    raise TimeoutError(
-                        f"Pod {pod_name} failed to become ready within {args.startup_timeout}s"
-                    )
+                    raise TimeoutError(f"Pod {pod_name} failed to become ready within {args.startup_timeout}s")
 
                 # Check pod phase
                 phase = pod.status.phase
@@ -573,9 +553,7 @@ class Kr8sEnvBuilder(ContainerEnvBuilder):
                         break
                 elif phase in ["Failed", "Succeeded"]:
                     await pod.delete()
-                    raise Exception(
-                        f"Pod {pod_name} entered phase {phase} before becoming ready"
-                    )
+                    raise Exception(f"Pod {pod_name} entered phase {phase} before becoming ready")
 
                 # Wait before checking again
                 await asyncio.sleep(1)

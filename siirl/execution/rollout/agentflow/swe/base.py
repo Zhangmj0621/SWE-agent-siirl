@@ -1,13 +1,12 @@
+from abc import ABC
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Generic, TypeVar, Optional, Type
-from abc import ABC
-
-from .agent.base import Agent
-from .runtime.base import Runtime, SWESampleData
+from typing import Generic, TypeVar
 
 from ..base import Sample
 from ..utils import null_abc
+from .agent.base import Agent
+from .runtime.base import Runtime, SWESampleData
 
 
 class SWERolloutResult(Enum):
@@ -26,7 +25,7 @@ class SWERolloutMeta(Generic[Patch]):
     # 状态记录，可用于 reward
     result: SWERolloutResult = SWERolloutResult.PENDING
     # 由 runtime 自己决定
-    patch: Optional[Patch] = None
+    patch: Patch | None = None
 
 
 @dataclass
@@ -34,7 +33,7 @@ class SWERewardMeta:
     succeed: bool = False
 
 
-def null_field(base_cls: Type[T]) -> T:
+def null_field(base_cls: type[T]) -> T:
     return field(default_factory=null_abc(base_cls))
 
 

@@ -37,7 +37,11 @@ class _VocabParallelEntropy(torch.autograd.Function):
             return (a * b).sum(dim=-1, keepdim=True)
 
         logits_max = vocab_parallel_logits.max(dim=-1, keepdim=True).values
-        dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=mpu.get_tensor_model_parallel_group())
+        dist.all_reduce(
+            logits_max,
+            op=dist.ReduceOp.MAX,
+            group=mpu.get_tensor_model_parallel_group(),
+        )
         normalized_vocab_parallel_logits = vocab_parallel_logits - logits_max
         normalized_exp_logits = normalized_vocab_parallel_logits.exp_()
         normalized_sum_exp_logits = normalized_exp_logits.sum(dim=-1, keepdim=True)
@@ -79,5 +83,3 @@ def vocab_parallel_log_probs_from_logits(logits, labels):
     from megatron.core import tensor_parallel
 
     return -tensor_parallel.vocab_parallel_cross_entropy(vocab_parallel_logits=logits, target=labels)
-
-

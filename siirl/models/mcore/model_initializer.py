@@ -17,7 +17,10 @@
 # use mcore transformer config to initialize the model
 from abc import ABC, abstractmethod
 
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec, get_gpt_mtp_block_spec
+from megatron.core.models.gpt.gpt_layer_specs import (
+    get_gpt_decoder_block_spec,
+    get_gpt_mtp_block_spec,
+)
 from megatron.core.models.gpt.gpt_model import GPTModel
 
 from .config_converter import PretrainedConfig, TransformerConfig
@@ -33,7 +36,8 @@ class BaseModelInitializer(ABC):
     @abstractmethod
     def get_transformer_layer_spec(self):
         """Get the transformer layer specification.
-        https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_layer_specs.py"""
+        https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_layer_specs.py
+        """
         pass
 
     def get_rope_scaling_args(self) -> dict:
@@ -85,7 +89,11 @@ class BaseModelInitializer(ABC):
         if post_process and value:
             from siirl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
 
-            model.output_layer = LinearForLastLayer(input_size=self.tfconfig.hidden_size, output_size=1, config=self.tfconfig)
+            model.output_layer = LinearForLastLayer(
+                input_size=self.tfconfig.hidden_size,
+                output_size=1,
+                config=self.tfconfig,
+            )
 
         return model
 

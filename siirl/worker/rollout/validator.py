@@ -11,18 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import time
-import numpy as np
-
-from loguru import logger
 from collections import defaultdict
-from typing import List, Dict
+
+import numpy as np
+from loguru import logger
 
 from siirl.data_coordinator import Sample
 from siirl.utils.metrics import aggregate_validation_metrics
 
-def aggregate_and_log_validation_metrics(all_payloads: List[Sample]) -> Dict[str, float]:
+
+def aggregate_and_log_validation_metrics(
+    all_payloads: list[Sample],
+) -> dict[str, float]:
     """
     Aggregates all validation results and logs performance (rank 0 only).
 
@@ -44,7 +44,7 @@ def aggregate_and_log_validation_metrics(all_payloads: List[Sample]) -> Dict[str
     return final_metrics
 
 
-def aggregate_validation_results(all_payloads: List[Sample]) -> Dict[str, float]:
+def aggregate_validation_results(all_payloads: list[Sample]) -> dict[str, float]:
     """
     Computes the final metric dictionary from all gathered validation payloads.
 
@@ -68,7 +68,9 @@ def aggregate_validation_results(all_payloads: List[Sample]) -> Dict[str, float]
         # for key, value in p.extra_rewards.items():
         #     infos_dict[key].append(value)
 
-    data_src2var2metric2val = aggregate_validation_metrics(data_sources=data_sources, sample_inputs=sample_inputs, infos_dict=infos_dict)
+    data_src2var2metric2val = aggregate_validation_metrics(
+        data_sources=data_sources, sample_inputs=sample_inputs, infos_dict=infos_dict
+    )
 
     metric_dict = {}
     for data_source, var2metric2val in data_src2var2metric2val.items():
@@ -90,7 +92,11 @@ def aggregate_validation_results(all_payloads: List[Sample]) -> Dict[str, float]
             n_max = max(n_max_values) if n_max_values else 1
 
             for metric_name, metric_val in metric2val.items():
-                is_core_metric = (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name)
+                is_core_metric = (
+                    (var_name == core_var)
+                    and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+                    and (f"@{n_max}" in metric_name)
+                )
 
                 metric_sec = "val-core" if is_core_metric else "val-aux"
                 pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"

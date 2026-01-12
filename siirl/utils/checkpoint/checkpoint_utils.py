@@ -13,17 +13,16 @@
 # limitations under the License.
 
 import os
-from typing import Optional
 
 
-def find_latest_ckpt_path(checkpoint_dir: str) -> Optional[str]:
+def find_latest_ckpt_path(checkpoint_dir: str) -> str | None:
     """Find latest checkpoint based on tracker file."""
     tracker_file = os.path.join(checkpoint_dir, "latest_checkpointed_iteration.txt")
 
     if not os.path.exists(tracker_file):
         return None
 
-    with open(tracker_file, "r") as f:
+    with open(tracker_file) as f:
         global_step = f.read().strip()
 
     checkpoint_path = os.path.join(checkpoint_dir, f"global_step_{global_step}")

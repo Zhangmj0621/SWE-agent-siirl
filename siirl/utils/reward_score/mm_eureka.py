@@ -1,10 +1,8 @@
-import os
 import re
-from datetime import datetime
 
 from loguru import logger
-import torch
 from math_verify import ExprExtractionConfig, LatexExtractionConfig, StringExtractionConfig, parse
+
 from siirl.utils.extras.patch import verify
 
 choices = ["a", "b", "c", "d"]
@@ -20,21 +18,26 @@ def extract_answer_with_tags(text):
 def accuracy_reward_func(completion, answer):
     reward = 0.0
     response = extract_answer_with_tags(completion)
-    if response != None:
+    if response is not None:
         response = response
     else:
         try:
             response = completion.split("<answer>")[-1]
-        except:
+        except Exception:
             response = completion.split("\n")[-1]
 
     content, sol = response, answer
+    # answer_parsed = content
     answer_parsed = content
     gold_parsed = parse(sol)
     if len(gold_parsed) != 0:
         answer_parsed = parse(
             content,
-            extraction_config=[StringExtractionConfig(), LatexExtractionConfig(), ExprExtractionConfig()],
+            extraction_config=[
+                StringExtractionConfig(),
+                LatexExtractionConfig(),
+                ExprExtractionConfig(),
+            ],
         )
         try:
             reward = float(verify(answer_parsed, gold_parsed))
@@ -77,13 +80,12 @@ def format_reward_func(completion, **kwargs):
 
 def compute_score(predict_str: str, ground_truth: str) -> float:
     try:
-        accuracy_reward, answer_parsed = accuracy_reward_func(predict_str, ground_truth)
+        accuracy_reward, _ = accuracy_reward_func(predict_str, ground_truth)
         format_reward = format_reward_func(predict_str)
-    except:
+    except Exception:
         logger.warning(f"Error in computing rewards for prediction: {predict_str}")
         accuracy_reward = 0.0
         format_reward = 0.0
-        answer_parsed = ""
     # LOG_PATH = os.environ.get("REWARD_LOG_PATH", "reward.log")
     # with open(LOG_PATH, "a") as f:
     #     f.write(f"===============================================================\n")

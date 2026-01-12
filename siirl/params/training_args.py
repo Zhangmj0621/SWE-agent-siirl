@@ -13,29 +13,33 @@
 # limitations under the License.
 
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Dict, List, Any
+from typing import Any
+
 from .data_args import DataArguments
-from .model_args import (
-    ActorRefArguments,
-    CriticArguments,
-    RolloutArguments
-)
+from .model_args import ActorRefArguments, CriticArguments, RolloutArguments
+
 
 @dataclass
 class CustomRewardArguments:
     """Configuration for custom reward function."""
-    path: Optional[str] = field(default=None, metadata={"help": "Path to custom reward function file"})
-    name: str = field(default="reward_function", metadata={"help": "Function name in the custom reward file"})
-    reward_kwargs: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Keyword arguments for reward function"})
+
+    path: str | None = field(default=None, metadata={"help": "Path to custom reward function file"})
+    name: str = field(
+        default="reward_function",
+        metadata={"help": "Function name in the custom reward file"},
+    )
+    reward_kwargs: dict[str, Any] = field(
+        default_factory=dict, metadata={"help": "Keyword arguments for reward function"}
+    )
 
 
 @dataclass
 class TrainingArguments:
     total_epochs: int = field(default=30, metadata={"help": "Total training epochs"})
-    total_training_steps: Optional[int] = field(default=None, metadata={"help": "Override training steps"})
+    total_training_steps: int | None = field(default=None, metadata={"help": "Override training steps"})
     project_name: str = field(default="siirl_examples", metadata={"help": "Project name"})
     experiment_name: str = field(default="gsm8k", metadata={"help": "Experiment name"})
-    logger: List[str] = field(
+    logger: list[str] = field(
         default_factory=lambda: ["console", "wandb"],
         metadata={"help": "Logging backends"},
     )
@@ -43,8 +47,11 @@ class TrainingArguments:
     nnodes: int = field(default=1, metadata={"help": "Number of nodes"})
     n_gpus_per_node: int = field(default=8, metadata={"help": "GPUs per node"})
     save_freq: int = field(default=-1, metadata={"help": "Checkpoint frequency"})
-    resume_mode: str = field(default="auto", metadata={"help": "Resume training mode: auto/disable/resume_path"})
-    resume_from_path: Optional[str] = field(default=None, metadata={"help": "Resume from specific path"})
+    resume_mode: str = field(
+        default="auto",
+        metadata={"help": "Resume training mode: auto/disable/resume_path"},
+    )
+    resume_from_path: str | None = field(default=None, metadata={"help": "Resume from specific path"})
     test_freq: int = field(default=-1, metadata={"help": "Testing frequency"})
     critic_warmup: int = field(default=0, metadata={"help": "Critic warmup steps"})
     default_local_dir: str = field(
@@ -56,35 +63,36 @@ class TrainingArguments:
     val_only: bool = field(default=False, metadata={"help": "Whether or not just eval only"})
     max_actor_ckpt_to_keep: int = field(default=100, metadata={"help": "Maximum number of actor ckpts."})
     max_critic_ckpt_to_keep: int = field(default=100, metadata={"help": "Maximum number of critic ckpts."})
-    validation_data_dir: Optional[str] = field(default=None, metadata={"help": "Validation data directory."})
-    device: Optional[str] = field(default="cuda", metadata={"help": "Training device."})
+    validation_data_dir: str | None = field(default=None, metadata={"help": "Validation data directory."})
+    device: str | None = field(default="cuda", metadata={"help": "Training device."})
     async_factor: int = field(default=1, metadata={"help": "Control async speed"})
-    param_sync_buffer_size: int = field(default=512 * 1024**2,metadata={"help":"buffer size for param_sync, in bytes. This is used for updating weights by chunk and should be useful for MoE models."})
-    
+    param_sync_buffer_size: int = field(
+        default=512 * 1024**2,
+        metadata={
+            "help": "buffer size for param_sync, in bytes. This is used for updating weights by chunk and should be useful for MoE models."
+        },
+    )
+
     # === Off Policy Configuration ===
     off_policy_step: int = field(
         default=0,
-        metadata={"help": "Number of version steps allowed for off-policy data. "
-                  "0 means on-policy only (strict current version). "
-                  "N means accept data from versions [current - N, current]."}
+        metadata={
+            "help": "Number of version steps allowed for off-policy data. "
+            "0 means on-policy only (strict current version). "
+            "N means accept data from versions [current - N, current]."
+        },
     )
     off_policy_strategy: str = field(
         default="fifo",
-        metadata={"help": "Strategy for dispatching off-policy data. Options: 'fifo' (default), 'oldest_first'"}
+        metadata={"help": "Strategy for dispatching off-policy data. Options: 'fifo' (default), 'oldest_first'"},
     )
 
     # === Resource Allocation Configuration ===
-    actor_gpus: int = field(
-        default=2,
-        metadata={"help": "Number of GPUs for training (Actor/Ref/Critic)"}
-    )
-    rollout_gpus: int = field(
-        default=6,
-        metadata={"help": "Number of GPUs for rollout/inference"}
-    )
+    actor_gpus: int = field(default=2, metadata={"help": "Number of GPUs for training (Actor/Ref/Critic)"})
+    rollout_gpus: int = field(default=6, metadata={"help": "Number of GPUs for rollout/inference"})
     colocate: bool = field(
         default=False,
-        metadata={"help": "Share GPUs between training and rollout (colocated mode)"}
+        metadata={"help": "Share GPUs between training and rollout (colocated mode)"},
     )
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
     pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
@@ -93,6 +101,7 @@ class TrainingArguments:
     expert_tensor_parallel_size: int = field(default=1, metadata={"help": "Expert tensor parallelism size"})
     virtual_pipeline_model_parallel_size: Optional[int] = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
     sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -106,5 +115,5 @@ class SiiRLArguments:
     trainer: TrainingArguments = field(default_factory=TrainingArguments)
     custom_reward_function: CustomRewardArguments = field(default_factory=CustomRewardArguments)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -1,28 +1,28 @@
 import asyncio
 import json
-from dotenv import load_dotenv
 import os
-import yaml
 import pathlib
-import loguru
+
+import yaml
+from dotenv import load_dotenv
 
 __DIR__ = pathlib.Path(__file__).parent.resolve()
 
 load_dotenv()
 
-from .. import agentflow
-from .openai import OpenaiModel
+from .. import agentflow  # noqa: E402
+from .openai import OpenaiModel  # noqa: E402
 
 
 def main():
     model = OpenaiModel()
-    with open(__DIR__ / "config.yaml", "r") as f:
+    with open(__DIR__ / "config.yaml") as f:
         config = yaml.safe_load(f)
 
     agent = agentflow(config, model)
 
     samples: list[dict] = []
-    with open(os.environ["SWEBENCH_VERIFIED_JSONL"], "r") as f:
+    with open(os.environ["SWEBENCH_VERIFIED_JSONL"]) as f:
         for line in f:
             samples.append(json.loads(line)["metadata"])
     samples = samples[:1]
@@ -50,12 +50,8 @@ def main():
         reward_1 = sum(1 for r in rewards if r is not None and r >= 0.5)
         reward_0 = sum(1 for r in rewards if r is not None and r < 0.5)
         failed = sum(1 for r in rewards if r is None)
-        avg_reward = (
-            sum(r for r in rewards if r is not None) / len(rewards) if rewards else 0
-        )
-        print(
-            f"Reward=1: {reward_1}, Reward=0: {reward_0}, Failed: {failed}, Avg reward: {avg_reward:.4f}"
-        )
+        avg_reward = sum(r for r in rewards if r is not None) / len(rewards) if rewards else 0
+        print(f"Reward=1: {reward_1}, Reward=0: {reward_0}, Failed: {failed}, Avg reward: {avg_reward:.4f}")
 
     asyncio.run(run_all())
 

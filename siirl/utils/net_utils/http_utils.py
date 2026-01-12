@@ -11,22 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import time
-import ray 
 import asyncio
-import time
+import logging
 import multiprocessing
 import threading
+import time
+from typing import Any, Literal
+
+import httpx
 import requests
 from loguru import logger
-from typing import Optional, Dict, Any, Literal
 from requests.exceptions import RequestException
-import httpx
-import logging
+
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 _thread_local = threading.local()
-
 
 
 def wait_until_ok(
@@ -39,7 +38,7 @@ def wait_until_ok(
     extra_headers: dict | None = None,
 ) -> None:
     """Block the execution until the given URL returns HTTP 200 status code or reaches max wait time.
-    
+
     Args:
         url: Target URL to check health status
         process: Optional multiprocessing.Process object to monitor server status
@@ -47,7 +46,7 @@ def wait_until_ok(
         interval: Interval in seconds between consecutive health checks
         timeout: Request timeout in seconds for each health check
         extra_headers: Optional additional headers for the health check request
-    
+
     Raises:
         RuntimeError: If server process terminates unexpectedly or health check times out
     """
@@ -55,7 +54,9 @@ def wait_until_ok(
     while time.monotonic() < deadline:
         # Check if server process is still alive
         if process and not process.is_alive():
-            raise RuntimeError(f"Server process terminated unexpectedly. Process: {process}, Alive status: {process.is_alive()}")
+            raise RuntimeError(
+                f"Server process terminated unexpectedly. Process: {process}, Alive status: {process.is_alive()}"
+            )
         try:
             # Send health check request
             if requests.get(url, timeout=timeout, headers=extra_headers or {}).status_code == 200:
@@ -74,12 +75,13 @@ DEFAULT_MAX_ATTEMPTS = 3  # Default maximum retry attempts
 DEFAULT_RETRY_DELAY = 1.0  # Default initial retry delay in seconds
 HTTPMethod = Literal["GET", "POST", "PUT", "DELETE"]  # Restrict supported HTTP methods
 
-    
+
 class GlobalAsyncHTTPClient:
     """
     A thread-safe, asynchronous HTTP client that creates an isolated client instance for each thread.
     This prevents issues with event loop mismatches when used across multiple threads or Ray actors.
     """
+
     _connect_timeout: float = 10.0  # Connection timeout in seconds
 
     @classmethod
@@ -97,7 +99,7 @@ class GlobalAsyncHTTPClient:
                     connect=cls._connect_timeout,
                     read=None,  # Disable read timeout for long-running operations (e.g., model generation)
                     write=None,
-                    pool=None
+                    pool=None,
                 ),
                 http2=False,  # Disable HTTP/2 for wider compatibility
                 follow_redirects=True,  # Automatically follow HTTP redirects
@@ -108,12 +110,12 @@ class GlobalAsyncHTTPClient:
     async def make_request(
         cls,
         url: str,
-        payload: Optional[Dict[str, Any]] = None,
+        payload: dict[str, Any] | None = None,
         method: HTTPMethod = "POST",
         timeout: float = DEFAULT_TIMEOUT,
-        max_attempts: Optional[int] = None,
-        retry_delay: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
+        max_attempts: int | None = None,
+        retry_delay: float | None = None,
+    ) -> dict[str, Any] | None:
         """
         Makes an asynchronous HTTP request with an exponential backoff retry mechanism.
 
@@ -142,19 +144,14 @@ class GlobalAsyncHTTPClient:
             connect=timeout or cls._connect_timeout,
             read=None,  # Maintain disabled read timeout for long-running operations
             write=None,
-            pool=None
+            pool=None,
         )
 
         # Execute request with retries
         for attempt in range(use_max_attempts):
             attempt_num = attempt + 1
             try:
-                response = await client.request(
-                    method=method,
-                    url=url,
-                    json=payload or {},
-                    timeout=use_timeout
-                )
+                response = await client.request(method=method, url=url, json=payload or {}, timeout=use_timeout)
                 response.raise_for_status()  # Raise exception for HTTP errors (4xx/5xx)
                 logger.debug(f"Request to {url} succeeded (attempt {attempt_num}/{use_max_attempts})")
                 return response.json()
@@ -164,7 +161,12 @@ class GlobalAsyncHTTPClient:
                 logger.error(f"HTTP error for {url} (attempt {attempt_num}/{use_max_attempts}): {e}")
                 raise  # Do not retry on HTTP status errors
 
-            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.TimeoutException) as e:
+            except (
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+                httpx.ConnectError,
+                httpx.TimeoutException,
+            ) as e:
                 logger.warning(f"Request error for {url} (attempt {attempt_num}/{use_max_attempts}): {e}")
 
             # Handle unexpected exceptions
@@ -175,8 +177,10 @@ class GlobalAsyncHTTPClient:
 
             # Exponential backoff for retries
             if attempt < use_max_attempts - 1:
-                sleep_time = use_retry_delay * (2 ** attempt)
-                logger.debug(f"Retrying request to {url} in {sleep_time:.2f} seconds (attempt {attempt_num + 1}/{use_max_attempts})")
+                sleep_time = use_retry_delay * (2**attempt)
+                logger.debug(
+                    f"Retrying request to {url} in {sleep_time:.2f} seconds (attempt {attempt_num + 1}/{use_max_attempts})"
+                )
                 await asyncio.sleep(sleep_time)
 
         # All retry attempts failed

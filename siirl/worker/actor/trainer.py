@@ -12,24 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ray
-import datetime
-import time
 import os
+import time
+import datetime
+import traceback
+
+import ray
 import torch
 import torch.distributed as dist
-import traceback
 from loguru import logger
-from typing import Optional
-from ray.actor import ActorHandle
 from megatron.core import parallel_state as mpu
+from ray.actor import ActorHandle
 
-from siirl.engine.actor.megatron_actor import ActorWorker, ReferenceWorker, CriticWorker
-from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.algorithm.advantage import compute_advantage
+from siirl.data_coordinator.sample import Samples2Dict
+from siirl.engine.actor.megatron_actor import ActorWorker, CriticWorker, ReferenceWorker
+from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.utils.distributed_utils import init_gloo_group
 from siirl.utils.timer import Timer, TimerCollection
-from siirl.data_coordinator.sample import Samples2Dict
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
 from siirl.utils.backend.device import get_nccl_backend, get_torch_device
 from siirl.params import SiiRLArguments, TrainingArguments
@@ -64,6 +64,7 @@ def global_initialize_model_parallel(config: TrainingArguments):
         )
         set_random_seed(seed=megatron_config.seed)
 
+
 class Trainer:
     """
     Single training unit managing actor, reference, and optionally critic models.
@@ -80,13 +81,14 @@ class Trainer:
         data_coordinator=None,
         coordinator=None,
         rollout_manager=None,
-        metric_worker: Optional[ActorHandle] = None,
+        metric_worker: ActorHandle | None = None,
     ):
         # Configure logging for this Ray actor process
         # (worker_process_setup_hook only works for task workers, not actors)
         from siirl.utils.logger.logging_utils import set_basic_config
+
         set_basic_config()
-        
+
         self.config = config
         self.rank = rank
         self.local_rank = local_rank
@@ -101,6 +103,7 @@ class Trainer:
         self.metric_client = None
         if metric_worker is not None:
             from siirl.utils.metrics import MetricClient
+
             self.metric_client = MetricClient(metric_worker)
             logger.info(f"[Trainer rank={rank}] MetricClient initialized")
 
@@ -121,7 +124,7 @@ class Trainer:
 
         # Training state
         self.global_step = 0
-        
+
         # Local batch cache for handling async data fetch race conditions
         # When some dp_ranks get data while others don't, the ones with data
         # cache it locally and wait for the next round
@@ -137,9 +140,9 @@ class Trainer:
     def init_models(self):
         logger.info(f"[Trainer.global_initialize_model_parallel] rank={self.rank} starting model parallel initialization...")
         global_initialize_model_parallel(self.config.trainer)
-        
+
         logger.info(f"[Trainer.init_models] rank={self.rank} starting model initialization...")
-        
+
         self.actor_worker = ActorWorker(config=self.config)
         self.actor_worker.init_model()
         logger.info(f"[Trainer.init_models] rank={self.rank} ActorWorker initialized")
@@ -163,8 +166,7 @@ class Trainer:
         self.cp_rank = mpu.get_context_parallel_rank()
 
         # Only TP rank 0, PP rank 0, and CP rank 0 should submit metrics to avoid duplicates
-        self.should_submit_metrics = (self.tp_rank == 0 and self.pp_rank == 0 and self.cp_rank == 0)
-
+        self.should_submit_metrics = self.tp_rank == 0 and self.pp_rank == 0 and self.cp_rank == 0
 
         self.checkpoint_manager = CheckpointManager(
             config=self.config,
@@ -178,13 +180,16 @@ class Trainer:
             dp_world_size=self.dp_world_size,
         )
 
-
         # Initialize MetricTracker only on global rank=0
         if self.rank == 0:
             self._init_tracker()
-        
-        logger.success(f"[Trainer.init_models] rank={self.rank} completed: dp_rank={self.dp_rank}, dp_world_size={self.dp_world_size}, tp_rank={self.tp_rank}, pp_rank={self.pp_rank}, cp_rank={self.cp_rank}")
-    
+
+        logger.success(
+            f"[Trainer.init_models] rank={self.rank} completed: dp_rank={self.dp_rank}, "
+            f"dp_world_size={self.dp_world_size}, tp_rank={self.tp_rank}, "
+            f"pp_rank={self.pp_rank}, cp_rank={self.cp_rank}"
+        )
+
     def _init_tracker(self):
         """
         Initialize MetricTracker for logging (only called on rank=0).
@@ -192,7 +197,7 @@ class Trainer:
         Configures backends based on config settings.
         """
         from siirl.utils.logger import MetricTracker
-        
+
         logger.info(f"[Trainer rank={self.rank}] Rank 0: Initializing MetricTracker...")
 
         # Configure backends based on config settings
@@ -200,7 +205,7 @@ class Trainer:
         backend_configs = {}
 
         # Check for wandb config
-        if hasattr(self.config, 'trainer') and hasattr(self.config.trainer, 'logger'):
+        if hasattr(self.config, "trainer") and hasattr(self.config.trainer, "logger"):
             logger_backends = self.config.trainer.logger
             if isinstance(logger_backends, list):
                 backends = logger_backends
@@ -208,20 +213,20 @@ class Trainer:
                 backends = [logger_backends]
 
         # Check for wandb proxy
-        if hasattr(self.config, 'trainer') and hasattr(self.config.trainer, 'wandb_proxy'):
+        if hasattr(self.config, "trainer") and hasattr(self.config.trainer, "wandb_proxy"):
             if self.config.trainer.wandb_proxy:
                 backend_configs["wandb"] = {"proxy": self.config.trainer.wandb_proxy}
 
         # Get project and experiment names
-        project_name = getattr(self.config.trainer, 'project_name', 'siirl_agentic')
-        experiment_name = getattr(self.config.trainer, 'experiment_name', f'exp_{int(time.time())}')
+        project_name = getattr(self.config.trainer, "project_name", "siirl_agentic")
+        experiment_name = getattr(self.config.trainer, "experiment_name", f"exp_{int(time.time())}")
 
         try:
             self.tracker = MetricTracker(
                 project_name=project_name,
                 experiment_name=experiment_name,
                 backends=backends,
-                config=self.config.to_dict() if hasattr(self.config, 'to_dict') else {},
+                config=self.config.to_dict() if hasattr(self.config, "to_dict") else {},
                 backend_configs=backend_configs,
             )
             logger.success(f"[Trainer rank={self.rank}] MetricTracker initialized: backends={backends}")
@@ -241,23 +246,26 @@ class Trainer:
         logger.info(f"[Trainer rank={self.rank}] Loaded checkpoint, resuming from step {global_step}")
         return global_step
 
-
     def set_rollout_manager(self, rollout_manager):
         self.rollout_manager = rollout_manager
 
     def setup_param_sync(self):
-        assert self.actor_worker is not None,"must init models first"
+        assert self.actor_worker is not None, "must init models first"
         assert self.rollout_manager is not None, "must set rollout_manager"
-        self.param_sync = ParamSyncDistributed(config=self.config, model=self.actor_worker.actor_module, bridge=self.actor_worker.bridge)
+        self.param_sync = ParamSyncDistributed(
+            config=self.config,
+            model=self.actor_worker.actor_module,
+            bridge=self.actor_worker.bridge,
+        )
         init_gloo_group()
-        
+
     # @timer
     def update_rollout_weight(self):
         assert self.param_sync is not None, "must setup param sync first"
-        if isinstance(self.param_sync,ParamSyncDistributed):
+        if isinstance(self.param_sync, ParamSyncDistributed):
             # TODO support elastic rollout connection
             rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
-            if any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):   
+            if any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
                 self.param_sync.setup_param_sync_group(rollout_workers)
         self.param_sync.update_weights()
 
@@ -266,14 +274,14 @@ class Trainer:
 
     def get_current_weight_version(self) -> int:
         """Get current weight version from param_sync."""
-        if hasattr(self, 'param_sync') and self.param_sync is not None:
+        if hasattr(self, "param_sync") and self.param_sync is not None:
             return self.param_sync.weight_version
         return 0
 
     def _compute_min_version(self) -> int:
         """
         Compute minimum acceptable weight version based on off-policy config.
-        
+
         off_policy_step controls version staleness tolerance:
         - 0: strict on-policy, only accept current version
         - 1: accept data up to 1 version behind
@@ -282,21 +290,21 @@ class Trainer:
         current_version = self.get_current_weight_version()
         off_policy_step = self.config.trainer.off_policy_step
         return max(0, current_version - off_policy_step)
-    
+
     def _sync_batch_availability(self, batch_ref) -> bool:
         """
         Synchronize batch data availability across ALL ranks.
-        
+
         Two-phase synchronization:
         1. DP group sync: ensure all ranks within same DP group agree on data availability
         2. Global sync: ensure all DP groups agree
-        
+
         Args:
             batch_ref: The batch reference fetched from DataCoordinator (can be empty list)
-            
+
         Returns:
             True if ALL ranks (across all DP groups) have data, False otherwise.
-            
+
         Side effect:
             If sync fails but this rank has data, caches it in self._local_batch_cache
             for use in the next get_batch call.
@@ -325,20 +333,20 @@ class Trainer:
     def get_batch(self, batch_size: int):
         """
         Get a batch of data for training with proper synchronization across ALL ranks.
-        
+
         This method handles the race condition where different DP ranks may receive
         data at different times due to async data production. It uses:
         1. Local cache to store data that was fetched but couldn't be used (due to sync failure)
         2. Two-phase sync via _sync_batch_availability:
            - Phase 1: DP group all_reduce(MIN) for data partition consistency
            - Phase 2: Global all_reduce(MIN) to ensure all DP groups agree
-        
+
         The two-phase sync guarantees that either ALL ranks return data and execute
         the subsequent barrier, or ALL ranks return None and skip the barrier.
-        
+
         Args:
             batch_size: Total batch size (will be divided by dp_world_size)
-            
+
         Returns:
             TensorDict with batch data, or None if data not available for all ranks
         """
@@ -363,7 +371,7 @@ class Trainer:
                     min_version=min_version,
                 )
             )
-            
+
         # Synchronize: ensure all DP ranks have data before proceeding
         if not self._sync_batch_availability(batch_ref):
             return None
@@ -388,6 +396,7 @@ class Trainer:
             entropy_loss = None
             if "entropys" in data_with_logprobs and "response_mask" in data_with_logprobs:
                 from siirl.algorithm.loss import agg_loss
+
                 entropys = data_with_logprobs["entropys"]
                 response_mask = data_with_logprobs["response_mask"]
                 loss_agg_mode = self.config.actor_ref.actor.loss_agg_mode
@@ -420,7 +429,7 @@ class Trainer:
 
             # Extract metrics from TensorDict (stored in data["metrics"] by update_actor)
             actor_metrics = actor_result.get("metrics", {})
-            if hasattr(actor_metrics, 'data'):  # NonTensorData wrapper
+            if hasattr(actor_metrics, "data"):  # NonTensorData wrapper
                 actor_metrics = actor_metrics.data
 
             # Add entropy loss to actor metrics (computed earlier from compute_log_prob)
@@ -433,7 +442,7 @@ class Trainer:
 
                 # Extract critic metrics
                 critic_metrics = critic_result.get("metrics", {})
-                if hasattr(critic_metrics, 'data'):
+                if hasattr(critic_metrics, "data"):
                     critic_metrics = critic_metrics.data
 
                 metrics = {"actor": actor_metrics, "critic": critic_metrics}
@@ -441,18 +450,18 @@ class Trainer:
                 metrics = {"actor": actor_metrics}
 
         timing_raw = timers.to_dict()
-        
+
         # Submit metrics to MetricWorker for aggregation
         # Only TP rank 0 and PP rank 0 should submit to avoid duplicates
         if self.metric_client is not None and self.should_submit_metrics:
             try:
                 from siirl.utils.metrics import (
                     compute_data_metric,
-                    compute_throughput_metrics,
                     compute_log_prob_diff_metrics,
+                    compute_throughput_metrics,
                     extract_rollout_timing_metrics,
                 )
-                
+
                 # Compute and submit data metrics
                 data_metrics = compute_data_metric(data_for_update)
                 self.metric_client.submit_metric(data_metrics, self.dp_world_size)
@@ -462,7 +471,7 @@ class Trainer:
                 n_gpus = self.world_size
                 throughput_metrics = compute_throughput_metrics(data_for_update, timing_raw, n_gpus)
                 self.metric_client.submit_metric(throughput_metrics, self.dp_world_size)
-                
+
                 # Submit timing metrics (train_step internal timings)
                 timing_metrics = {f"timing_s/{k}": v for k, v in timing_raw.items()}
                 self.metric_client.submit_metric(timing_metrics, self.dp_world_size)
@@ -493,15 +502,14 @@ class Trainer:
 
                 # Submit std stats separately for proper distributed std calculation
                 if std_stats is not None:
-                    self.metric_client.submit_metric(
-                        {"actor/rollout_probs_diff_std": std_stats},
-                        self.dp_world_size
-                    )
+                    self.metric_client.submit_metric({"actor/rollout_probs_diff_std": std_stats}, self.dp_world_size)
 
             except Exception as e:
                 logger.warning(f"[Trainer rank={self.rank}] Failed to submit metrics: {e}")
 
-        logger.success(f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} completed in {timers['step'].formatted}")
+        logger.success(
+            f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} completed in {timers['step'].formatted}"
+        )
 
         return metrics
 
@@ -521,10 +529,7 @@ class Trainer:
         if not self.coordinator:
             return
         try:
-            ray.get(self.coordinator.report_failure.remote(
-                source=f"trainer_{self.rank}",
-                reason=error_msg
-            ))
+            ray.get(self.coordinator.report_failure.remote(source=f"trainer_{self.rank}", reason=error_msg))
         except Exception as e:
             logger.warning(f"[Trainer rank={self.rank}] Failed to report failure: {e}")
             logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
@@ -532,7 +537,7 @@ class Trainer:
     def train(self, batch_size: int):
         """
         Continuous training loop that processes batches as they become available.
-        
+
         The loop checks for stop signals from TaskCoordinator and handles:
         - Graceful shutdown (coordinator signal)
         - Error propagation (reports failures to coordinator)
@@ -542,7 +547,7 @@ class Trainer:
             batch_size: Training batch size
         """
         logger.info(f"[Trainer rank={self.rank}] Starting training loop, batch_size={batch_size}")
-        
+
         # Track step interval for accurate throughput calculation
         last_step_end_time = None
 
@@ -552,21 +557,21 @@ class Trainer:
                 if self._check_should_stop():
                     logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
                     break
-                
+
                 # Update rollout weights and record timing
                 with Timer("weight_sync") as weight_sync_timer:
                     self.update_rollout_weight()
-                
+
                 # run dataloader for train
                 if self.rank == 0:
                     ray.get(self.rollout_manager.next_rollout.remote())
-                
+
                 # Record get_batch timing
                 with Timer("get_batch") as get_batch_timer:
                     while (batch_data := self.get_batch(batch_size)) is None:
                         time.sleep(0.1)
-                
-                # compare 
+
+                # compare
                 self.train_step(batch_data)
 
                 # Calculate step_interval (time between consecutive step completions)
@@ -608,7 +613,7 @@ class Trainer:
                         val_metrics = ray.get(self.rollout_manager.get_metrics.remote())
                         for metrics, global_step in val_metrics:
                             self.tracker.log(metrics, global_step)
-                    
+
                     except Exception as e:
                         logger.warning(f"[Trainer rank={self.rank}] Metric aggregation failed: {e}")
 
@@ -626,7 +631,7 @@ class Trainer:
             logger.error(f"[Trainer rank={self.rank}] Full traceback:\n{traceback.format_exc()}")
             self._report_failure(error_msg)
             raise
-        
+
         finally:
             # Ensure all pending metrics are submitted before exiting
             # Only ranks that submitted metrics need to wait
