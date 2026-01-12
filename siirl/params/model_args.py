@@ -18,13 +18,6 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class MegatronArguments:
-    tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
-    pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
-    context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})
-    expert_model_parallel_size: int = field(default=1, metadata={"help": "Expert model parallelism size"})
-    expert_tensor_parallel_size: int = field(default=1, metadata={"help": "Expert tensor parallelism size"})
-    virtual_pipeline_model_parallel_size: Optional[int] = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
-    sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
     use_distributed_optimizer: bool = field(
         default=True,
         metadata={"help": "Whether the distributed optimizer is enabled."},
@@ -116,7 +109,6 @@ class ActorArguments:
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     load_weight: bool = field(default=True)
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "seq-mean-token-sum, seq-mean-token-mean"})
-    n: int = field(default=1, metadata={"help": "Number of responses per prompt"})
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
 
     def to_dict(self) -> Dict[str, Any]:
@@ -272,7 +264,6 @@ class CriticArguments:
     ppo_epochs: int = field(default=1, metadata={"help": "PPO epochs"})
     cliprange_value: float = field(default=0.5, metadata={"help": "Value clipping range"})
     load_weight: bool = field(default=True)
-    rollout_n: int = field(default=1, metadata={"help": "rollout n"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
     checkpoint: CheckpointArguments = field(
         default_factory=CheckpointArguments,

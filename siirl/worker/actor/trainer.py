@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import ray
+import datetime
 import time
 import os
 import torch
@@ -30,6 +31,38 @@ from siirl.utils.distributed_utils import init_gloo_group
 from siirl.utils.timer import Timer, TimerCollection
 from siirl.data_coordinator.sample import Samples2Dict
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
+from siirl.utils.backend.device import get_nccl_backend, get_torch_device
+from siirl.params import SiiRLArguments, TrainingArguments
+from siirl.engine.actor.utils import set_random_seed
+
+def global_initialize_model_parallel(config: TrainingArguments):
+    """Initialize Megatron model parallel groups"""
+    megatron_config = config
+
+    rank = int(os.environ["LOCAL_RANK"])
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(
+            backend=get_nccl_backend(),
+            timeout=datetime.timedelta(seconds=600),
+            init_method=os.environ.get("DIST_INIT_METHOD", None),
+        )
+        get_torch_device().set_device(rank)
+
+        if megatron_config.sequence_parallel:
+            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+
+        mpu.initialize_model_parallel(
+            tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
+            pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_split_rank=None,
+            use_sharp=False,
+            context_parallel_size=megatron_config.context_parallel_size,
+            expert_model_parallel_size=megatron_config.expert_model_parallel_size,
+            expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
+            nccl_communicator_config_path=None,
+        )
+        set_random_seed(seed=megatron_config.seed)
 
 class Trainer:
     """
@@ -39,7 +72,7 @@ class Trainer:
 
     def __init__(
         self,
-        config,
+        config: SiiRLArguments,
         rank: int,
         local_rank: int,
         world_size: int,
@@ -102,18 +135,21 @@ class Trainer:
         logger.info(f"  node_ip={node_ip}, CUDA_VISIBLE_DEVICES={cuda_visible}, ray_gpu_ids={ray_gpu_ids}")
 
     def init_models(self):
+        logger.info(f"[Trainer.global_initialize_model_parallel] rank={self.rank} starting model parallel initialization...")
+        global_initialize_model_parallel(self.config.trainer)
+        
         logger.info(f"[Trainer.init_models] rank={self.rank} starting model initialization...")
         
-        self.actor_worker = ActorWorker(config=self.config.actor_ref)
+        self.actor_worker = ActorWorker(config=self.config)
         self.actor_worker.init_model()
         logger.info(f"[Trainer.init_models] rank={self.rank} ActorWorker initialized")
 
-        self.ref_worker = ReferenceWorker(config=self.config.actor_ref)
+        self.ref_worker = ReferenceWorker(config=self.config)
         self.ref_worker.init_model()
         logger.info(f"[Trainer.init_models] rank={self.rank} ReferenceWorker initialized")
 
         if self.use_critic:
-            self.critic_worker = CriticWorker(config=self.config.critic)
+            self.critic_worker = CriticWorker(config=self.config)
             self.critic_worker.init_model()
             logger.info(f"[Trainer.init_models] rank={self.rank} CriticWorker initialized")
 

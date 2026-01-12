@@ -8,7 +8,7 @@
 export SIIRL_DIR="${SIIRL_DIR:-{siirl-agentic-dir}}"
 export PYTHONPATH="$SIIRL_DIR:$PYTHONPATH"
 
- --- Experiment and Model Definition ---
+#  --- Experiment and Model Definition ---
 export DATASET=deepscaler
 export ALG=grpo
 export MODEL_NAME=qwen3-8b
@@ -104,9 +104,6 @@ TRAINING_CMD=(
     # === Reference Model Settings ===
     actor_ref.ref.log_prob_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_ref.ref.megatron.param_offload=True
-    actor_ref.ref.megatron.tensor_model_parallel_size=$ACTOR_TP
-    actor_ref.ref.megatron.pipeline_model_parallel_size=$ACTOR_PP
-    actor_ref.ref.megatron.context_parallel_size=$ACTOR_CP
     actor_ref.actor.megatron.use_mbridge=True
     # === Rollout Settings (SGLang) ===
     rollout.name=sglang
@@ -130,6 +127,10 @@ TRAINING_CMD=(
     trainer.logger="['console','tensorboard']"
     trainer.resume_mode=auto
     trainer.val_before_train=True
+    # === Parallel Config ===
+    trainer.tensor_model_parallel_size=$ACTOR_TP
+    trainer.pipeline_model_parallel_size=$ACTOR_PP
+    trainer.context_parallel_size=$ACTOR_CP
 )
 
 # ===================================================================================
