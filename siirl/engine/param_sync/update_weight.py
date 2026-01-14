@@ -14,14 +14,14 @@ from tqdm import tqdm
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.distributed_utils import get_gloo_group, init_process_group
 
+from . import mbridge_patch  # noqa: F401
+
 
 class ParamSyncInterface:
     def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
         self.config = config
         self.model = model
         self.bridge = bridge
-        if self.bridge is not None:
-            pass
         self.weight_version = 0
         self._model_update_groups = None
 

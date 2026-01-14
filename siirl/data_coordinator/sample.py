@@ -1,4 +1,5 @@
 import asyncio
+import types
 from typing import Any, Union, get_args, get_origin
 
 import numpy as np
@@ -181,7 +182,7 @@ def Samples2Dict(samples: list[Sample]) -> TensorDict:
             if isinstance(first_val, np.ndarray):
                 tensordict_data[key] = np.stack(values, axis=0) if first_val.ndim >= 1 else np.concatenate(values, axis=0)
                 default_type = fields[key].annotation
-                if get_origin(default_type) is Union:
+                if get_origin(default_type) in (Union, types.UnionType):
                     args = get_args(default_type)
                     actual_type = next((arg for arg in args if arg is not type(None)), None)
                     if actual_type is np.ndarray:
