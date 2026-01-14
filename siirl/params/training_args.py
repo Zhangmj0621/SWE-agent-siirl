@@ -97,10 +97,10 @@ class TrainingArguments:
     context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})
     expert_model_parallel_size: int = field(default=1, metadata={"help": "Expert model parallelism size"})
     expert_tensor_parallel_size: int = field(default=1, metadata={"help": "Expert tensor parallelism size"})
-    virtual_pipeline_model_parallel_size: Optional[int] = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
+    virtual_pipeline_model_parallel_size: int | None = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
     sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 

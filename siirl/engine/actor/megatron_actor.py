@@ -1,4 +1,3 @@
-import datetime
 import os
 from functools import partial
 
@@ -11,15 +10,15 @@ import torch.distributed
 from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 from tensordict import NonTensorData, TensorDict
 from torch import nn
 
 from siirl.algorithm.kl_penalty import kl_penalty
 from siirl.algorithm.loss import agg_loss, compute_value_loss, get_policy_loss_fn
-from siirl.engine.actor.utils import append_to_dict, set_random_seed
+from siirl.engine.actor.utils import append_to_dict
 from siirl.params import SiiRLArguments
-from siirl.utils.backend.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
+from siirl.utils.backend.device import get_device_id, get_device_name, get_torch_device
 from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from siirl.utils.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
@@ -34,6 +33,7 @@ from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmo
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean
 from siirl.utils.timer import Timer
+
 
 class ActorWorker:
     def __init__(self, config: SiiRLArguments):
@@ -488,7 +488,7 @@ class ReferenceWorker:
 
 
 class CriticWorker:
-    def __init__(self, config:SiiRLArguments):
+    def __init__(self, config: SiiRLArguments):
         self.rank = 0
         self.hf_config = None
         self.tf_config = None
@@ -1021,7 +1021,7 @@ class MegatronPPOActor:
         batch = data.select(*select_keys)
 
         local_ppo_mini_batch_size = self.actor_config.ppo_mini_batch_size * self.config.rollout.n
-        self.local_ppo_mini_batch_size = local_ppo_mini_batch_size//mpu.get_data_parallel_world_size(with_context_parallel=False)
+        self.local_ppo_mini_batch_size = local_ppo_mini_batch_size // mpu.get_data_parallel_world_size(with_context_parallel=False)
 
         dataloader = batch.split(self.local_ppo_mini_batch_size)
 

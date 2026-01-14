@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import contextlib
+import datetime
 import os
 import time
-import datetime
 import traceback
 
 import ray
@@ -28,13 +28,14 @@ from ray.actor import ActorHandle
 from siirl.algorithm.advantage import compute_advantage
 from siirl.data_coordinator.sample import Samples2Dict
 from siirl.engine.actor.megatron_actor import ActorWorker, CriticWorker, ReferenceWorker
+from siirl.engine.actor.utils import set_random_seed
 from siirl.engine.param_sync.update_weight import ParamSyncDistributed
+from siirl.params import SiiRLArguments, TrainingArguments
+from siirl.utils.backend.device import get_nccl_backend, get_torch_device
 from siirl.utils.distributed_utils import init_gloo_group
 from siirl.utils.timer import Timer, TimerCollection
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
-from siirl.utils.backend.device import get_nccl_backend, get_torch_device
-from siirl.params import SiiRLArguments, TrainingArguments
-from siirl.engine.actor.utils import set_random_seed
+
 
 def global_initialize_model_parallel(config: TrainingArguments):
     """Initialize Megatron model parallel groups"""
@@ -480,7 +481,7 @@ class Trainer:
                 rollout_timing = extract_rollout_timing_metrics(data_for_update)
                 if rollout_timing:
                     # Separate internal key from metrics to submit
-                    earliest_start = rollout_timing.pop("_earliest_rollout_start_at", None)
+                    _earliest_start = rollout_timing.pop("_earliest_rollout_start_at", None)  # noqa: F841
                     if rollout_timing:
                         self.metric_client.submit_metric(rollout_timing, self.dp_world_size)
 
