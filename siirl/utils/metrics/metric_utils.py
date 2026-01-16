@@ -226,21 +226,24 @@ def compute_timing_metrics(batch: TensorDict, timing_raw: dict[str, float]) -> d
     return metrics
 
 
-def compute_throughput_metrics(batch: TensorDict, timing_raw: dict[str, float], n_gpus: int) -> dict[str, Any]:
+def compute_throughput_metrics(batch: TensorDict, timing_raw: dict[str, float], _n_gpus: int) -> dict[str, Any]:
     """
-    Computes throughput metrics for training.
+    Computes raw throughput inputs for training.
+
+    Note: Throughput should be computed after aggregation on rank 0 using
+    aggregated token counts and a consistent time basis.
 
     Args:
         batch: A TensorDict object containing batch data with meta information about token counts.
         timing_raw: A dictionary mapping stage names to their execution times in seconds.
                    Must contain a "step" key with the total step time.
-        n_gpus: Number of GPUs used for training.
+        _n_gpus: Number of GPUs used for training (unused; kept for API compatibility).
 
     Returns:
         A dictionary containing:
             - perf/total_num_tokens: Total number of tokens processed in the batch
-            - perf/time_per_step: Time taken for the step in seconds
-            - perf/throughput: Tokens processed per second per GPU
+            - perf/time_per_step: Time taken for the step in seconds (per rank)
+            - perf/time_per_step_max: Same value for max aggregation across ranks
     """
     # Get total tokens - support both list and tensor formats
     if "global_token_num" in batch:
@@ -261,7 +264,7 @@ def compute_throughput_metrics(batch: TensorDict, timing_raw: dict[str, float], 
     return {
         "perf/total_num_tokens": total_num_tokens,
         "perf/time_per_step": time,
-        "perf/throughput": (total_num_tokens / (time * n_gpus) if time > 0 and n_gpus > 0 else 0),
+        "perf/time_per_step_max": time,
     }
 
 
