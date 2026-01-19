@@ -98,9 +98,7 @@ TRAINING_CMD=(
     actor_ref.actor.kl_loss_type=low_var_kl
     actor_ref.actor.megatron.param_offload=False
     actor_ref.actor.megatron.optimizer_offload=False
-    actor_ref.actor.megatron.tensor_model_parallel_size=$ACTOR_TP
-    actor_ref.actor.megatron.pipeline_model_parallel_size=$ACTOR_PP
-    actor_ref.actor.megatron.context_parallel_size=$ACTOR_CP
+    # Actor parallelism is configured via trainer.* below
     # === Reference Model Settings ===
     actor_ref.ref.log_prob_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_ref.ref.megatron.param_offload=True

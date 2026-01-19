@@ -68,6 +68,11 @@ Before committing, pre-commit hooks will automatically:
 - Validate YAML files
 - Check for trailing whitespace
 
+Requirements:
+- Run `pre-commit install` after cloning to enable git hooks
+- Do not use `git commit --no-verify` unless explicitly instructed
+- Ensure `git config --get core.hooksPath` is empty or points to the repo hooks if hooks do not run
+
 To run manually:
 
 ```bash
