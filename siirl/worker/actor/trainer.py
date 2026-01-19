@@ -603,19 +603,14 @@ class Trainer:
 
                         # Compute throughput after aggregation to avoid per-rank bias
                         total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
-                        time_per_step = aggregated_metrics.get("perf/time_per_step_max") or aggregated_metrics.get("perf/time_per_step")
+                        # time_per_step = aggregated_metrics.get("perf/time_per_step_max") or aggregated_metrics.get("perf/time_per_step")
 
-                        # Throughput based on train_step time
-                        if time_per_step and time_per_step > 0 and total_tokens > 0:
-                            aggregated_metrics["perf/throughput/train_step"] = total_tokens / time_per_step
-
-                        # Throughput based on end-to-end step interval
+                        # Throughput based on end-to-end step interval (per-GPU effective)
                         if step_interval is not None:
                             aggregated_metrics["perf/delta_time/step_interval"] = step_interval
                             if step_interval > 0 and total_tokens > 0:
-                                aggregated_metrics["perf/throughput/step_interval"] = total_tokens / step_interval
                                 # Backward-compatible alias (step-interval based)
-                                aggregated_metrics["perf/throughput"] = aggregated_metrics["perf/throughput/step_interval"]
+                                aggregated_metrics["perf/throughput"] = total_tokens / (step_interval * self.world_size)
                         self.tracker.log(aggregated_metrics, step=self.global_step)
 
                         # get rollout validate metrics
