@@ -610,7 +610,8 @@ class Trainer:
                             aggregated_metrics["perf/delta_time/step_interval"] = step_interval
                             if step_interval > 0 and total_tokens > 0:
                                 # Backward-compatible alias (step-interval based)
-                                aggregated_metrics["perf/throughput"] = total_tokens / (step_interval * self.world_size)
+                                total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
+                                aggregated_metrics["perf/throughput"] = total_tokens / (step_interval * total_gpus)
                         self.tracker.log(aggregated_metrics, step=self.global_step)
 
                         # get rollout validate metrics
