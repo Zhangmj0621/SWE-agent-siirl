@@ -1,11 +1,13 @@
-from typing import Optional, Callable, Awaitable, Any, cast
 import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
+
 import numpy as np
 from loguru import logger
 
 from siirl.data_coordinator.sample import Sample
 
-from ..agentflow import ModelResponse, load_agentflow, AgentFlow
+from ..agentflow import AgentFlow, ModelResponse, load_agentflow
 
 LLMEngine = Any  # siirl.engine.rollout.sglang_engine.SglangEngine
 
@@ -26,8 +28,8 @@ class SglangModel:
         self,
         input_tokens: list[int],
         messages: list[dict],
-        max_tokens: Optional[int] = None,
-        timeout: Optional[int] = None,
+        max_tokens: int | None = None,
+        timeout: int | None = None,
     ) -> ModelResponse:
         # see https://docs.sglang.io/basic_usage/sampling_params.html#core-parameters
         # also https://github.com/sgl-project/sglang/blob/main/sgl-model-gateway/src/protocols/sampling_params.rs
@@ -58,12 +60,7 @@ class AgentFlowCallable:
     def __init__(self, flow: AgentFlow):
         self.flow = flow
 
-    async def __call__(
-        self,
-        sample: Sample,
-        reward_fn=None,
-        is_generate=False
-    ):
+    async def __call__(self, sample: Sample, reward_fn=None, is_generate=False):
         try:
             sample_data = sample.extra_info
             s = self.flow.preprocess(sample_data)
@@ -84,7 +81,7 @@ class AgentFlowCallable:
         return sample
 
     def __repr__(self) -> str:
-        return f"AgentflowCallable"
+        return "AgentflowCallable"
 
 
 def build_agentflow(config: dict, engine: LLMEngine) -> Callable[..., Awaitable]:

@@ -32,6 +32,7 @@ class ToolType(Enum):
     NATIVE = "native"
     MCP = "mcp"
 
+
 def get_tool_class(cls_name):
     module_name, class_name = cls_name.rsplit(".", 1)
     if module_name not in sys.modules:

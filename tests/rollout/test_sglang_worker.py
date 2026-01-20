@@ -13,16 +13,16 @@
 # limitations under the License.
 
 
-import os
 import time
+
 import ray
 
-
+from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.utils.logger.logging_utils import set_basic_config
-from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.worker.ray_utils import allocate_resources
 from siirl.worker.rollout.rollout_manager import RolloutManager
+
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
     "TOKENIZERS_PARALLELISM": "true",
@@ -55,44 +55,44 @@ class MainRunner:
         from loguru import logger
 
         logger.info("MainRunner started. Beginning workflow setup...")
-        start_time = time.time()
+        # start_time = time.time()
 
         # 1. Init DataBuffer
         logger.info(f"Initializing DataCoordinator with {siirl_args.trainer.nnodes} distributed DataBuffers...")
         # In the new architecture, the number of buffers is typically the number of nodes.
         # We pass force_local=False to enable distributed deployment.
         data_coordinator_handle = init_data_coordinator(
-            num_buffers=siirl_args.trainer.nnodes, ppo_mini_batch_size = siirl_args.actor_ref.actor.ppo_mini_batch_size,
-            world_size=siirl_args.trainer.nnodes * siirl_args.trainer.n_gpus_per_node
+            num_buffers=siirl_args.trainer.nnodes,
+            ppo_mini_batch_size=siirl_args.actor_ref.actor.ppo_mini_batch_size,
+            world_size=siirl_args.trainer.nnodes * siirl_args.trainer.n_gpus_per_node,
         )
         dataloader_fut = data_coordinator_handle.init_dataloader.remote(siirl_args)
         # 2. Allocate GPU resources
         resources = allocate_resources(siirl_args)
         rollout_resources = resources["rollout"]
         logger.info(f"Allocated rollout resources: {rollout_resources}")
-        
+
         # 3. Initialize rollout worker
         ray.get(dataloader_fut)
-        rollout_worker = RolloutManager.remote(siirl_args, rollout_resources, data_coordinator_handle)
+        # rollout_worker = RolloutManager.remote(
+        #     siirl_args, rollout_resources, data_coordinator_handle
+        # )
+        RolloutManager.remote(siirl_args, rollout_resources, data_coordinator_handle)
         logger.info("RolloutManager initialized")
         total_training_steps, num_train_batches = ray.get(data_coordinator_handle.epoch_info.remote())
         global_steps = 0
-        
+
         if num_train_batches > 0:
             start_epoch = global_steps // num_train_batches
-            batches_to_skip = global_steps % num_train_batches
+            # batches_to_skip = global_steps % num_train_batches
         for epoch in range(start_epoch, siirl_args.trainer.total_epochs):
-            for batch_idx in range(num_train_batches):
+            for _ in range(num_train_batches):
                 ray.get(data_coordinator_handle.run_dataloader.remote(epoch))
                 while True:
                     pass
         # 4. Initialize Actor worker
-        
-        
-        
+
         # 5. start rollout and actor worker
-
-
 
 
 def main() -> None:
@@ -114,24 +114,26 @@ def main() -> None:
     logger.info("Initializing local Ray cluster...")
     # 显式告诉 ray：我要本地起头节点，别去连外部
     ray.init(
-        address="local",                      # 关键
+        address="local",  # 关键
         runtime_env={"env_vars": RAY_RUNTIME_ENV_VARS},
-        num_cpus=None
+        num_cpus=None,
     )
     logger.success(f"Ray is initialized. Time cost: {(time.time() - start_time) * 1000:.2f} ms")
 
     # Parse the complete configuration into a structured object
     siirl_args = parse_config()
-    siirl_args.actor_ref.model.path = '/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-1.7B'
+    siirl_args.actor_ref.model.path = "/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-1.7B"
     siirl_args.rollout.tensor_model_parallel_size = 2
-    siirl_args.data.train_files = ['/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/train.parquet']
-    siirl_args.data.val_files = ['/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/test.parquet']
-    siirl_args.data.max_prompt_length=2048
-    siirl_args.data.max_response_length=2048
-    siirl_args.data.filter_overlong_prompts=True
-    siirl_args.rollout.n=2
-    siirl_args.rollout.multiturn.env_type='tool_env'
-    siirl_args.rollout.multiturn.env_path='/inspire/hdd/global_user/hujiarui-25046/workspace/siirl-async/examples/AIO/tools_config_search.yaml'
+    siirl_args.data.train_files = ["/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/train.parquet"]
+    siirl_args.data.val_files = ["/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/test.parquet"]
+    siirl_args.data.max_prompt_length = 2048
+    siirl_args.data.max_response_length = 2048
+    siirl_args.data.filter_overlong_prompts = True
+    siirl_args.rollout.n = 2
+    siirl_args.rollout.multiturn.env_type = "tool_env"
+    siirl_args.rollout.multiturn.env_path = (
+        "/inspire/hdd/global_user/hujiarui-25046/workspace/siirl-async/examples/AIO/tools_config_search.yaml"
+    )
     siirl_args.rollout.multiturn.max_env_turns = 2
     siirl_args.rollout.multiturn.max_assistant_turns = 2
     siirl_args.rollout.multiturn.max_env_response_length = 512

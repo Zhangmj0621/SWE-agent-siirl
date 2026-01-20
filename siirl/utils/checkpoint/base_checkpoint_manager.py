@@ -19,7 +19,6 @@ import random
 import shutil
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Union
 
 import numpy as np
 import torch
@@ -34,11 +33,11 @@ from siirl.params.model_args import CheckpointArguments
 class BaseCheckpointManager:
     """
     Base checkpoint manager that provides common functionality for saving and loading checkpoints.
-    
+
     This class manages the save/load content configuration and provides utility methods
     for checkpoint operations. Subclasses should implement the actual save_checkpoint
     and load_checkpoint methods.
-    
+
     Attributes:
         model: The model to checkpoint.
         optimizer: The optimizer instance.
@@ -47,7 +46,7 @@ class BaseCheckpointManager:
         checkpoint_save_contents: List of content types to save.
         checkpoint_load_contents: List of content types to load.
         previous_saved_paths: List of previously saved checkpoint paths for cleanup.
-    
+
     Supported content types:
         - "model": Model weights
         - "optimizer": Optimizer states
@@ -60,12 +59,12 @@ class BaseCheckpointManager:
         model,
         optimizer: torch.optim.Optimizer = None,
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler = None,
-        processing_class: Union[PreTrainedTokenizer, ProcessorMixin] = None,
+        processing_class: PreTrainedTokenizer | ProcessorMixin = None,
         checkpoint_config: CheckpointArguments = None,
     ):
         """
         Initialize the base checkpoint manager.
-        
+
         Args:
             model: The model to checkpoint.
             optimizer: The optimizer instance (optional).
@@ -88,8 +87,8 @@ class BaseCheckpointManager:
             self.checkpoint_load_contents = ["model", "optimizer", "extra"]
 
         # Track previous saved paths for cleanup
-        self.previous_saved_paths: List[str] = []
-        self.previous_global_step: Optional[int] = None
+        self.previous_saved_paths: list[str] = []
+        self.previous_global_step: int | None = None
 
         # Get distributed info
         if torch.distributed.is_initialized():
@@ -134,20 +133,15 @@ class BaseCheckpointManager:
         """Returns True if 'extra' is in checkpoint_load_contents."""
         return "extra" in self.checkpoint_load_contents
 
-    def load_checkpoint(
-        self, 
-        local_path: str, 
-        hdfs_path: str = None, 
-        del_local_after_load: bool = False
-    ):
+    def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load: bool = False):
         """
         Load checkpoint from the specified path.
-        
+
         Args:
             local_path: Local path to load checkpoint from.
             hdfs_path: Optional HDFS path (not implemented in base class).
             del_local_after_load: Whether to delete local files after loading.
-        
+
         Raises:
             NotImplementedError: Subclasses must implement this method.
         """
@@ -162,25 +156,25 @@ class BaseCheckpointManager:
     ):
         """
         Save checkpoint to the specified path.
-        
+
         Args:
             local_path: Local path to save checkpoint to.
             hdfs_path: Optional HDFS path (not implemented in base class).
             global_step: Current global training step.
             max_ckpt_to_keep: Maximum number of checkpoints to keep.
-        
+
         Raises:
             NotImplementedError: Subclasses must implement this method.
         """
         raise NotImplementedError("Subclasses must implement save_checkpoint")
 
-    def remove_previous_save_local_path(self, paths: Union[str, List[str]]) -> None:
+    def remove_previous_save_local_path(self, paths: str | list[str]) -> None:
         """
         Remove old checkpoint directories to save disk space.
-        
+
         This method will delete entire global_step_* directories if the path
         is within such a directory structure.
-        
+
         Args:
             paths: Single path or list of paths to remove.
         """
@@ -210,10 +204,10 @@ class BaseCheckpointManager:
     def local_mkdir(path: str) -> str:
         """
         Create a local directory with file locking for thread safety.
-        
+
         Args:
             path: Directory path to create.
-        
+
         Returns:
             The absolute path of the created directory.
         """
@@ -239,7 +233,7 @@ class BaseCheckpointManager:
     def get_rng_state() -> dict:
         """
         Get current RNG states for reproducibility.
-        
+
         Returns:
             Dictionary containing CPU, NumPy, Python random, and GPU RNG states.
         """
@@ -258,7 +252,7 @@ class BaseCheckpointManager:
     def load_rng_state(rng_state: dict) -> None:
         """
         Restore RNG states from a saved checkpoint.
-        
+
         Args:
             rng_state: Dictionary containing saved RNG states.
         """
@@ -268,4 +262,3 @@ class BaseCheckpointManager:
 
         if torch.cuda.is_available() and "cuda" in rng_state:
             torch.cuda.set_rng_state(rng_state["cuda"])
-

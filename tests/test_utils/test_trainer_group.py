@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ray
 import os
-from loguru import logger
-from typing import List
 
+import ray
+from loguru import logger
+
+from siirl.engine.actor.utils import get_master_info
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.enums import DistributedEnv
-from siirl.engine.actor.utils import get_master_info
 from siirl.worker.actor.trainer import Trainer
 from siirl.worker.ray_utils import GPUResources
 
@@ -68,7 +68,7 @@ class TestTrainerGroup:
         self.is_shared = gpu_resources.is_shared  # Whether in colocated mode
 
         self.trainer_cls = trainer_cls
-        self.trainers: List[Trainer] = []
+        self.trainers: list[Trainer] = []
 
         self.use_critic = self.config.actor_ref.algorithm.adv_estimator == "ppo"
 
@@ -78,7 +78,7 @@ class TestTrainerGroup:
     def set_rollout_manager(self, rollout_manager):
         """
         Set the rollout manager for weight synchronization.
-        
+
         Args:
             rollout_manager: Ray handle to RolloutManager
         """
@@ -93,9 +93,9 @@ class TestTrainerGroup:
         logger.info(f"[TrainerGroup.init_actors] Creating {self.num_gpus} trainers")
         logger.info(f"  gpu_indices={self.gpu_indices}, local_ranks={self.local_ranks}")
         logger.info(f"  node_ips={self.node_ips}, is_shared={self.is_shared}")
-        
+
         # Iterate over allocated GPU bundle indices and their local ranks
-        for rank, (bundle_idx, local_rank) in enumerate(zip(self.gpu_indices, self.local_ranks)):
+        for rank, (bundle_idx, local_rank) in enumerate(zip(self.gpu_indices, self.local_ranks, strict=False)):
             env_vars = {
                 DistributedEnv.WORLD_SIZE.value: str(self.num_gpus),
                 DistributedEnv.RANK.value: str(rank),
@@ -104,12 +104,14 @@ class TestTrainerGroup:
                 DistributedEnv.MASTER_PORT.value: self.master_ports,
                 "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
             }
-            logger.info(f"  Creating Trainer rank={rank}: bundle_idx={bundle_idx}, local_rank={local_rank}, "
-                       f"node_ip={self.node_ips[rank]}, env={{WORLD_SIZE={self.num_gpus}, RANK={rank}, "
-                       f"LOCAL_RANK={local_rank}, MASTER_ADDR={self.master_addr}, MASTER_PORT={self.master_ports}}}")
+            logger.info(
+                f"  Creating Trainer rank={rank}: bundle_idx={bundle_idx}, local_rank={local_rank}, "
+                f"node_ip={self.node_ips[rank]}, env={{WORLD_SIZE={self.num_gpus}, RANK={rank}, "
+                f"LOCAL_RANK={local_rank}, MASTER_ADDR={self.master_addr}, MASTER_PORT={self.master_ports}}}"
+            )
 
-            if os.getenv('GLOO_SOCKET_IFNAME'):
-                env_vars['GLOO_SOCKET_IFNAME'] = os.getenv('GLOO_SOCKET_IFNAME')
+            if os.getenv("GLOO_SOCKET_IFNAME"):
+                env_vars["GLOO_SOCKET_IFNAME"] = os.getenv("GLOO_SOCKET_IFNAME")
 
             TrainerActor = ray.remote(self.trainer_cls)
 
@@ -132,7 +134,7 @@ class TestTrainerGroup:
                 use_critic=self.use_critic,
                 data_coordinator=self.data_coordinator,
                 coordinator=self.coordinator,
-                rollout_manager = self.rollout_manager,
+                rollout_manager=self.rollout_manager,
             )
 
             self.trainers.append(trainer_handle)
@@ -152,7 +154,7 @@ class TestTrainerGroup:
         """
         Execute training loop.
         """
-        batch_size = self.config.data.train_batch_size * self.config.rollout.n 
+        batch_size = self.config.data.train_batch_size * self.config.rollout.n
         futures = [trainer.train.remote(batch_size) for trainer in self.trainers]
         ray.get(futures)
 
@@ -174,4 +176,3 @@ class TestTrainerGroup:
         futures = [trainer.update_rollout_weight.remote() for trainer in self.trainers]
         ray.get(futures)
         logger.info("Weight update completed")
-        

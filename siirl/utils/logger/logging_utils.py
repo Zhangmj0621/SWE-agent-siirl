@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from loguru import logger
 import os
 import sys
+
+from loguru import logger
 
 SIIRL_LOG_DIRCTORY = os.getenv("SIIRL_LOG_DIRECTORY", "siirl_logs")
 

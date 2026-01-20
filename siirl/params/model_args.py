@@ -1,6 +1,6 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
 # Copyright 2025, Infrawaves. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,7 +14,8 @@
 # limitations under the License.
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 
 @dataclass
 class MegatronArguments:
@@ -27,11 +28,11 @@ class MegatronArguments:
     param_offload: bool = field(default=False, metadata={"help": "Offload parameters to CPU"})
     grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
-    override_transformer_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override transformer config"})
-    override_ddp_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override ddp config"})
+    override_transformer_config: dict[str, Any] = field(default_factory=dict, metadata={"help": "Override transformer config"})
+    override_ddp_config: dict[str, Any] = field(default_factory=dict, metadata={"help": "Override ddp config"})
     use_mbridge: bool = field(default=True, metadata={"help": "Whether to use mbridge"})
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -41,12 +42,15 @@ class OptimizerArguments:
     lr_warmup_steps_ratio: float = field(default=0.0, metadata={"help": "Warmup steps ratio"})
     min_lr: float = field(default=0.0, metadata={"help": "Min learning rate"})
     lr_warmup_init: float = field(default=0.0, metadata={"help": "Learning rate warmup init"})
-    lr_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate decay steps"})
+    lr_decay_steps: int | None = field(default=None, metadata={"help": "Learning rate decay steps"})
     lr_decay_style: str = field(default="linear", metadata={"help": "Learning rate decay style"})
     weight_decay_incr_style: str = field(default="constant", metadata={"help": "Weight decay increase style"})
     lr_wsd_decay_style: str = field(default="exponential", metadata={"help": "Learning rate warmup decay style"})
-    lr_wsd_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate warmup decay steps"})
-    use_checkpoint_opt_param_scheduler: bool = field(default=False, metadata={"help": "Whether to use checkpoint opt param scheduler"})
+    lr_wsd_decay_steps: int | None = field(default=None, metadata={"help": "Learning rate warmup decay steps"})
+    use_checkpoint_opt_param_scheduler: bool = field(
+        default=False,
+        metadata={"help": "Whether to use checkpoint opt param scheduler"},
+    )
     total_training_steps: int = field(default=-1, metadata={"help": "Total training steps"})
     weight_decay: float = field(default=1e-2, metadata={"help": "Weight decay params of Optimizer"})
     lr_warmup_steps: int = field(
@@ -54,25 +58,25 @@ class OptimizerArguments:
         metadata={"help": "Prioritized. Negative values mean delegating to lr_warmup_steps_ratio."},
     )
     clip_grad: float = field(default=1.0, metadata={"help": "gradient clip"})
-    override_optimizer_config: Optional[dict] = field(default=None, metadata={"help": "Override optimizer config"})
+    override_optimizer_config: dict | None = field(default=None, metadata={"help": "Override optimizer config"})
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 @dataclass
-class ModelArguments():
+class ModelArguments:
     path: str = field(
         default="~/models/deepseek-llm-7b-chat",
         metadata={"help": "Model path or identifier"},
     )
-    override_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Model config overrides"})
+    override_config: dict[str, Any] = field(default_factory=dict, metadata={"help": "Model config overrides"})
     trust_remote_code: bool = field(
         default=False,
         metadata={"help": "Whether to trust the execution of code from datasets/models defined on the Hub or not."},
     )
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
-    
+
     # used for dataloader
     use_fast_tokenizer: bool = field(
         default=True,
@@ -82,11 +86,12 @@ class ModelArguments():
         default=False,
         metadata={"help": "Whether or not the special tokens should be split during the tokenization process."},
     )
+
     def __post_init__(self):
         if self.path is None:
             raise ValueError("Please provide `path`.")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -94,11 +99,14 @@ class ModelArguments():
 class ActorArguments:
     train_backend: str = field(default="megatron", metadata={"help": "Backend for training"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
-    ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
+    ppo_micro_batch_size_per_gpu: int | None = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     loss_mode: str = field(default="vanilla", metadata={"help": "loss_mode for loss compute"})
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
-    clip_ratio_c: float = field(default=3.0, metadata={"help": "lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729"})
+    clip_ratio_c: float = field(
+        default=3.0,
+        metadata={"help": "lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729"},
+    )
     clip_ratio_high: float = field(default=0.2, metadata={"help": "Max value for clip ratio"})
     entropy_coeff: float = field(default=0, metadata={"help": "Entropy coefficient"})
     use_kl_loss: bool = field(default=False, metadata={"help": "Enable KL loss"})
@@ -108,10 +116,13 @@ class ActorArguments:
     optim: OptimizerArguments = field(default_factory=OptimizerArguments, metadata={"help": "Optimizer settings"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     load_weight: bool = field(default=True)
-    loss_agg_mode: str = field(default="token-mean", metadata={"help": "seq-mean-token-sum, seq-mean-token-mean"})
+    loss_agg_mode: str = field(
+        default="token-mean",
+        metadata={"help": "seq-mean-token-sum, seq-mean-token-mean"},
+    )
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -130,10 +141,13 @@ class MultiturnArguments:
     max_env_turns: int = field(default=1, metadata={"help": "max env turns"})
     max_assistant_turns: int = field(default=1, metadata={"help": "max model generate turns"})
     env_path: str = field(default=None, metadata={"help": "env yaml config path"})
-    env_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
+    env_kwargs: dict[str, Any] = field(default_factory=lambda: {})
     max_parallel_calls: int = field(default=1, metadata={"help": "Max parallel env"})
     max_env_response_length: int = field(default=256, metadata={"help": "Max env response"})
-    env_response_truncate_side: str = field(default="middle", metadata={"help": "Truncate side of Env response: left, middle, right"})
+    env_response_truncate_side: str = field(
+        default="middle",
+        metadata={"help": "Truncate side of Env response: left, middle, right"},
+    )
 
 
 @dataclass
@@ -150,7 +164,7 @@ class RolloutArguments:
     load_format: str = field(default="dummy_dtensor", metadata={"help": "Weight loading format"})
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism"})
     max_num_batched_tokens: int = field(default=8192, metadata={"help": "Max batched tokens"})
-    max_model_len: Optional[int] = field(default=None, metadata={"help": "Max model length"})
+    max_model_len: int | None = field(default=None, metadata={"help": "Max model length"})
     max_num_seqs: int = field(default=1024, metadata={"help": "Max concurrent sequences"})
     do_sample: bool = field(default=True, metadata={"help": "Enable sampling"})
     n: int = field(default=1, metadata={"help": "Number of responses"})
@@ -159,28 +173,36 @@ class RolloutArguments:
     val_kwargs: EvalSamplingArguments = field(default_factory=EvalSamplingArguments)
     seed: int = field(default=0, metadata={"help": "The random seed"})
     calculate_log_probs: bool = field(default=True, metadata={"help": "Whether rollout calculate log probs"})
-    multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
+    multi_stage_wake_up: bool = field(
+        default=False,
+        metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"},
+    )
     router_ip: str = field(default=None, metadata={"help": "Rollout Router IP"})
     router_port: str = field(default=None, metadata={"help": "Rollout Router Port"})
     executor_module: str = field(default="naive", metadata={"help": "Batch rollout Generate Executor"})
     flow_function: str = field(default="naive", metadata={"help": "Sample rollout Generate Executor"})
-    flow_config: str = field(default="config.yaml", metadata={"help": "Sample rollout Generate Executor config path"})
+    flow_config: str = field(
+        default="config.yaml",
+        metadata={"help": "Sample rollout Generate Executor config path"},
+    )
     multiturn: MultiturnArguments = field(default_factory=MultiturnArguments)
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
 
 @dataclass
 class RefArguments:
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
-    log_prob_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
-    log_prob_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
+    log_prob_micro_batch_size: int | None = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
+    log_prob_micro_batch_size_per_gpu: int | None = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
-    ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
+    ppo_micro_batch_size_per_gpu: int | None = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     param_offload: bool = field(default=False, metadata={"help": "Enable param offload or not"})
     load_weight: bool = field(default=True)
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -192,20 +214,20 @@ class AlgorithmArguments:
     kl_penalty: str = field(default="kl", metadata={"help": "KL penalty type"})
     norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 @dataclass
 class CheckpointArguments:
     """Configuration for checkpoint save/load contents.
-    
+
     Supported content types:
         - "model": Model weights (Megatron distributed format)
         - "optimizer": Optimizer states
         - "extra": Extra states (RNG states, lr_scheduler, etc.)
         - "hf_model": HuggingFace format model (converted from Megatron)
-    
+
     Example:
         To enable HF model saving, add "hf_model" to save_contents:
         ```yaml
@@ -213,25 +235,24 @@ class CheckpointArguments:
             save_contents: ["model", "optimizer", "extra", "hf_model"]
         ```
     """
-    contents: List[str] = field(
-        default_factory=lambda: ["model", "optimizer", "extra"],
-        metadata={"help": "Default contents to save and load in the checkpoint."}
-    )
-    save_contents: List[str] = field(
-        default_factory=lambda: ["model", "optimizer", "extra"],
-        metadata={"help": "Contents to save: model, optimizer, extra, hf_model"}
-    )
-    load_contents: List[str] = field(
-        default_factory=lambda: ["model", "optimizer", "extra"],
-        metadata={"help": "Contents to load: model, optimizer, extra"}
-    )
-    async_save: bool = field(
-        default=False, 
-        metadata={"help": "Enable async checkpoint save (experimental)"}
-    )
 
-    def to_dict(self) -> Dict[str, Any]:
+    contents: list[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],
+        metadata={"help": "Default contents to save and load in the checkpoint."},
+    )
+    save_contents: list[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],
+        metadata={"help": "Contents to save: model, optimizer, extra, hf_model"},
+    )
+    load_contents: list[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],
+        metadata={"help": "Contents to load: model, optimizer, extra"},
+    )
+    async_save: bool = field(default=False, metadata={"help": "Enable async checkpoint save (experimental)"})
+
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
 
 @dataclass
 class ActorRefArguments:
@@ -241,10 +262,10 @@ class ActorRefArguments:
     algorithm: AlgorithmArguments = field(default_factory=AlgorithmArguments, metadata={"help": "Algorithm settings"})
     checkpoint: CheckpointArguments = field(
         default_factory=CheckpointArguments,
-        metadata={"help": "Checkpoint save/load configuration"}
+        metadata={"help": "Checkpoint save/load configuration"},
     )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -260,17 +281,18 @@ class CriticArguments:
     )
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
-    ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
+    ppo_micro_batch_size_per_gpu: int | None = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     ppo_epochs: int = field(default=1, metadata={"help": "PPO epochs"})
     cliprange_value: float = field(default=0.5, metadata={"help": "Value clipping range"})
     load_weight: bool = field(default=True)
-    loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
+    loss_agg_mode: str = field(
+        default="token-mean",
+        metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"},
+    )
     checkpoint: CheckpointArguments = field(
         default_factory=CheckpointArguments,
-        metadata={"help": "Checkpoint save/load configuration"}
+        metadata={"help": "Checkpoint save/load configuration"},
     )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-

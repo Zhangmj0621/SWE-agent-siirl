@@ -296,7 +296,10 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 faulthandler.disable()
                 signal.alarm(0)
                 if debug:
-                    print(f"outputs = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                    print(
+                        f"outputs = {output}, test outputs = {in_outs['outputs'][index]}, "
+                        f"inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}"
+                    )
             elif which_type == CODE_TYPE.standard_input:  # Standard input
                 faulthandler.enable()
                 passed = False
@@ -331,9 +334,16 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                     if debug:
                         nl = "\n"
                         if not isinstance(inputs, list):
-                            print(f"not passed output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                            print(
+                                f"not passed output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                                f"inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, "
+                                f"{output == [in_outs['outputs'][index]]}"
+                            )
                         else:
-                            print(f"not passed output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                            print(
+                                f"not passed output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                                f"inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}"
+                            )
                     continue
 
                 if passed and debug:
@@ -394,9 +404,17 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 if debug:
                     nl = "\n"
                     if not isinstance(inputs, list):
-                        print(f"@1 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, {output == [in_outs['outputs'][index]]} {tmp_result=}")
+                        print(
+                            f"@1 output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                            f"inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, "
+                            f"{output == [in_outs['outputs'][index]]} {tmp_result=}"
+                        )
                     else:
-                        print(f"@1 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]} {tmp_result=}")
+                        print(
+                            f"@1 output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                            f"inputs = {inputs}, {type(inputs)}, "
+                            f"{output == [in_outs['outputs'][index]]} {tmp_result=}"
+                        )
 
                 if debug:
                     print(f"{tmp_result=} @a")
@@ -414,10 +432,17 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                     print(f"{tmp_result=} @b")
 
                 try:
-                    all_ints = all(combined_int_check(e1) and combined_int_check(e2) for e1, e2 in zip(output, in_outs["outputs"][index]))
+                    all_ints = all(
+                        combined_int_check(e1) and combined_int_check(e2) for e1, e2 in zip(output, in_outs["outputs"][index], strict=False)
+                    )
                     if not all_ints:
                         if debug:
-                            print([combined_int_check(e1) and combined_int_check(e2) for e1, e2 in zip(output, in_outs["outputs"][index])])
+                            print(
+                                [
+                                    combined_int_check(e1) and combined_int_check(e2)
+                                    for e1, e2 in zip(output, in_outs["outputs"][index], strict=False)
+                                ]
+                            )
                         output_float = [float(e) for e in output]
                         gt_float = [float(e) for e in in_outs["outputs"][index]]
                         tmp_result = tmp_result or ((len(output_float) == len(gt_float)) and np.allclose(output_float, gt_float))
@@ -429,7 +454,10 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
 
                 try:
                     if isinstance(output[0], list):
-                        all_ints = all(combined_int_check(e1) and combined_int_check(e2) for e1, e2 in zip(output[0], in_outs["outputs"][index]))
+                        all_ints = all(
+                            combined_int_check(e1) and combined_int_check(e2)
+                            for e1, e2 in zip(output[0], in_outs["outputs"][index], strict=False)
+                        )
                         if not all_ints:
                             output_float = [float(e) for e in output[0]]
                             gt_float = [float(e) for e in in_outs["outputs"][index][0]]
@@ -498,9 +526,16 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 if debug:
                     nl = "\n"
                     if not isinstance(inputs, list):
-                        print(f"@2 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                        print(
+                            f"@2 output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                            f"inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, "
+                            f"{output == [in_outs['outputs'][index]]}"
+                        )
                     else:
-                        print(f"@2 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                        print(
+                            f"@2 output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                            f"inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}"
+                        )
 
                     print(f"results = {results}")
 

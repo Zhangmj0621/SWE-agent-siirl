@@ -13,14 +13,13 @@
 # limitations under the License.
 
 from io import BytesIO
-from typing import Optional, Union
 
 import torch
 from PIL import Image
 from qwen_vl_utils import fetch_image, fetch_video, smart_resize
 
 
-def process_image(image: Union[dict, Image.Image], max_pixels: int, min_pixels: int) -> Image.Image:
+def process_image(image: dict | Image.Image, max_pixels: int, min_pixels: int) -> Image.Image:
     img_obj = None
     if isinstance(image, Image.Image):
         img_obj = image.convert("RGB")
@@ -73,12 +72,12 @@ eg.
 
 def process_video(
     video: dict,
-    nframes: Optional[int] = None,
-    fps: Optional[float] = None,
-    fps_min_frames: Optional[int] = None,
-    fps_max_frames: Optional[int] = None,
-    max_pixels: Optional[int] = None,
-    min_pixels: Optional[int] = None,
+    nframes: int | None = None,
+    fps: float | None = None,
+    fps_min_frames: int | None = None,
+    fps_max_frames: int | None = None,
+    max_pixels: int | None = None,
+    min_pixels: int | None = None,
 ) -> torch.Tensor:
     """Converts a video dict into a [n_frames, 3, H, W] tensor
 

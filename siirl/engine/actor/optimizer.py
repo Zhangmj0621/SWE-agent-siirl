@@ -12,15 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import torch
-from typing import Dict
 
-from siirl.utils.megatron.megatron_utils import print_rank_0
+import torch
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
-def init_megatron_optim_config(optim_config: Dict) -> OptimizerConfig:
+from siirl.utils.megatron.megatron_utils import print_rank_0
+
+
+def init_megatron_optim_config(optim_config: dict) -> OptimizerConfig:
     optim_args = {
         "optimizer": "adam",
         "lr": optim_config.lr,
@@ -71,9 +72,7 @@ def get_megatron_optimizer_param_scheduler(optimizer, config):
     wsd_decay_steps = None
     if config.lr_wsd_decay_steps is not None:
         wsd_decay_steps = config.lr_wsd_decay_steps
-    if config.lr_warmup_steps_ratio is not None and (
-        config.lr_warmup_steps is None or config.lr_warmup_steps <= 0
-    ):
+    if config.lr_warmup_steps_ratio is not None and (config.lr_warmup_steps is None or config.lr_warmup_steps <= 0):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
     opt_param_scheduler = OptimizerParamScheduler(

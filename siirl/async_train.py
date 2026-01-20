@@ -16,15 +16,15 @@
 import sys
 import time
 import traceback
+
 import ray
 
+from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.utils.task_coordinator import create_coordinator
-from siirl.data_coordinator.data_buffer import init_data_coordinator
+from siirl.worker.actor.trainer_group import TrainerGroup
 from siirl.worker.ray_utils import allocate_resources
 from siirl.worker.rollout.rollout_manager import RolloutManager
-from siirl.worker.actor.trainer_group import TrainerGroup
-
 
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
@@ -57,6 +57,7 @@ class MainRunner:
         # NOTE: Logging is automatically configured when siirl is imported (see siirl/__init__.py)
         # All Ray actors inherit this configuration as they import siirl modules.
         from siirl.utils.logger.logging_utils import set_basic_config
+
         set_basic_config()
         from loguru import logger
 
@@ -78,15 +79,16 @@ class MainRunner:
         data_coordinator = init_data_coordinator(
             num_buffers=config.trainer.nnodes,
             ppo_mini_batch_size=config.actor_ref.actor.ppo_mini_batch_size,
-            world_size=actor_resources.num_gpus
+            world_size=actor_resources.num_gpus,
         )
-        
+
         # Initialize dataloader in DataCoordinator
         dataloader_fut = data_coordinator.init_dataloader.remote(config)
-        
+
         # === 3. Initialize MetricWorker ===
         # Note: MetricTracker is created inside Trainer (only rank=0) for cleaner lifecycle management
         from siirl.utils.metrics import MetricWorker
+
         logger.info("Initializing MetricWorker...")
         metric_worker = MetricWorker.remote()
         ray.get(metric_worker.start.remote())
@@ -98,20 +100,20 @@ class MainRunner:
 
         try:
             logger.info(f"Initializing components: {actor_resources.num_gpus} training GPUs, {rollout_resources.num_gpus} rollout GPUs...")
-            
+
             rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator, coordinator, metric_worker)
             trainer_group = TrainerGroup(
-                config, 
-                actor_resources, 
-                data_coordinator, 
-                rollout_manager, 
+                config,
+                actor_resources,
+                data_coordinator,
+                rollout_manager,
                 coordinator,
                 metric_worker=metric_worker,
             )
 
             # init rollout
             rollout_fut = rollout_manager.init.remote()
-            
+
             # Get training info from DataCoordinator and update config
             # NOTE: Ray actors modify their local copy of config, so we must fetch the calculated values
             ray.get(dataloader_fut)
@@ -119,11 +121,9 @@ class MainRunner:
             config.actor_ref.actor.optim.total_training_steps = total_training_steps
             config.critic.optim.total_training_steps = total_training_steps
             logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
-            
+
             # Initialize trainer actors (creates Trainer Ray actors with models)
             trainer_group.init_actors()
-            
-            
 
             # Load checkpoint if resume mode is enabled
             if config.trainer.resume_mode != "disable":
@@ -139,16 +139,16 @@ class MainRunner:
             router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
             logger.success(f"RolloutManager initialized. Router at: {router_address}")
             logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
-            
+
             # === 5. Async Training Loop ===
             logger.info("Starting async training loop...")
             rollout_manager.run_dataloader.remote()
-            
+
             trainer_group.train()
 
             # === 6. Wait for completion or failure ===
             self._wait_for_completion(coordinator, logger)
-            
+
             # === 7. Check final status and raise if failed ===
             final_status = ray.get(coordinator.get_status.remote())
             if final_status == "failed":
@@ -163,7 +163,7 @@ class MainRunner:
             if current_status == "running":
                 ray.get(coordinator.report_failure.remote("main_runner", str(e)))
             raise
-        
+
         finally:
             # === 8. Cleanup and summary ===
             # Note: MetricTracker cleanup is handled inside Trainer (rank=0)
@@ -172,7 +172,7 @@ class MainRunner:
     def _wait_for_completion(self, coordinator, logger, check_interval: float = 5.0):
         """
         Wait for training to complete, fail, or shutdown.
-        
+
         Polls coordinator status periodically until task ends.
         """
         logger.info("Monitoring task status...")
@@ -186,7 +186,7 @@ class MainRunner:
         # Log final status
         summary = ray.get(coordinator.get_summary.remote())
         logger.info(f"Task ended with status: {summary['status']}")
-        if summary['failure_reason']:
+        if summary["failure_reason"]:
             logger.info(f"Reason: {summary['failure_reason']}")
 
     def _cleanup_and_report(self, coordinator, trainer_group, rollout_manager, start_time, logger):
@@ -204,7 +204,7 @@ class MainRunner:
         logger.info("=" * 60)
         logger.info(f"Final Status: {summary['status']}")
         logger.info(f"Total Duration: {total_time:.1f}s")
-        if summary['failure_reason']:
+        if summary["failure_reason"]:
             logger.info(f"Reason: {summary['failure_reason']}")
         logger.info(f"Total Events: {summary['event_count']}")
 
@@ -217,9 +217,9 @@ class MainRunner:
         logger.info("=" * 60)
 
         # Determine exit status
-        if summary['status'] == "failed":
+        if summary["status"] == "failed":
             logger.error("Training FAILED")
-        elif summary['status'] == "completed":
+        elif summary["status"] == "completed":
             logger.success("Training COMPLETED successfully")
         else:
             logger.info(f"Training ended with status: {summary['status']}")
@@ -234,6 +234,7 @@ def main() -> None:
     """
     # Import logger locally to avoid Ray serialization issues
     from siirl.utils.logger.logging_utils import set_basic_config
+
     set_basic_config()
     from loguru import logger
 

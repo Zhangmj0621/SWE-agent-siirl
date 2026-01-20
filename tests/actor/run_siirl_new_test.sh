@@ -23,4 +23,4 @@ torchrun --nproc_per_node $GPUS_PER_NODE \
     --pp $PP \
     --model-path "/inspire/ssd/project/qianghuaxuexi/public/debug_models/Qwen3-0.6B" \
     --tensordict-data-path "/inspire/hdd/project/qianghuaxuexi/wangtongyu-25057/wty_public/saved_tensor_dict/full_info/ppo_qwen3_0.6b_tensor_dict_mbridge" \
-    --algo ppo 
+    --algo ppo

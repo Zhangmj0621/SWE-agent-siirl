@@ -6,10 +6,10 @@ from dataclasses import asdict, dataclass
 
 from jinja2 import StrictUndefined, Template
 
-from ..environment import ContainerEnv, ContainerOutput
-from ..base import SWESample, SWERolloutResult
-from .base import Agent, AgentBuilder
 from ...base import Model, ModelResponse
+from ..base import SWERolloutResult, SWESample
+from ..environment import ContainerEnv, ContainerOutput
+from .base import Agent, AgentBuilder
 
 
 @dataclass
@@ -24,12 +24,8 @@ class AgentConfig:
         "The output of the command was:\n <output>\n{{output}}\n</output>\n"
         "Please try another command and make sure to avoid those requiring interactive input."
     )
-    format_error_template: str = (
-        "Please always provide EXACTLY ONE action in triple backticks."
-    )
-    action_observation_template: str = (
-        "<returncode>{{returncode}}</returncode>\n<output>\n{{output}}\n</output>"
-    )
+    format_error_template: str = "Please always provide EXACTLY ONE action in triple backticks."
+    action_observation_template: str = "<returncode>{{returncode}}</returncode>\n<output>\n{{output}}\n</output>"
     action_regex: str = r"```bash\s*\n(.*?)\n```"
     step_limit: int = 0
     cost_limit: float = 3.0
@@ -59,12 +55,8 @@ class MiniSWEAgent(Agent):
 
     async def run(self, env: ContainerEnv):
         """It sets rollout"""
-        self.sample.add_message(
-            "system", self.render_template(self.config.system_template)
-        )
-        self.sample.add_message(
-            "user", self.render_template(self.config.instance_template)
-        )
+        self.sample.add_message("system", self.render_template(self.config.system_template))
+        self.sample.add_message("user", self.render_template(self.config.instance_template))
 
         while True:
             try:
@@ -88,9 +80,7 @@ class MiniSWEAgent(Agent):
         """Query the model and return the response."""
         if self.n_calls >= self.config.step_limit > 0:
             raise LimitsExceeded()
-        input_tokens: list[int] = self.model.tokenizer.apply_chat_template(
-            self.messages
-        )
+        input_tokens: list[int] = self.model.tokenizer.apply_chat_template(self.messages)
         # TODO: apply(a+b) != apply(a)+apply(b) ? (tokenin tokenout 问题)
         # assert input_tokens == self.sample.tokens
         response = await self.model.query(input_tokens, self.messages)
@@ -98,9 +88,7 @@ class MiniSWEAgent(Agent):
         self.sample.add_message("assistant", response)
         return response
 
-    async def get_observation(
-        self, response: ModelResponse, env: ContainerEnv
-    ) -> ContainerOutput:
+    async def get_observation(self, response: ModelResponse, env: ContainerEnv) -> ContainerOutput:
         """Execute the action and return the observation."""
         action = self.parse_action(response)
         output = await self.execute_action(action, env)
@@ -113,33 +101,21 @@ class MiniSWEAgent(Agent):
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config)
-        return Template(template, undefined=StrictUndefined).render(
-            **kwargs, **template_vars, **self.extra_template_vars
-        )
+        return Template(template, undefined=StrictUndefined).render(**kwargs, **template_vars, **self.extra_template_vars)
 
     def parse_action(self, response: ModelResponse) -> str:
         """Parse the action from the message. Returns the action cmd."""
         actions = re.findall(self.config.action_regex, response.output, re.DOTALL)
         if len(actions) == 1:
             return actions[0].strip()
-        raise FormatError(
-            self.render_template(self.config.format_error_template, actions=actions)
-        )
+        raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
 
     async def execute_action(self, cmd: str, env: ContainerEnv) -> ContainerOutput:
         try:
             output = await env.execute(cmd, check=False)
         except (TimeoutError, subprocess.TimeoutExpired) as e:
-            output = (
-                e.output.decode("utf-8", errors="replace")
-                if isinstance(e, subprocess.TimeoutExpired)
-                else e.strerror
-            )
-            raise ExecutionTimeoutError(
-                self.render_template(
-                    self.config.timeout_template, action=cmd, output=output
-                )
-            )
+            output = e.output.decode("utf-8", errors="replace") if isinstance(e, subprocess.TimeoutExpired) else e.strerror
+            raise ExecutionTimeoutError(self.render_template(self.config.timeout_template, action=cmd, output=output)) from e
         self.has_finished(output)
         return output
 

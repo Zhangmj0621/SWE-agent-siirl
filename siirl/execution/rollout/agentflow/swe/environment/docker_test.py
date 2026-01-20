@@ -1,8 +1,10 @@
 import io
+
 import pytest
 
-from .docker import DockerEnvBuilder
 from .base import ContainerStartArgs
+from .docker import DockerEnvBuilder
+
 
 @pytest.mark.asyncio
 async def test_docker_env_minimal():
@@ -35,7 +37,7 @@ async def test_docker_env_minimal():
             await env.execute("sleep 10", timeout=0.5)
 
         # 4. Check that nonzero exit code raises if check=True
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             await env.execute("sh -c 'exit 42'", check=True)
 
         # 5. Check that nonzero exit code does not raise if check=False

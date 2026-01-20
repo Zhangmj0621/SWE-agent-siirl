@@ -57,18 +57,14 @@ def preprocess_packed_seqs(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i, attention_mask[i]]
-            input_ids_rmpad[start_idx : start_idx + half_seqlen] = d[
-                half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)
-            ]
+            input_ids_rmpad[start_idx : start_idx + half_seqlen] = d[half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)]
 
             remain_start = seqlen_padded_i - half_seqlen * (cp_rank + 1)
             remain_end = seqlen_padded_i - half_seqlen * cp_rank
             remain_end = min(remain_end, d.shape[0])
             remain_len = remain_end - remain_start
             if remain_len > 0:
-                input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[
-                    remain_start:remain_end
-                ]
+                input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[remain_start:remain_end]
 
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
@@ -172,7 +168,9 @@ def remove_left_padding(
     if pre_process:
         new_input_ids = torch.zeros(dtype=input_ids.dtype, device=input_ids.device, size=shape)
     new_attention_mask = torch.zeros(
-        dtype=attention_mask.dtype, device=attention_mask.device, size=(batch_size, seq_len)
+        dtype=attention_mask.dtype,
+        device=attention_mask.device,
+        size=(batch_size, seq_len),
     )
     new_position_ids = torch.zeros(dtype=position_ids.dtype, device=position_ids.device, size=(batch_size, seq_len))
     for i in range(batch_size):

@@ -14,13 +14,15 @@
 
 # -*- coding: utf-8 -*-
 
-""" 
+"""
 This module defines an abstract base class for a Vision-Language-Action (VLA) environment
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Tuple
+from typing import Any
+
 from pydantic import BaseModel
+
 
 class BasEnvironment(ABC):
     """
@@ -28,10 +30,12 @@ class BasEnvironment(ABC):
     It defines the standard asynchronous interface for resetting the environment
     and stepping through it.
     """
+
     def __init__(self) -> None:
         super().__init__()
+
     @abstractmethod
-    async def reset(self) -> Dict[str, Any]:
+    async def reset(self) -> dict[str, Any]:
         """
         Resets the environment to an initial state.
 
@@ -42,7 +46,7 @@ class BasEnvironment(ABC):
         pass
 
     @abstractmethod
-    async def step(self, action: Dict[str, Any]) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+    async def step(self, action: dict[str, Any]) -> tuple[dict[str, Any], float, bool, dict[str, Any]]:
         """
         Runs one timestep of the environment's dynamics.
 
@@ -58,7 +62,7 @@ class BasEnvironment(ABC):
                 - info (Dict): Auxiliary diagnostic information.
         """
         pass
-    
+
 
 class EnvResponse(BaseModel):
     """The response from a tool execution."""
@@ -69,7 +73,7 @@ class EnvResponse(BaseModel):
     rewards: float | None = None
     complete: bool = False
     metrics: dict | None = None
-    
+
     @classmethod
     def initialize_request(cls, values):
         if "image" in values and not isinstance(values["image"], list):

@@ -1,13 +1,17 @@
-from ...base import AgentFlow, Sample, Model, ModelResponse
 import re
 from dataclasses import dataclass, field
+
+from ...base import AgentFlow, Model, ModelResponse, Sample
+
 
 @dataclass
 class SimpleAgentMeta:
     sample: dict
     generate_result: dict = field(default_factory=dict)
 
+
 SimpleSample = Sample[SimpleAgentMeta]
+
 
 class SimpleAgentFlow:
     """Example AgentFlow implementation with configurable evaluation"""
@@ -29,9 +33,7 @@ class SimpleAgentFlow:
             "role": "user",
             "content": "what is result of 1+1; write your answer in <answer></answer>",
         }
-        input_tokens = self.model.tokenizer.apply_chat_template(
-            [message], add_generation_prompt=True
-        )
+        input_tokens = self.model.tokenizer.apply_chat_template([message], add_generation_prompt=True)
         sample.conversations.append(message)
         sample.append_input_tokens(input_tokens)
 
@@ -43,15 +45,11 @@ class SimpleAgentFlow:
                 max_tokens=512,
                 timeout=30,
             )
-            sample.conversations.append(
-                {"role": "assistant", "content": response.output}
-            )
+            sample.conversations.append({"role": "assistant", "content": response.output})
             sample.append_output(response)
 
             # parse output
-            match = re.search(
-                r"<answer>\s*(.*?)\s*</answer>", response.output, re.DOTALL
-            )
+            match = re.search(r"<answer>\s*(.*?)\s*</answer>", response.output, re.DOTALL)
             if not match:
                 sample.status = SimpleSample.Status.ABORTED
                 return
@@ -71,6 +69,7 @@ class SimpleAgentFlow:
         """Configurable evaluation: injected by config"""
         sample.status = SimpleSample.Status.FAILED
         sample.errors.append("No reward function configured")
+
 
 # to inject
 async def eval_reward(_: AgentFlow, sample: SimpleSample):

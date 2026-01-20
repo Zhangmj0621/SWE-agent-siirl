@@ -13,63 +13,53 @@
 # limitations under the License.
 import json
 import time
-import aiohttp
-
-from typing import Any, Optional, Dict, List
+from typing import Any
 from uuid import uuid4
 
 import aio.Scheduler.config as scheduler_config
+import aiohttp
+
+from siirl.environment import EnvResponse
+from siirl.environment.tool_env.utils.schemas import OpenAIFunctionToolSchema
+from siirl.environment.tool_env.utils.tool_call import run_single_tool_call_on_server_async
 
 from .base_tool_env import ToolEnv
-from siirl.params.model_args import RolloutArguments
-from siirl.environment.tool_env.utils.schemas import OpenAIFunctionToolSchema
-from siirl.environment import EnvResponse
-from siirl.environment.tool_env.utils.tool_call import run_single_tool_call_on_server_async
+
 
 class AIOSearchEnv(ToolEnv):
     def __init__(self, config: dict, tool_schema: OpenAIFunctionToolSchema):
         super().__init__(config, tool_schema)
         self.tool_schema = tool_schema
         self.topk = config.get("topk", 3)
-        
-        
-    async def create(
-        self,
-        instance_id: Optional[str] = None,
-        **kwargs
-    ) -> tuple[str, EnvResponse]:
+
+    async def create(self, instance_id: str | None = None, **kwargs) -> tuple[str, EnvResponse]:
         if instance_id is None:
             instance_id = str(uuid4())
-            
+
         self._instance_dict[instance_id] = {
             "response": "",
             "reward": [],
         }
         return instance_id, EnvResponse()
-    
-    async def reset(self, instance_id:Optional[str] = None):
+
+    async def reset(self, instance_id: str | None = None):
         return self.create()
-    
-    async def step(
-        self, action: Dict[str, Any]
-    ) -> EnvResponse:
+
+    async def step(self, action: dict[str, Any]) -> EnvResponse:
         query_list_from_params = action.get("query_list")
-        instance_id = action.get("instance_id")
+        # instance_id = action.get("instance_id")
         if not query_list_from_params or not isinstance(query_list_from_params, list):
             error_msg = "Error: 'query_list' is missing, empty, or not a list in parameters."
             print(f"[SearchTool] {error_msg} Received parameters: {action}")
             return EnvResponse(text=json.dumps({"result": error_msg}))
-        
+
         # add tool_call to queue
         tool_call = {
             "name": "search",
-            "arguments": {
-                "query_list": query_list_from_params,
-                "topk": self.topk
-            },
-            "start_time": time.time()
+            "arguments": {"query_list": query_list_from_params, "topk": self.topk},
+            "start_time": time.time(),
         }
-        
+
         master_url = f"http://{scheduler_config.PROXY_HOST_IP}:{scheduler_config.PROXY_HOST_PORT}/get_server"
         async with aiohttp.ClientSession() as session:
             try:
@@ -88,10 +78,17 @@ class AIOSearchEnv(ToolEnv):
 
                         try:
                             async with session.post(
-                                master_url, json={"url": server_info["server"], "tool_name": "search"}, timeout=30
+                                master_url,
+                                json={
+                                    "url": server_info["server"],
+                                    "tool_name": "search",
+                                },
+                                timeout=30,
                             ) as complete_resp:
                                 if complete_resp.status != 200:
-                                    error_msg = f"Error: Failed to inform master node of task completion. Status code: {complete_resp.status}"
+                                    error_msg = (
+                                        f"Error: Failed to inform master node of task completion. " f"Status code: {complete_resp.status}"
+                                    )
                                     print(f"[AIOSearchTool] {error_msg}")
                                     # Decide if you want to return an error here or just log it
                         except Exception as e:
@@ -109,13 +106,15 @@ class AIOSearchEnv(ToolEnv):
                 print(f"[AIOSearchTool] {error_msg}")
                 # since run_server may timeout, we still need to complete task to proxy
                 async with session.post(
-                    master_url, json={"url": server_info["server"], "tool_name": "search"}, timeout=30
+                    master_url,
+                    json={"url": server_info["server"], "tool_name": "search"},
+                    timeout=30,
                 ) as complete_resp:
                     if complete_resp.status != 200:
                         error_msg = f"Error: Failed to inform master node of task completion. Status code: {complete_resp.status}"
                         print(f"[AIOSearchTool] {error_msg}")
                 return EnvResponse(text=json.dumps({"result": error_msg}))
-        
+
         # Store results in instance dictionary
         # self._instance_dict[instance_id]["reward"].append(metadata.get("result_text", "").strip())
 
@@ -127,4 +126,4 @@ class AIOSearchEnv(ToolEnv):
             "api_request_error": metadata.get("api_request_error"),
         }
 
-        return EnvResponse(text=metadata.get("result_text", ""), metrics = metrics)
+        return EnvResponse(text=metadata.get("result_text", ""), metrics=metrics)

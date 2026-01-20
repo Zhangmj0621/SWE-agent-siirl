@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import json
+from typing import Any
+
 from loguru import logger
-from typing import Dict, Any, Optional, List, Tuple
 
 # --- Formatting Constants ---
 BASE_INDENT_UNIT_FOR_LOGGING = "  "
@@ -24,7 +25,13 @@ TARGET_HEADER_TOTAL_WIDTH_LOGGING = 80  # Adjusted for wider output
 TARGET_VALUE_ALIGNMENT_COLUMN_LOGGING = 80  # Target column for value alignment for simple values, lists, and sets.
 
 
-def _render_dict_recursively_util(current_dict_to_render: Dict[str, Any], current_indent_str: str, fixed_value_align_col: int, base_indent_unit: str, lines: list):
+def _render_dict_recursively_util(
+    current_dict_to_render: dict[str, Any],
+    current_indent_str: str,
+    fixed_value_align_col: int,
+    base_indent_unit: str,
+    lines: list,
+):
     """
     Internal recursive helper to render dictionary content.
     Dictionaries are expanded. Lines announcing a dictionary now end with a colon.
@@ -32,7 +39,7 @@ def _render_dict_recursively_util(current_dict_to_render: Dict[str, Any], curren
     Simple values are also aligned to fixed_value_align_col.
     """
     try:
-        sorted_items: List[Tuple[str, Any]] = sorted([(str(k), v) for k, v in current_dict_to_render.items()])
+        sorted_items: list[tuple[str, Any]] = sorted([(str(k), v) for k, v in current_dict_to_render.items()])
     except Exception as e:
         lines.append(f"{current_indent_str}[Could not sort keys: {e}]")
         sorted_items = [(str(k), v) for k, v in current_dict_to_render.items()]
@@ -46,7 +53,13 @@ def _render_dict_recursively_util(current_dict_to_render: Dict[str, Any], curren
 
         if isinstance(value_obj, dict):
             lines.append(f"{prefix_key_only}:")
-            _render_dict_recursively_util(value_obj, current_indent_str + base_indent_unit, fixed_value_align_col, base_indent_unit, lines)
+            _render_dict_recursively_util(
+                value_obj,
+                current_indent_str + base_indent_unit,
+                fixed_value_align_col,
+                base_indent_unit,
+                lines,
+            )
         else:
             if isinstance(value_obj, list):
                 try:
@@ -55,7 +68,11 @@ def _render_dict_recursively_util(current_dict_to_render: Dict[str, Any], curren
                     val_s = str(value_obj)
             elif isinstance(value_obj, set):
                 try:
-                    val_s = json.dumps(sorted(list(value_obj)), separators=(",", ":"), ensure_ascii=False)
+                    val_s = json.dumps(
+                        sorted(list(value_obj)),
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
                 except TypeError:
                     val_s = str(value_obj)
             else:
@@ -68,7 +85,13 @@ def _render_dict_recursively_util(current_dict_to_render: Dict[str, Any], curren
             lines.append(f"{prefix_for_dots_alignment}{dots}. {val_s}")
 
 
-def log_dict_formatted(data_dict: Dict[str, Any], title: Optional[str] = "Configuration Details", header_text_content: str = DEFAULT_HEADER_TEXT_LOGGING, target_value_alignment_column: int = TARGET_VALUE_ALIGNMENT_COLUMN_LOGGING, log_level: str = "info"):
+def log_dict_formatted(
+    data_dict: dict[str, Any],
+    title: str | None = "Configuration Details",
+    header_text_content: str = DEFAULT_HEADER_TEXT_LOGGING,
+    target_value_alignment_column: int = TARGET_VALUE_ALIGNMENT_COLUMN_LOGGING,
+    log_level: str = "info",
+):
     """
     Logs a dictionary with hierarchical indentation for nested dictionaries,
     styled similarly to Megatron-LM argument printing. Uses loguru.
@@ -103,7 +126,13 @@ def log_dict_formatted(data_dict: Dict[str, Any], title: Optional[str] = "Config
     if not data_dict:
         lines.append(f"{BASE_INDENT_UNIT_FOR_LOGGING}(No items in dictionary)")
     else:
-        _render_dict_recursively_util(data_dict, BASE_INDENT_UNIT_FOR_LOGGING, target_value_alignment_column, BASE_INDENT_UNIT_FOR_LOGGING, lines)
+        _render_dict_recursively_util(
+            data_dict,
+            BASE_INDENT_UNIT_FOR_LOGGING,
+            target_value_alignment_column,
+            BASE_INDENT_UNIT_FOR_LOGGING,
+            lines,
+        )
 
     lines.append("-" * len(header_line))
     lines.append("")

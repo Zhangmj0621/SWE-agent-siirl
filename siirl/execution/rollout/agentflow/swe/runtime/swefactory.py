@@ -2,11 +2,12 @@
 # Eval logic is simplified to eval script return code.
 
 from io import BytesIO
+
 from pydantic import BaseModel, Field
 
-from .base import SWESampleData, Runtime, RuntimeBuilder
-from ..environment import ContainerStartArgs, ContainerEnv
 from ..base import SWESample
+from ..environment import ContainerEnv, ContainerStartArgs
+from .base import Runtime, RuntimeBuilder, SWESampleData
 
 
 class SFSample(BaseModel):
@@ -19,6 +20,7 @@ class SFSample(BaseModel):
     test_patch: str = Field(default="")
     hints_test: str = Field(default="")
     eval_script: str = Field(default="")
+
 
 class SWEFactoryRuntime(Runtime):
     def __init__(self, sample: SWESample):
@@ -51,9 +53,9 @@ class SWEFactoryRuntime(Runtime):
             self.sample.reward = 1.0
         else:
             self.sample.reward = 0.0
-    
+
     @property
-    def sfsample(self)->SFSample:
+    def sfsample(self) -> SFSample:
         return self.m.data.runtime_meta
 
 

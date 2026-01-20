@@ -38,16 +38,15 @@ From: https://github.com/openai/prm800k/blob/main/prm800k/grading/math_normalize
 """
 
 import re
-from typing import Optional
 
 
-def normalize_answer(answer: Optional[str]) -> Optional[str]:
+def normalize_answer(answer: str | None) -> str | None:
     if answer is None:
         return None
     answer = answer.strip()
     try:
         # Remove enclosing `\text{}`.
-        m = re.search("^\\\\text\{(?P<text>.+?)\}$", answer)
+        m = re.search(r"^\\text\{(?P<text>.+?)\}$", answer)
         if m is not None:
             answer = m.group("text").strip()
         return _strip_string(answer)
@@ -95,7 +94,7 @@ def _fix_a_slash_b(string):
     try:
         a = int(a)
         b = int(b)
-        assert string == "{}/{}".format(a, b)
+        assert string == f"{a}/{b}"
         new_string = "\\frac{" + str(a) + "}{" + str(b) + "}"
         return new_string
     except:  # noqa: E722
@@ -157,7 +156,7 @@ def _strip_string(string):
 
     # remove percentage
     string = string.replace("\\%", "")
-    string = string.replace("\%", "")
+    string = string.replace(r"\%", "")
 
     # " 0." equivalent to " ." and "{0." equivalent to "{." Alternatively, add "0" if "." is the start of the string
     string = string.replace(" .", " 0.")
@@ -178,7 +177,8 @@ def _strip_string(string):
     # remove spaces
     string = string.replace(" ", "")
 
-    # \frac1b or \frac12 --> \frac{1}{b} and \frac{1}{2}, etc. Even works with \frac1{72} (but not \frac{72}1). Also does a/b --> \\frac{a}{b}
+    # \frac1b or \frac12 --> \frac{1}{b} and \frac{1}{2}, etc.
+    # Even works with \frac1{72} (but not \frac{72}1). Also does a/b --> \\frac{a}{b}
     string = _fix_fracs(string)
 
     # manually change 0.5 --> \frac{1}{2}

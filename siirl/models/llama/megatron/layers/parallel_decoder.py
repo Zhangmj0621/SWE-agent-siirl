@@ -18,18 +18,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
 
 import torch
 from megatron.core import ModelParallelConfig
 from torch import nn
 from transformers import LlamaConfig
 
-from siirl.utils.megatron.megatron_utils import TransformerConfig, convert_config
-
 from siirl.models.llama.megatron.layers.parallel_attention import ParallelLlamaAttention, ParallelLlamaAttentionRmPad
 from siirl.models.llama.megatron.layers.parallel_mlp import ParallelLlamaMLP
 from siirl.models.llama.megatron.layers.parallel_rmsnorm import ParallelLlamaRMSNorm
+from siirl.utils.megatron.megatron_utils import TransformerConfig, convert_config
 
 
 class ParallelLlamaDecoderLayer(nn.Module):
@@ -47,9 +45,9 @@ class ParallelLlamaDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -114,12 +112,12 @@ class ParallelLlamaDecoderLayerRmPad(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: torch.LongTensor | None = None,
         sequence_length: int = None,
         indices: torch.Tensor = None,
         cu_seqlens: int = None,
         max_seqlen_in_batch: int = None,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         residual = hidden_states  # (total_nnz // sp, 1, hidden_size)
 
         hidden_states = self.input_layernorm(hidden_states)

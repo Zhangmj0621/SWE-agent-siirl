@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
-from typing import Optional, Any, Protocol, Generic, TypeVar
-from types import MethodType
 from enum import Enum
+from types import MethodType
+from typing import Any, Generic, Protocol, TypeVar
+
 from loguru import logger
 
 # from transformers import PreTrainedTokenizer # This is slow!
@@ -48,7 +49,7 @@ class ModelResponse:
     # Log probs for each token
     log_probs: list[float]
     # moe specific; experts of each token
-    experts: Optional[list[list[int]]]
+    experts: list[list[int]] | None
     # raw http response / other metadata
     raw: dict
 
@@ -60,8 +61,8 @@ class Model(Protocol):
         self,
         input_tokens: list[int],
         messages: list[dict],
-        max_tokens: Optional[int] = None,
-        timeout: Optional[int] = None,
+        max_tokens: int | None = None,
+        timeout: int | None = None,
     ) -> ModelResponse:
         """使用 language model 生成回复，最好支持 token-in, token-out；异步进行 (aiohttp)
 
@@ -96,9 +97,9 @@ class DummyTokenizer:
 class DummyModel:
     """dumb model used for unit test; its tokenizer always returns [1]"""
 
-    def __init__(self, responses: list[str] = []):
+    def __init__(self, responses: list[str] | None = None):
         self.tokenizer = DummyTokenizer()
-        self.responses = responses
+        self.responses = responses if responses is not None else []
         self.cursor = 0
 
     async def query(self, *args, **kwargs) -> ModelResponse:
@@ -107,9 +108,7 @@ class DummyModel:
         else:
             msg = self.responses[self.cursor]
             self.cursor += 1
-        return ModelResponse(
-            output=msg, output_tokens=[1], log_probs=[0.0], experts=None, raw={}
-        )
+        return ModelResponse(output=msg, output_tokens=[1], log_probs=[0.0], experts=None, raw={})
 
 
 AgentMeta = TypeVar("AgentMeta")
@@ -153,7 +152,7 @@ class Sample(Generic[AgentMeta]):
     conversations: list[dict] = field(default_factory=list)
 
     # 这些由 reward 生成
-    reward: Optional[float] = None
+    reward: float | None = None
 
     def append_input_tokens(self, input_tokens: list[int]):
         n_tokens = len(input_tokens)

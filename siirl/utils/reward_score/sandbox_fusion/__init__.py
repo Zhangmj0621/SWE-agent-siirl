@@ -25,7 +25,14 @@ FaaS service provided by public cloud, eg: volcengine.com.
 logger = logging.getLogger(__name__)
 
 
-def compute_score(sandbox_fusion_url, concurrent_semaphore, completion, test_cases, continuous=False, timeout=10):
+def compute_score(
+    sandbox_fusion_url,
+    concurrent_semaphore,
+    completion,
+    test_cases,
+    continuous=False,
+    timeout=10,
+):
     """
     Computes the code score using the remote sandbox API.
 
@@ -74,7 +81,13 @@ def compute_score(sandbox_fusion_url, concurrent_semaphore, completion, test_cas
         # Note: The return value of check_correctness might need adaptation here
         # Assume check_correctness returns (results_list, metadata_list)
         # results_list contains True, False, or error codes (-1, -2, -3, etc.)
-        res_list, metadata_list = check_correctness(sandbox_fusion_url=sandbox_fusion_url, in_outs=test_cases, generation=solution, timeout=timeout, concurrent_semaphore=concurrent_semaphore)
+        res_list, metadata_list = check_correctness(
+            sandbox_fusion_url=sandbox_fusion_url,
+            in_outs=test_cases,
+            generation=solution,
+            timeout=timeout,
+            concurrent_semaphore=concurrent_semaphore,
+        )
 
         # Calculate score
         if not res_list:  # If there are no results (e.g., invalid input)
@@ -105,4 +118,4 @@ def compute_score(sandbox_fusion_url, concurrent_semaphore, completion, test_cas
         final_metadata = metadata_list if "metadata_list" in locals() else [{"error": f"Unhandled exception: {e}"}]
 
     # Ensure float and list are returned
-    return float(score), final_metadata if isinstance(final_metadata, list) else [final_metadata]
+    return float(score), (final_metadata if isinstance(final_metadata, list) else [final_metadata])

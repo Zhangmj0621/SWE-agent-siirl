@@ -11,18 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import time
-import numpy as np
-
-from loguru import logger
 from collections import defaultdict
-from typing import List, Dict
+
+import numpy as np
+from loguru import logger
 
 from siirl.data_coordinator import Sample
 from siirl.utils.metrics import aggregate_validation_metrics
 
-def aggregate_and_log_validation_metrics(all_payloads: List[Sample]) -> Dict[str, float]:
+
+def aggregate_and_log_validation_metrics(
+    all_payloads: list[Sample],
+) -> dict[str, float]:
     """
     Aggregates all validation results and logs performance (rank 0 only).
 
@@ -44,7 +44,7 @@ def aggregate_and_log_validation_metrics(all_payloads: List[Sample]) -> Dict[str
     return final_metrics
 
 
-def aggregate_validation_results(all_payloads: List[Sample]) -> Dict[str, float]:
+def aggregate_validation_results(all_payloads: list[Sample]) -> dict[str, float]:
     """
     Computes the final metric dictionary from all gathered validation payloads.
 
@@ -79,7 +79,7 @@ def aggregate_validation_results(all_payloads: List[Sample]) -> Dict[str, float]
 
             # Robustly parse '@N' to prevent crashes from malformed metric names.
             n_max_values = []
-            for name in metric2val.keys():
+            for name in metric2val:
                 if "@" in name and "/mean" in name:
                     try:
                         n_val = int(name.split("@")[-1].split("/")[0])
@@ -90,7 +90,11 @@ def aggregate_validation_results(all_payloads: List[Sample]) -> Dict[str, float]
             n_max = max(n_max_values) if n_max_values else 1
 
             for metric_name, metric_val in metric2val.items():
-                is_core_metric = (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name)
+                is_core_metric = (
+                    (var_name == core_var)
+                    and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+                    and (f"@{n_max}" in metric_name)
+                )
 
                 metric_sec = "val-core" if is_core_metric else "val-aux"
                 pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"

@@ -12,52 +12,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import copy
 import multiprocessing
 import time
-from urllib3.exceptions import NewConnectionError
 
 import requests
 from loguru import logger
-from typing import List, Dict
-
-from sglang.utils import async_stream_and_merge, stream_and_merge
 from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
-
+from urllib3.exceptions import NewConnectionError
 
 from siirl.models.loader import load_tokenizer
 from siirl.params.training_args import SiiRLArguments
-from siirl.utils.net_utils.net import get_net_interface_ip
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient, wait_until_ok
+from siirl.utils.net_utils.net import get_net_interface_ip
 
 global_engine_process = None
+
 
 class SglangEngine:
     """
     SGLang inference engine wrapper for distributed rollout.
-    
+
     Manages the SGLang server process lifecycle and provides HTTP interface
     for text generation, cache management, and parameter synchronization.
     """
-    
+
     def __init__(
-        self, 
-        rank: int, 
-        config: SiiRLArguments, 
-        dist_init_addr: str, 
-        ip: str, 
-        port: int, 
+        self,
+        rank: int,
+        config: SiiRLArguments,
+        dist_init_addr: str,
+        ip: str,
+        port: int,
         nccl_port: int,
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
-        extra_server_args:dict = {},
+        extra_server_args: dict | None = None,
     ):
         """
         Initialize SGLang engine with explicit GPU placement parameters.
-        
+
         Args:
             rank: Global rank of this engine instance (TP0 rank within rollout workers).
             config: SiiRLArguments configuration object.
@@ -70,6 +66,8 @@ class SglangEngine:
             node_rank: Rank of this node within the TP group (0 for single-node TP).
             nnodes: Number of nodes participating in this TP group (1 for single-node TP).
         """
+        if extra_server_args is None:
+            extra_server_args = {}
         self.rank = rank
         self.config = config
         self.dist_init_addr = dist_init_addr
@@ -81,36 +79,37 @@ class SglangEngine:
         self.base_gpu_id = base_gpu_id
         self.node_rank = node_rank
         self.nnodes = nnodes
-        
+
         # init some local_parms
-        self.tokenizer = load_tokenizer(
-            path=config.actor_ref.model.path, 
-            model_args=config.actor_ref.model
+        self.tokenizer = load_tokenizer(path=config.actor_ref.model.path, model_args=config.actor_ref.model)
+        self.max_model_len = (
+            config.rollout.max_model_len
+            if config.rollout.max_model_len
+            else config.data.max_prompt_length + config.data.max_response_length
         )
-        self.max_model_len = config.rollout.max_model_len if config.rollout.max_model_len else config.data.max_prompt_length + config.data.max_response_length
         self.max_response_length = config.data.max_response_length
         # Sampling parameters for text generation (LLM inference config)
-        self.sampling_params =  dict(
-            temperature=config.rollout.temperature,  
-            top_p=config.rollout.top_p,  
-            top_k=config.rollout.top_k, 
-            repetition_penalty=1.0,  
-        )      
+        self.sampling_params = dict(
+            temperature=config.rollout.temperature,
+            top_p=config.rollout.top_p,
+            top_k=config.rollout.top_k,
+            repetition_penalty=1.0,
+        )
         self.launch_server(extra_server_args)
 
-        
-        
     def _build_server_args(self) -> dict:
         """
         Build SGLang server arguments using pre-computed GPU placement info.
-        
+
         Returns:
             Dictionary of arguments for SGLang ServerArgs.
         """
         config = self.config.rollout
-        logger.info(f"Building SGLang server args: model_path={self.config.actor_ref.model.path}, "
-                    f"base_gpu_id={self.base_gpu_id}, node_rank={self.node_rank}, nnodes={self.nnodes}")
-        
+        logger.info(
+            f"Building SGLang server args: model_path={self.config.actor_ref.model.path}, "
+            f"base_gpu_id={self.base_gpu_id}, node_rank={self.node_rank}, nnodes={self.nnodes}"
+        )
+
         return {
             "model_path": self.config.actor_ref.model.path,
             "dtype": config.dtype,
@@ -141,14 +140,16 @@ class SglangEngine:
             "skip_server_warmup": True,
         }
 
-    def launch_server(self, extra_server_args = {}):
+    def launch_server(self, extra_server_args: dict | None = None):
         """
         Launch the SGLang HTTP server in a separate process.
-        
+
         Uses pre-computed GPU placement parameters (base_gpu_id, node_rank, nnodes)
         instead of calculating them internally, ensuring correct GPU assignment
         in complex multi-node and cross-node TP scenarios.
         """
+        if extra_server_args is None:
+            extra_server_args = {}
         args = self._build_server_args()
         args.update(extra_server_args)
         self.sgl_args = ServerArgs(**args)
@@ -158,7 +159,7 @@ class SglangEngine:
         self.process.start()
         base_url = self.sgl_args.url()
         wait_until_ok(
-            f"{base_url}/health_generate" if self.sgl_args.is_embedding else f"{base_url}/health",
+            (f"{base_url}/health_generate" if self.sgl_args.is_embedding else f"{base_url}/health"),
             process=self.process,
             extra_headers={"Authorization": f"Bearer {self.sgl_args.api_key}"},
         )
@@ -171,16 +172,15 @@ class SglangEngine:
 
     def set_router(self, router_address):
         self.router_address = router_address
-    
-    async def generate(self, input_ids:List[int], is_validate:bool):
+
+    async def generate(self, input_ids: list[int], is_validate: bool):
         sampling_params = copy.deepcopy(self.sampling_params)
-        sampling_params['max_new_tokens'] = min(self.max_model_len - len(input_ids), self.max_response_length)
+        sampling_params["max_new_tokens"] = min(self.max_model_len - len(input_ids), self.max_response_length)
         if is_validate:
             kwargs = {
                 "top_k": self.config.rollout.val_kwargs.top_k,
                 "top_p": self.config.rollout.val_kwargs.top_p,
                 "temperature": self.config.rollout.val_kwargs.temperature,
-                
             }
             sampling_params.update(kwargs)
         url = f"http://{self.ip}:{self.port}/generate"
@@ -194,10 +194,10 @@ class SglangEngine:
         output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
         responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-        text = output['text'] 
+        text = output["text"]
         return text, responses, rollout_log_prob
-    
-    async def generate_from_text(self, input_text:"str", sampling_params:Dict, use_sglang_router = False):
+
+    async def generate_from_text(self, input_text: "str", sampling_params: dict, use_sglang_router=False):
         url = f"http://{self.ip}:{self.port}/generate"
         if use_sglang_router:
             url = f"http://{self.router_address}/generate"
@@ -210,9 +210,8 @@ class SglangEngine:
         output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
         responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-        text = output['text'] 
+        text = output["text"]
         return text, responses, rollout_log_prob
-
 
     def flush_cache(self):
         """Flush the cache of the server."""
@@ -268,11 +267,10 @@ class SglangEngine:
         response = requests.post(url, json=payload or {})
         try:
             response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
+        except requests.exceptions.HTTPError:
             logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
             raise
         return response.json()
-
 
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         return self._make_request(
@@ -288,7 +286,13 @@ class SglangEngine:
         )
 
     def param_sync_from_distributed(
-        self, names, dtypes, shapes, group_name, flush_cache=True, weight_version: str | None = None
+        self,
+        names,
+        dtypes,
+        shapes,
+        group_name,
+        flush_cache=True,
+        weight_version: str | None = None,
     ):
         payload = {
             "names": names,
@@ -320,6 +324,3 @@ class SglangEngine:
         except requests.exceptions.RequestException:
             # catch the case there the engine is just created and does not have the group.
             pass
-
-
-    

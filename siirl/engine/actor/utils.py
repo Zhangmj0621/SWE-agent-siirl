@@ -14,21 +14,21 @@
 
 import os
 import socket
-from typing import Dict, Tuple
 
-import torch
 import numpy as np
+import torch
+
 from siirl.utils.backend.device import get_torch_device
 
 
-def get_master_info() -> Tuple[str, str]:
+def get_master_info() -> tuple[str, str]:
     """
     Get master address and port for distributed training.
 
     Priority:
     1. Use environment variables if already set (MASTER_ADDR, MASTER_PORT)
     2. Otherwise, get host IP and find a free port
-    
+
     Note: If MASTER_ADDR is a hostname, it will be resolved to an IP address.
 
     Returns:
@@ -50,10 +50,11 @@ def get_master_info() -> Tuple[str, str]:
     else:
         # Resolve hostname to IP if necessary
         from loguru import logger
+
         try:
             socket.inet_aton(master_addr)
             # It's already a valid IP address
-        except socket.error:
+        except OSError:
             # It's a hostname, resolve it to IP
             try:
                 resolved_ip = socket.gethostbyname(master_addr)
@@ -71,7 +72,7 @@ def get_master_info() -> Tuple[str, str]:
     return master_addr, master_port
 
 
-def append_to_dict(data: Dict, new_data: Dict):
+def append_to_dict(data: dict, new_data: dict):
     """Append values from new_data to lists in data.
 
     For each key in new_data, this function appends the corresponding value to a list
@@ -96,9 +97,11 @@ def append_to_dict(data: Dict, new_data: Dict):
 
 def set_random_seed(seed):
     import random
+
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
     if get_torch_device().device_count() > 0:
         from megatron.core import tensor_parallel
+
         tensor_parallel.model_parallel_cuda_manual_seed(seed)

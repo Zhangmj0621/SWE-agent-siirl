@@ -1,8 +1,8 @@
-from ..base import Model, AgentFlow
+from ..base import AgentFlow, Model
 from ..utils import import_any
-from .base import SWESample, SWEAgentMeta
-from .environment import ContainerEnvBuilder
 from .agent import AgentBuilder
+from .base import SWEAgentMeta, SWESample
+from .environment import ContainerEnvBuilder
 from .runtime import RuntimeBuilder
 
 BUILTIN_PROVIDERS = {
@@ -53,7 +53,7 @@ def agentflow(config: dict, model: Model) -> AgentFlow:
             instance = cls(subconf)
             instances.append(instance)
         except Exception as e:
-            raise ImportError(f"Fail to initialize SWE agentflow {name} builder", e)
+            raise ImportError(f"Fail to initialize SWE agentflow {name} builder: {e}") from e
 
     return SWEAgentFlow(*instances, model=model)
 

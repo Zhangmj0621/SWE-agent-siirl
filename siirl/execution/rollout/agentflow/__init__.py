@@ -1,6 +1,6 @@
 from types import MethodType
 
-from .base import Model, AgentFlow, Sample, ModelResponse
+from .base import AgentFlow, Model, ModelResponse, Sample
 from .utils import import_any
 
 __all__ = ["Model", "AgentFlow", "Sample", "ModelResponse", "load_agentflow"]

@@ -12,23 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import re
 
 from mathruler.grader import extract_boxed_content, grade_answer
-import os
 
 LOG_PATH = os.environ.get("REWARD_LOG_PATH", "reward.log")
-
-
-def format_reward(predict_str: str) -> float:
-    pattern = re.compile(r"<think>.*</think>.*\\boxed\{.*\}.*", re.DOTALL)
-    match_result = re.fullmatch(pattern, predict_str)
-    return 1.0 if match_result else 0.0
-
-
-def acc_reward(predict_str: str, ground_truth: str) -> float:
-    answer = extract_boxed_content(predict_str)
-    return 1.0 if grade_answer(answer, ground_truth) else 0.0
 
 
 def format_reward(predict_str: str) -> float:

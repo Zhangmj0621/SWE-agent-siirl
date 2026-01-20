@@ -14,6 +14,7 @@
 
 import torch
 
+
 def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_penalty: str) -> torch.FloatTensor:
     """Compute KL divergence penalty"""
     forward_score = kl_penalty_forward(logprob, ref_logprob, kl_penalty)

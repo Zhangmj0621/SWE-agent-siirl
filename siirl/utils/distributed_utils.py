@@ -13,7 +13,6 @@ from torch.distributed.distributed_c10d import (
     rendezvous,
 )
 
-
 GLOO_GROUP = None
 
 
@@ -53,10 +52,7 @@ def init_process_group(
     elif init_method is None:
         init_method = "env://"
 
-    if backend:
-        backend = Backend(backend)
-    else:
-        backend = Backend("undefined")
+    backend = Backend(backend) if backend else Backend("undefined")
 
     if timeout is None:
         timeout = default_pg_timeout

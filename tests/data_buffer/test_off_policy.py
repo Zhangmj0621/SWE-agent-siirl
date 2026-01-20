@@ -16,8 +16,9 @@
 Unit tests for off-policy data filtering functionality in DataCoordinator.
 """
 
-import unittest
 import asyncio
+import unittest
+
 import ray
 import torch
 from tensordict import TensorDict
@@ -29,7 +30,7 @@ from siirl.data_coordinator.sample import SampleInfo
 class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
     """
     Unit tests for the off-policy data filtering feature in DataCoordinator.
-    
+
     Tests cover:
     - min_version filtering: discarding stale samples
     - FIFO ordering: samples above min_version are returned in order
@@ -48,11 +49,7 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         """Create a new, clean DataCoordinator for each test."""
-        self.coordinator = init_data_coordinator(
-            num_buffers=1, 
-            ppo_mini_batch_size=1, 
-            world_size=1
-        )
+        self.coordinator = init_data_coordinator(num_buffers=1, ppo_mini_batch_size=1, world_size=1)
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
 
     async def asyncTearDown(self):
@@ -94,16 +91,16 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
             balance_partitions=1,
             min_version=3,
         )
-        
+
         # Should get 3 samples (versions 3, 4, 5)
         self.assertEqual(len(batch_refs), 3)
-        
+
         # Clear cache for next request
         await self.coordinator.clear_cache.remote()
-        
+
         # Queue should be empty now (3 returned, 2 discarded)
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
-        
+
         # Verify returned data
         retrieved_data = ray.get(batch_refs)
         retrieved_ids = sorted([d.get("data").item() for d in retrieved_data])
@@ -115,11 +112,7 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
         order_data = [(3, 300), (5, 500), (4, 400), (3, 301), (6, 600)]
         for version, content_id in order_data:
             sample_ref = ray.put(self._create_mock_sample(content_id))
-            sample_info = self._create_sample_info(
-                tokens=128, 
-                weight_version=version,
-                uid=str(content_id)
-            )
+            sample_info = self._create_sample_info(tokens=128, weight_version=version, uid=str(content_id))
             await self.coordinator.put.remote(sample_info, sample_ref)
 
         # Request batch with min_version=4
@@ -129,12 +122,12 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
             balance_partitions=1,
             min_version=4,
         )
-        
+
         # Should get samples with version >= 4: (5,500), (4,400), (6,600) in FIFO order
         self.assertEqual(len(batch_refs), 3)
-        
+
         await self.coordinator.clear_cache.remote()
-        
+
         retrieved_data = ray.get(batch_refs)
         retrieved_ids = [d.get("data").item() for d in retrieved_data]
         # FIFO order should be: 500, 400, 600
@@ -157,10 +150,10 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
             balance_partitions=1,
             min_version=5,
         )
-        
+
         # Should return empty (not enough valid samples after filtering)
         self.assertEqual(len(batch_refs), 0)
-        
+
         # All stale samples should be discarded
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
 
@@ -179,10 +172,10 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
             balance_partitions=1,
             min_version=0,
         )
-        
+
         self.assertEqual(len(batch_refs), 3)
         await self.coordinator.clear_cache.remote()
-        
+
         retrieved_data = ray.get(batch_refs)
         retrieved_ids = sorted([d.get("data").item() for d in retrieved_data])
         self.assertEqual(retrieved_ids, [0, 100, 200])
@@ -203,7 +196,7 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
             balance_partitions=1,
             min_version=None,  # No filtering
         )
-        
+
         self.assertEqual(len(batch_refs), 3)
         await self.coordinator.clear_cache.remote()
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
@@ -223,10 +216,10 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
             balance_partitions=1,
             min_version=4,
         )
-        
+
         # Should return empty because we don't have enough valid samples
         self.assertEqual(len(batch_refs), 0)
-        
+
         # Stale samples (v1, v2, v3) should be discarded, valid ones (v4, v5) kept
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 2)
 
@@ -235,11 +228,7 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
         # Put samples at boundary version
         for v in [5, 5, 5]:
             sample_ref = ray.put(self._create_mock_sample(500 + v))
-            sample_info = self._create_sample_info(
-                tokens=128, 
-                weight_version=v,
-                uid=f"v{v}_{500+v}"
-            )
+            sample_info = self._create_sample_info(tokens=128, weight_version=v, uid=f"v{v}_{500+v}")
             await self.coordinator.put.remote(sample_info, sample_ref)
 
         # min_version=5 should include all version=5 samples
@@ -249,10 +238,10 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
             balance_partitions=1,
             min_version=5,
         )
-        
+
         self.assertEqual(len(batch_refs), 3)
         await self.coordinator.clear_cache.remote()
-        
+
         retrieved_data = ray.get(batch_refs)
         for d in retrieved_data:
             self.assertEqual(d.get("data").item(), 505)
@@ -274,11 +263,7 @@ class TestOffPolicyWithMultiplePartitions(unittest.IsolatedAsyncioTestCase):
             ray.shutdown()
 
     async def asyncSetUp(self):
-        self.coordinator = init_data_coordinator(
-            num_buffers=1,
-            ppo_mini_batch_size=2,
-            world_size=2
-        )
+        self.coordinator = init_data_coordinator(num_buffers=1, ppo_mini_batch_size=2, world_size=2)
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
 
     async def asyncTearDown(self):
@@ -302,11 +287,7 @@ class TestOffPolicyWithMultiplePartitions(unittest.IsolatedAsyncioTestCase):
         # Put 8 samples: versions [1,1,2,2,3,3,4,4]
         for v in [1, 1, 2, 2, 3, 3, 4, 4]:
             sample_ref = ray.put(self._create_mock_sample(v * 100))
-            sample_info = self._create_sample_info(
-                tokens=128, 
-                weight_version=v,
-                uid=f"v{v}_{v*100}"
-            )
+            sample_info = self._create_sample_info(tokens=128, weight_version=v, uid=f"v{v}_{v*100}")
             await self.coordinator.put.remote(sample_info, sample_ref)
 
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 8)
@@ -315,7 +296,7 @@ class TestOffPolicyWithMultiplePartitions(unittest.IsolatedAsyncioTestCase):
         # Total global batch = 2 * 2 = 4
         # min_version=3 should discard versions 1, 2 (4 samples)
         # Remaining valid: versions 3, 4 (4 samples) - exactly enough
-        
+
         # dp_rank=0 gets first half
         batch_refs_0 = await self.coordinator.get_batch.remote(
             batch_size=2,
@@ -323,9 +304,9 @@ class TestOffPolicyWithMultiplePartitions(unittest.IsolatedAsyncioTestCase):
             balance_partitions=2,
             min_version=3,
         )
-        
+
         self.assertEqual(len(batch_refs_0), 2)
-        
+
         # dp_rank=1 gets second half (from cache)
         batch_refs_1 = await self.coordinator.get_batch.remote(
             batch_size=2,
@@ -333,15 +314,14 @@ class TestOffPolicyWithMultiplePartitions(unittest.IsolatedAsyncioTestCase):
             balance_partitions=2,
             min_version=3,
         )
-        
+
         self.assertEqual(len(batch_refs_1), 2)
-        
+
         await self.coordinator.clear_cache.remote()
-        
+
         # All 4 valid samples consumed, 4 stale discarded
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
 
 
 if __name__ == "__main__":
     unittest.main()
-

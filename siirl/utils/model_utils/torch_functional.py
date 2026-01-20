@@ -15,7 +15,6 @@
 Contain small torch utilities
 """
 
-from typing import Dict, Optional, Union
 
 import torch
 import torch.distributed
@@ -56,19 +55,17 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
         output = logprobs_from_logits_flash_attn(logits, labels, inplace_backward=inplace_backward)
         output = output.view(*batch_dim)
     else:
-        output = logprobs_from_logits(logits, labels)
+        output = _logprobs_from_logits_fallback(logits, labels)
     return output
 
 
 def logprobs_from_logits_flash_attn(logits, labels, inplace_backward=True):
     output = cross_entropy_loss(logits, labels, inplace_backward=inplace_backward)
-    assert isinstance(output, tuple), (
-        "please make sure flash-attn>=2.4.3 where cross_entropy_loss returns Tuple[losses, z_losses]."
-    )
+    assert isinstance(output, tuple), "please make sure flash-attn>=2.4.3 where cross_entropy_loss returns Tuple[losses, z_losses]."
     return -output[0]
 
 
-def logprobs_from_logits(logits: torch.FloatTensor, labels):
+def _logprobs_from_logits_fallback(logits: torch.FloatTensor, labels):
     """
     A memory efficient implementation of logprobs_from_logits
     """
@@ -80,7 +77,7 @@ def logprobs_from_logits(logits: torch.FloatTensor, labels):
     else:
         # logsumexp approach is unstable with bfloat16, fall back to slightly less efficient approach
         logprobs_labels = []
-        for row_logits, row_labels in zip(logits, labels):  # loop to reduce peak mem consumption
+        for row_logits, row_labels in zip(logits, labels, strict=False):  # loop to reduce peak mem consumption
             row_logprobs = F.log_softmax(row_logits, dim=-1)
             row_logprobs_labels = row_logprobs.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
             logprobs_labels.append(row_logprobs_labels)
@@ -159,7 +156,7 @@ def compute_grad_norm(model: nn.Module):
     return total_grad_square
 
 
-def broadcast_dict_tensor(tensors: Union[Dict[str, torch.Tensor], TensorDict], src, group):
+def broadcast_dict_tensor(tensors: dict[str, torch.Tensor] | TensorDict, src, group):
     """
     TODO: optimize this. Technically, we only need one broadcast
     """
@@ -169,7 +166,7 @@ def broadcast_dict_tensor(tensors: Union[Dict[str, torch.Tensor], TensorDict], s
             torch.distributed.broadcast(tensors[key], src=src, group=group, async_op=False)
 
 
-def allgather_dict_tensors(tensors: Union[Dict[str, torch.Tensor], TensorDict], size, group, dim=0):
+def allgather_dict_tensors(tensors: dict[str, torch.Tensor] | TensorDict, size, group, dim=0):
     """
     TODO: optimize this.
     - We can use async ops
@@ -243,11 +240,12 @@ def postprocess_data(
     sequence_length = input_ids.shape[-1]
     if sequence_length < max_length:
         input_ids = pad_sequence_to_length(
-            input_ids, max_seq_len=max_length, pad_token_id=pad_token_id, left_pad=left_pad
+            input_ids,
+            max_seq_len=max_length,
+            pad_token_id=pad_token_id,
+            left_pad=left_pad,
         )
-        attention_mask = pad_sequence_to_length(
-            attention_mask, max_seq_len=max_length, pad_token_id=0, left_pad=left_pad
-        )
+        attention_mask = pad_sequence_to_length(attention_mask, max_seq_len=max_length, pad_token_id=0, left_pad=left_pad)
     elif sequence_length > max_length:
         if truncation == "left":
             # actually, left truncation may not be reasonable
@@ -282,12 +280,8 @@ def prepare_decoder_attention_mask(attention_mask, input_shape, inputs_embeds):
 
     if attention_mask is not None:
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-        expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
-            inputs_embeds.device
-        )
-        combined_attention_mask = (
-            expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
-        )
+        expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(inputs_embeds.device)
+        combined_attention_mask = expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
 
     return combined_attention_mask
 
@@ -306,7 +300,7 @@ def _make_causal_mask(input_ids_shape: torch.Size, dtype: torch.dtype, device: t
 
 
 # Copied from transformers.models.bart.modeling_bart._expand_mask
-def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
+def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: int | None = None):
     """
     Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
     """
@@ -318,6 +312,3 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     inverted_mask = 1.0 - expanded_mask
 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
-
-
-

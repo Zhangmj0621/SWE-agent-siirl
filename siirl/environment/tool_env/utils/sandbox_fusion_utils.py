@@ -10,19 +10,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-import aiohttp
-import asyncio
-import traceback
-import os
-import datetime
 
-from typing import Dict, List, Literal, Callable, Optional
-
-def generate_tool_call_code(tool_call: Dict) -> str:
-    '''
+def generate_tool_call_code(tool_call: dict) -> str:
+    """
     Generate code snippet for a tool call.
-    '''
+    """
 
     assert tool_call["name"] == "sandbox_fusion", "Only support sandbox_fusion tool call."
 
@@ -128,10 +120,11 @@ if __name__ == '__main__':
     #    sys.exit(1)
 """
         current_generation_code = wrapper_code
-        
+
     return current_generation_code
 
-def generate_tool_call_input(tool_call: Dict) -> str:
+
+def generate_tool_call_input(tool_call: dict) -> str:
     """
     Generate stdin string for a tool call
     """

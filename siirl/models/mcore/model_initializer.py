@@ -33,16 +33,16 @@ class BaseModelInitializer(ABC):
     @abstractmethod
     def get_transformer_layer_spec(self):
         """Get the transformer layer specification.
-        https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_layer_specs.py"""
+        https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/models/gpt/gpt_layer_specs.py
+        """
         pass
 
     def get_rope_scaling_args(self) -> dict:
         """Get rope scaling args."""
         rope_scaling_args = {}
-        if "rope_scaling" in self.hf_config:
-            if self.hf_config.rope_scaling is not None:
-                # assert self.hf_config.rope_scaling["type"] == "linear", "only linear scaling is supported for now"
-                rope_scaling_args["seq_len_interpolation_factor"] = self.hf_config.rope_scaling["factor"]
+        if "rope_scaling" in self.hf_config and self.hf_config.rope_scaling is not None:
+            # assert self.hf_config.rope_scaling["type"] == "linear", "only linear scaling is supported for now"
+            rope_scaling_args["seq_len_interpolation_factor"] = self.hf_config.rope_scaling["factor"]
         return rope_scaling_args
 
     def initialize(
@@ -67,7 +67,7 @@ class BaseModelInitializer(ABC):
         """
         transformer_layer_spec = self.get_transformer_layer_spec()
         rope_scaling_args = self.get_rope_scaling_args()
-        mtp_block_spec = extra_kwargs.get("mtp_block_spec", None)
+        mtp_block_spec = extra_kwargs.get("mtp_block_spec")
         model = GPTModel(
             config=self.tfconfig,
             transformer_layer_spec=transformer_layer_spec,
@@ -85,7 +85,11 @@ class BaseModelInitializer(ABC):
         if post_process and value:
             from siirl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
 
-            model.output_layer = LinearForLastLayer(input_size=self.tfconfig.hidden_size, output_size=1, config=self.tfconfig)
+            model.output_layer = LinearForLastLayer(
+                input_size=self.tfconfig.hidden_size,
+                output_size=1,
+                config=self.tfconfig,
+            )
 
         return model
 

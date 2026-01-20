@@ -14,14 +14,15 @@
 
 from collections import defaultdict
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
 from loguru import logger
+from tensordict import TensorDict
+
 import siirl.utils.model_utils.torch_functional as siirl_F
 from siirl.params.model_args import AlgorithmArguments
-from tensordict import TensorDict 
 
 
 class AdvantageEstimator(str, Enum):
@@ -31,7 +32,7 @@ class AdvantageEstimator(str, Enum):
 
     PPO = "ppo"
     GRPO = "grpo"
-    
+
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
 
@@ -48,9 +49,7 @@ def register_adv_est(name_or_enum: str | AdvantageEstimator) -> Any:
     def decorator(fn):
         name = name_or_enum.value if isinstance(name_or_enum, Enum) else name_or_enum
         if name in ADV_ESTIMATOR_REGISTRY and ADV_ESTIMATOR_REGISTRY[name] != fn:
-            raise ValueError(
-                f"Adv estimator {name} has already been registered: {ADV_ESTIMATOR_REGISTRY[name]} vs {fn}"
-            )
+            raise ValueError(f"Adv estimator {name} has already been registered: {ADV_ESTIMATOR_REGISTRY[name]} vs {fn}")
         ADV_ESTIMATOR_REGISTRY[name] = fn
         return fn
 
@@ -59,21 +58,21 @@ def register_adv_est(name_or_enum: str | AdvantageEstimator) -> Any:
 
 def compute_response_mask(data: TensorDict):
     """Compute the attention mask for the response part of the sequence.
-    
+
     Handles both 2D responses (NLP) and 3D responses (Embodied AI).
-    
+
     Returns:
         torch.Tensor: The attention mask for the response tokens (always 2D).
     """
     responses = data["responses"]
     attention_mask = data["attention_mask"]
     batch_size = responses.size(0)
-    
+
     # Handle 3D responses (Embodied AI): (batch_size, traj_len, action_token_len)
     if responses.ndim == 3:
         traj_len = responses.size(1)
         action_token_len = responses.size(2)
-        
+
         # Check if attention_mask is also 3D
         if attention_mask.ndim == 3:
             # attention_mask: (batch_size, traj_len, tot_pad_len)
@@ -92,7 +91,7 @@ def compute_response_mask(data: TensorDict):
         response_mask = attention_mask[:, -response_length:]
     else:
         raise ValueError(f"Unexpected responses shape: {responses.shape}, ndim={responses.ndim}")
-    
+
     return response_mask
 
 
@@ -153,7 +152,7 @@ def compute_grpo_outcome_advantage(
     index: np.ndarray,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
-    config: Optional[AlgorithmArguments] = None,
+    config: AlgorithmArguments | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -214,11 +213,18 @@ def compute_grpo_outcome_advantage(
                 scores[i] = scores[i] - id2mean[idx_key]
         scores = scores.unsqueeze(-1) * response_mask
 
-
     return scores, scores
 
 
-def compute_advantage(data: TensorDict, adv_estimator, gamma=1.0, lam=1.0, norm_adv_by_std_in_grpo=True, weight_factor_in_cpgd="STD_weight", **kwargs):
+def compute_advantage(
+    data: TensorDict,
+    adv_estimator,
+    gamma=1.0,
+    lam=1.0,
+    norm_adv_by_std_in_grpo=True,
+    weight_factor_in_cpgd="STD_weight",
+    **kwargs,
+):
     """Compute advantage estimates for policy optimization.
 
     This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, CPGD, etc.
@@ -232,13 +238,14 @@ def compute_advantage(data: TensorDict, adv_estimator, gamma=1.0, lam=1.0, norm_
         num_repeat (int, optional): Number of times to repeat the computation. Defaults to 1.
         multi_turn (bool, optional): Whether the data is from a multi-turn conversation. Defaults to False.
         norm_adv_by_std_in_grpo (bool, optional): Whether to normalize advantages by standard deviation in GRPO. Defaults to True.
-        weight_factor_in_cpgd (str, optional): whether to use the STD weight as GRPO or clip_filter_like_weight. choices: {STD_weight, clip_filter_like_weight, naive}
+        weight_factor_in_cpgd (str, optional): whether to use the STD weight as GRPO or
+            clip_filter_like_weight. choices: {STD_weight, clip_filter_like_weight, naive}
 
     Returns:
         TensorDict: The updated data with computed advantages and returns.
     """
     # Back-compatible with trainers that do not compute response mask in fit
-    if "response_mask" not in data.keys():
+    if "response_mask" not in data:
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group
     # TODO: add other ways to estimate advantages
@@ -265,8 +272,7 @@ def compute_advantage(data: TensorDict, adv_estimator, gamma=1.0, lam=1.0, norm_
         data["returns"] = returns
         # Store the mask for consistent metrics calculation
         data["response_mask"] = grpo_calculation_mask
-        logger.debug(f"[GRPO] Stored response_mask in batch for consistent metrics")
+        logger.debug("[GRPO] Stored response_mask in batch for consistent metrics")
     else:
         raise NotImplementedError
     return data
-

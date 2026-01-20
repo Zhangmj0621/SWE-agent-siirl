@@ -13,7 +13,15 @@
 # limitations under the License.
 # from . import gsm8k, math, prime_math, prime_code
 
-def default_compute_score(data_source, solution_str, ground_truth, extra_info=None, sandbox_fusion_url=None, concurrent_semaphore=None):
+
+def default_compute_score(
+    data_source,
+    solution_str,
+    ground_truth,
+    extra_info=None,
+    sandbox_fusion_url=None,
+    concurrent_semaphore=None,
+):
     """Compute the score for a given solution based on the data source.
 
     Args:
@@ -33,7 +41,15 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
         from . import gsm8k
 
         res = gsm8k.compute_score(solution_str, ground_truth)
-    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "agentica-org/DeepScaleR-Preview-Dataset", "AIME2024", "AIME2025", "AIME24", "AIME25"]:
+    elif data_source in [
+        "lighteval/MATH",
+        "DigitalLearningGmbH/MATH-lighteval",
+        "agentica-org/DeepScaleR-Preview-Dataset",
+        "AIME2024",
+        "AIME2025",
+        "AIME24",
+        "AIME25",
+    ]:
         from . import math
 
         res = math.compute_score(solution_str, ground_truth)
@@ -65,7 +81,13 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
             from . import sandbox_fusion
 
             # Pass the URL directly, ground_truth likely contains test cases here
-            res = sandbox_fusion.compute_score(sandbox_fusion_url, concurrent_semaphore, solution_str, ground_truth, continuous=True)
+            res = sandbox_fusion.compute_score(
+                sandbox_fusion_url,
+                concurrent_semaphore,
+                solution_str,
+                ground_truth,
+                continuous=True,
+            )
         else:
             # If no sandbox URL is provided, fall back to prime_code or raise error
             from . import prime_code
@@ -80,7 +102,15 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
         from . import mm_eureka
 
         res = mm_eureka.compute_score(solution_str, ground_truth)
-    elif data_source in ["searchR1_nq", "searchR1_triviaqa", "searchR1_popqa", "searchR1_hotpotqa", "searchR1_2wikimultihopqa", "searchR1_musique", "searchR1_bamboogle"]:
+    elif data_source in [
+        "searchR1_nq",
+        "searchR1_triviaqa",
+        "searchR1_popqa",
+        "searchR1_hotpotqa",
+        "searchR1_2wikimultihopqa",
+        "searchR1_musique",
+        "searchR1_bamboogle",
+    ]:
         from . import search_r1_like_qa_em
 
         res = search_r1_like_qa_em.compute_score(solution_str, ground_truth)
@@ -89,11 +119,10 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
 
     if isinstance(res, dict):
         return res
-    elif isinstance(res, (int, float, bool)):
+    elif isinstance(res, int | float | bool):
         return float(res)
     else:
         return float(res[0])
-
 
 
 __all__ = ["default_compute_score"]

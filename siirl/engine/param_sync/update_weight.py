@@ -1,6 +1,6 @@
 import socket
 from abc import abstractmethod
-from typing import Sequence
+from collections.abc import Sequence
 
 import ray
 import torch
@@ -13,9 +13,8 @@ from tqdm import tqdm
 
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.distributed_utils import get_gloo_group, init_process_group
-import debugpy
 
-from . import mbridge_patch
+from . import mbridge_patch  # noqa: F401
 
 
 class ParamSyncInterface:
@@ -23,8 +22,6 @@ class ParamSyncInterface:
         self.config = config
         self.model = model
         self.bridge = bridge
-        if self.bridge is not None:
-            from . import mbridge_patch
         self.weight_version = 0
         self._model_update_groups = None
 
@@ -35,6 +32,7 @@ class ParamSyncInterface:
     @abstractmethod
     def update_weights(self) -> None:
         pass
+
 
 class ParamSyncDistributed(ParamSyncInterface):
     def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
@@ -55,21 +53,15 @@ class ParamSyncDistributed(ParamSyncInterface):
         # from Train DP 0 to all worker
         # each pp rank has its own group
         self.rollout_workers = rollout_workers
-        self._is_pp_src_rank = (
-            mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
-        )
+        self._is_pp_src_rank = mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         if self._is_pp_src_rank:
             self._group_name = f"param_sync-pp_{pp_rank}"
 
         if self._is_pp_src_rank:
             if self._model_update_groups is not None:
-                disconnect_rollout_workers_from_distributed(
-                    self._group_name, self._model_update_groups, rollout_workers
-                )
-            self._model_update_groups = connect_rollout_workers_from_distributed(
-                self.config, self._group_name, rollout_workers
-            )
+                disconnect_rollout_workers_from_distributed(self._group_name, self._model_update_groups, rollout_workers)
+            self._model_update_groups = connect_rollout_workers_from_distributed(self.config, self._group_name, rollout_workers)
             self.rollout_worker_connected.clear()
             self.update_rollout_worker_connected(rollout_workers)
             logger.info(f"self._model_update_groups=={self._model_update_groups.size()}")
@@ -115,9 +107,11 @@ class ParamSyncDistributed(ParamSyncInterface):
 
     def _check_weight_version(self):
         version_list = ray.get([worker.weight_version.remote() for worker in self.rollout_workers])
-        for idx,v in enumerate(version_list):
+        for idx, v in enumerate(version_list):
             if v != self.weight_version:
-                raise ValueError(f"Weight version mismatch!, {idx}th rollout weight version: {v}, trainer weight version: {self.weight_version}")
+                raise ValueError(
+                    f"Weight version mismatch!, {idx}th rollout weight version: {v}, trainer weight version: {self.weight_version}"
+                )
         return True
 
     def _update_param_sync_bucket(

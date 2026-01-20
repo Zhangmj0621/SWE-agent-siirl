@@ -12,30 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import torch
-import torch.distributed as dist
-import threading
-import importlib
 import asyncio
-import time
-from collections import Counter
+import importlib
+import os
+import threading
 
 from loguru import logger
-from typing import List
 
 from siirl.engine.rollout.sglang_engine import SglangEngine
 from siirl.params.training_args import SiiRLArguments
-from siirl.utils.backend.device import get_nccl_backend,get_device_name
 from siirl.utils.net_utils.net import get_free_port, get_net_interface_ip
 from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
+
 
 def async_run_wrapper(executor):
     """
     Wrapper function to run asynchronous executor in a dedicated event loop.
     Creates a new asyncio event loop, sets it as the current loop, and runs the executor's main coroutine.
     Ensures proper cleanup of the event loop after execution completes or errors occur.
-    
+
     Args:
         executor: The async executor instance with a `run()` coroutine method to execute
     """
@@ -46,21 +41,24 @@ def async_run_wrapper(executor):
     finally:
         loop.close()
 
+
 class RolloutWorker:
     """
     RolloutWorker class manages the rollout process execution in a distributed training environment.
     It handles engine initialization, executor thread management, and network configuration for rollout tasks.
     """
-    def __init__(self, config:SiiRLArguments, global_dp_size = 1, metric_worker = None) -> None:
+
+    def __init__(self, config: SiiRLArguments, global_dp_size=1, metric_worker=None) -> None:
         """
         Initialize RolloutWorker with configuration parameters.
-        
+
         Args:
             config: SiiRLArguments configuration object containing all training/rollout settings
         """
         # Configure logging for this Ray actor process
         # (worker_process_setup_hook only works for task workers, not actors)
         from siirl.utils.logger.logging_utils import set_basic_config
+
         set_basic_config()
         self.rank = int(os.environ.get("RANK"))
         self.config = config
@@ -71,13 +69,13 @@ class RolloutWorker:
         self.executor = None  # Rollout executor instance
         self.rollout_thread = None  # Thread for running the async rollout executor
         # Initial worker
-    
+
     def init_engine(
-        self, 
-        rank: int, 
-        dist_init_addr: str, 
-        ip: str, 
-        port: int, 
+        self,
+        rank: int,
+        dist_init_addr: str,
+        ip: str,
+        port: int,
         nccl_port: int,
         base_gpu_id: int,
         node_rank: int,
@@ -85,7 +83,7 @@ class RolloutWorker:
     ):
         """
         Initialize the rollout engine with explicit GPU placement parameters.
-        
+
         Args:
             rank: Global rank of this engine instance (TP0 rank within rollout workers).
             dist_init_addr: Initialization address for distributed communication.
@@ -96,12 +94,12 @@ class RolloutWorker:
             base_gpu_id: Starting CUDA device ID for this TP group.
             node_rank: Rank of this node within the TP group.
             nnodes: Number of nodes participating in this TP group.
-        
+
         Todo:
             Add support for vLLM engine
         """
         # TODO: Support vLLM engine
-        if self.config.rollout.name == 'sglang':
+        if self.config.rollout.name == "sglang":
             self.engine = SglangEngine(
                 rank=rank,
                 config=self.config,
@@ -115,33 +113,39 @@ class RolloutWorker:
             )
             self.ip = ip
             self.port = port
-    
+
     def start_rollout(self, router_address, data_coordinator, num_engine):
         """
         Start the rollout process in a dedicated background thread with async executor.
-        
+
         Steps:
             1. Dynamically load the specified executor class
             2. Initialize executor with configuration and dependencies
             3. Start executor in a daemon thread with async event loop wrapper
-        
+
         Args:
             router_address: Address of the router for engine communication
             data_coordinator: Data coordinator instance for data management
             num_engine: Number of engine instances to use
         """
-        #create executor thread
+        # create executor thread
         # 1. init executor
         executor_path = self.config.rollout.executor_module
         if executor_path == "naive":
             from siirl.execution.rollout.agent_executor.naive_executor import NaiveExecutor
+
             Executor = NaiveExecutor
         else:
             # Dynamically import custom executor module
-            module_path, name = executor_path.rsplit('.', 1)
+            module_path, name = executor_path.rsplit(".", 1)
             mod = importlib.import_module(module_path)
             Executor = getattr(mod, name)
-        executor = Executor(self.config, data_coordinator, self.engine, self.config.data.train_batch_size // num_engine)
+        executor = Executor(
+            self.config,
+            data_coordinator,
+            self.engine,
+            self.config.data.train_batch_size // num_engine,
+        )
         self.executor = executor
         self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(executor,), daemon=True)
         self.rollout_thread.start()
@@ -151,26 +155,26 @@ class RolloutWorker:
         Stop the rollout process and clean up resources.
         Stops the executor and waits for the rollout thread to complete.
         """
-        self.executor.stop()        
-        self.rollout_thread.join()  
+        self.executor.stop()
+        self.rollout_thread.join()
 
     def set_router(self, router_address):
         """
         Update the router address for the engine.
-        
+
         Args:
             router_address: New router address to set for engine communication
         """
-        self.engine.set_router(router_address)    
-        
+        self.engine.set_router(router_address)
+
     async def validate(self, val_batch_size, global_step):
         rank = int(os.environ.get("RANK"))
-        start_time = time.perf_counter()
+        # start_time = time.perf_counter()
         if rank == 0:
             logger.info("=" * 60)
             logger.info(f"Starting Validation @ Global Step {global_step}...")
             logger.info("=" * 60)
-        samples, val_time_metrics = await self.executor.validate(val_batch_size)    
+        samples, val_time_metrics = await self.executor.validate(val_batch_size)
         validate_samples = []
         for sample in samples:
             if sample.extra_info and isinstance(sample.extra_info, dict) and sample.extra_info.get("padded_duplicate", None):
@@ -182,7 +186,7 @@ class RolloutWorker:
     def get_ip(self):
         """
         Get the network interface IP address of the current worker.
-        
+
         Returns:
             str: Network interface IP address
         """
@@ -191,7 +195,7 @@ class RolloutWorker:
     def get_ip_port(self):
         """
         Get a formatted string of IP address and a free port for the worker.
-        
+
         Returns:
             str: Formatted string in "ip:port" format with a free port
         """
@@ -201,24 +205,30 @@ class RolloutWorker:
     def get_free_port(self):
         """
         Get a free network port on the current worker's network interface.
-        
+
         Returns:
             int: Available free port number
         """
         host = get_net_interface_ip()
         return get_free_port(host)
-    
+
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         return self.engine.init_param_sync_group(master_address, master_port, rank_offset, world_size, group_name, backend)
 
     def param_sync_from_distributed(
-        self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
+        self,
+        names,
+        dtypes,
+        shapes,
+        group_name,
+        flush_cache=False,
+        weight_version: str | None = None,
     ):
         return self.engine.param_sync_from_distributed(names, dtypes, shapes, group_name, flush_cache, weight_version)
-    
+
     def destroy_weights_update_group(self, group_name):
         return self.engine.destroy_weights_update_group(group_name)
-    
+
     def flush_cache(self):
         self.engine.flush_cache()
 
@@ -227,6 +237,6 @@ class RolloutWorker:
 
     def continue_generation(self):
         return self.engine.continue_generation()
-    
+
     def weight_version(self):
         return self.engine.weight_version

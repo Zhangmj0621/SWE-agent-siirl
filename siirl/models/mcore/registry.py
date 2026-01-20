@@ -2,8 +2,8 @@
 Registry module for model architecture components.
 """
 
+from collections.abc import Callable
 from enum import Enum
-from typing import Callable, Dict, Type
 
 import torch
 import torch.nn as nn
@@ -19,20 +19,8 @@ from .config_converter import (
     hf_to_mcore_config_qwen2moe,
     hf_to_mcore_config_qwen3moe,
 )
-
-from .model_initializer import (
-    BaseModelInitializer,
-    DeepseekV3Model,
-    DenseModel,
-    MixtralModel,
-    Qwen2MoEModel,
-    Qwen3MoEModel,
-    Qwen25VLModel,
-)
-
-from .model_forward import (
-    gptmodel_forward,
-)
+from .model_forward import gptmodel_forward
+from .model_initializer import BaseModelInitializer, DeepseekV3Model, DenseModel, MixtralModel, Qwen2MoEModel, Qwen3MoEModel, Qwen25VLModel
 
 
 class SupportedModel(Enum):
@@ -48,7 +36,7 @@ class SupportedModel(Enum):
 
 
 # Registry for model configuration converters
-MODEL_CONFIG_CONVERTER_REGISTRY: Dict[SupportedModel, Callable[[PretrainedConfig, torch.dtype], TransformerConfig]] = {
+MODEL_CONFIG_CONVERTER_REGISTRY: dict[SupportedModel, Callable[[PretrainedConfig, torch.dtype], TransformerConfig]] = {
     SupportedModel.LLAMA: hf_to_mcore_config_dense,
     SupportedModel.QWEN2: hf_to_mcore_config_dense,
     SupportedModel.QWEN2_MOE: hf_to_mcore_config_qwen2moe,
@@ -61,7 +49,7 @@ MODEL_CONFIG_CONVERTER_REGISTRY: Dict[SupportedModel, Callable[[PretrainedConfig
 }
 
 # Registry for model initializers
-MODEL_INITIALIZER_REGISTRY: Dict[SupportedModel, Type[BaseModelInitializer]] = {
+MODEL_INITIALIZER_REGISTRY: dict[SupportedModel, type[BaseModelInitializer]] = {
     SupportedModel.LLAMA: DenseModel,
     SupportedModel.QWEN2: DenseModel,
     SupportedModel.QWEN2_MOE: Qwen2MoEModel,
@@ -74,7 +62,7 @@ MODEL_INITIALIZER_REGISTRY: Dict[SupportedModel, Type[BaseModelInitializer]] = {
 }
 
 # Registry for model forward functions
-MODEL_FORWARD_REGISTRY: Dict[SupportedModel, Callable] = {
+MODEL_FORWARD_REGISTRY: dict[SupportedModel, Callable] = {
     SupportedModel.LLAMA: gptmodel_forward,
     SupportedModel.QWEN2: gptmodel_forward,
     SupportedModel.QWEN2_MOE: gptmodel_forward,
@@ -87,6 +75,7 @@ MODEL_FORWARD_REGISTRY: Dict[SupportedModel, Callable] = {
     SupportedModel.DEEPSEEK_V3: gptmodel_forward,
 }
 
+
 def get_supported_model(model_type: str) -> SupportedModel:
     try:
         return SupportedModel(model_type)
@@ -95,10 +84,15 @@ def get_supported_model(model_type: str) -> SupportedModel:
         raise NotImplementedError(f"Model Type: {model_type} not supported. Supported models: {supported_models}") from err
 
 
-def hf_to_mcore_config(hf_config: PretrainedConfig, dtype: torch.dtype, **override_transformer_config_kwargs) -> TransformerConfig:
+def hf_to_mcore_config(
+    hf_config: PretrainedConfig,
+    dtype: torch.dtype,
+    **override_transformer_config_kwargs,
+) -> TransformerConfig:
     assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
     model = get_supported_model(hf_config.architectures[0])
     return MODEL_CONFIG_CONVERTER_REGISTRY[model](hf_config, dtype, **override_transformer_config_kwargs)
+
 
 def init_mcore_model(
     tfconfig: TransformerConfig,
@@ -129,7 +123,14 @@ def init_mcore_model(
     model = get_supported_model(hf_config.architectures[0])
     initializer_cls = MODEL_INITIALIZER_REGISTRY[model]
     initializer = initializer_cls(tfconfig, hf_config)
-    return initializer.initialize(pre_process=pre_process, post_process=post_process, share_embeddings_and_output_weights=share_embeddings_and_output_weights, value=value, **extra_kwargs)
+    return initializer.initialize(
+        pre_process=pre_process,
+        post_process=post_process,
+        share_embeddings_and_output_weights=share_embeddings_and_output_weights,
+        value=value,
+        **extra_kwargs,
+    )
+
 
 def get_mcore_forward_fn(hf_config: PretrainedConfig) -> Callable:
     """

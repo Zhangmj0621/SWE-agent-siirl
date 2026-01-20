@@ -42,7 +42,10 @@ class _TensorDictConfigMeta(type):
 
     @property
     def auto_padding(cls):
-        enabled_by_env = os.getenv("SIIRL_AUTO_PADDING", "FALSE").upper() in ["TRUE", "1"]
+        enabled_by_env = os.getenv("SIIRL_AUTO_PADDING", "FALSE").upper() in [
+            "TRUE",
+            "1",
+        ]
         return enabled_by_env or cls._config.get(cls.auto_padding_key, False)
 
     @auto_padding.setter
@@ -60,16 +63,14 @@ _padding_size_key = "_padding_size_key_x123d"
 
 def union_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict) -> TensorDict:
     """Union two tensordicts."""
-    assert tensor_dict1.batch_size == tensor_dict2.batch_size, (
-        f"Two tensor dict must have identical batch size. Got {tensor_dict1.batch_size} and {tensor_dict2.batch_size}"
-    )
-    for key in tensor_dict2.keys():
-        if key not in tensor_dict1.keys():
+    assert (
+        tensor_dict1.batch_size == tensor_dict2.batch_size
+    ), f"Two tensor dict must have identical batch size. Got {tensor_dict1.batch_size} and {tensor_dict2.batch_size}"
+    for key in tensor_dict2:
+        if key not in tensor_dict1:
             tensor_dict1[key] = tensor_dict2[key]
         else:
-            assert tensor_dict1[key].equal(tensor_dict2[key]), (
-                f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
-            )
+            assert tensor_dict1[key].equal(tensor_dict2[key]), f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
 
     return tensor_dict1
 
@@ -80,9 +81,9 @@ def union_numpy_dict(tensor_dict1: dict[str, np.ndarray], tensor_dict2: dict[str
             assert isinstance(tensor_dict2[key], np.ndarray)
             assert isinstance(tensor_dict1[key], np.ndarray)
             # to properly deal with nan and object type
-            assert pd.DataFrame(tensor_dict2[key]).equals(pd.DataFrame(tensor_dict1[key])), (
-                f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
-            )
+            assert pd.DataFrame(tensor_dict2[key]).equals(
+                pd.DataFrame(tensor_dict1[key])
+            ), f"{key} in tensor_dict1 and tensor_dict2 are not the same object"
         tensor_dict1[key] = val
 
     return tensor_dict1

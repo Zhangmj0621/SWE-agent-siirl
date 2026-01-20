@@ -1,18 +1,16 @@
 import asyncio
+import datetime
+import statistics
 import time
+import uuid
+
 import ray
 import torch
-import numpy as np
 from tensordict import TensorDict
-from typing import List, Tuple
-import datetime
-import uuid
-import statistics
 
 # Make sure the import path is correct based on your project structure
 from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.data_coordinator.sample import SampleInfo
-
 
 # ====================================================================
 # Performance Test Configuration
@@ -48,12 +46,10 @@ def create_mock_sample() -> TensorDict:
 
 
 async def producer_task_detailed_profile(
-    producer_id: int, 
-    coordinator: ray.actor.ActorHandle, 
-    num_samples_to_produce: int
-) -> Tuple[List[float], List[float]]:
+    producer_id: int, coordinator: ray.actor.ActorHandle, num_samples_to_produce: int
+) -> tuple[list[float], list[float]]:
     """
-    Simulates a producer and records the detailed timings for 
+    Simulates a producer and records the detailed timings for
     `ray.put` and `coordinator.put.remote`.
     """
     ray_put_timings = []
@@ -61,25 +57,25 @@ async def producer_task_detailed_profile(
 
     for _ in range(num_samples_to_produce):
         sample_data = create_mock_sample()
-        
+
         # 1. Profile `ray.put` (Serialization + Local Object Store Write)
         start_put = time.perf_counter()
         sample_ref = ray.put(sample_data)
         end_put = time.perf_counter()
         ray_put_timings.append(end_put - start_put)
-        
+
         sample_info = SampleInfo(uid=str(uuid.uuid4()))
-        
+
         # 2. Profile `coordinator.put.remote` (RPC Overhead + Remote Execution)
         start_coord = time.perf_counter()
         await coordinator.put.remote(sample_info, sample_ref)
         end_coord = time.perf_counter()
         coord_put_timings.append(end_coord - start_coord)
-        
+
     return ray_put_timings, coord_put_timings
 
 
-def analyze_timings(operation_name: str, timings: List[float]):
+def analyze_timings(operation_name: str, timings: list[float]):
     """Analyzes and prints statistics for a list of timings."""
     if not timings:
         log_with_time(f"  - No data for {operation_name}.")
@@ -88,7 +84,7 @@ def analyze_timings(operation_name: str, timings: List[float]):
     total_time = sum(timings)
     mean_time = statistics.mean(timings) * 1000  # ms
     std_dev = statistics.stdev(timings) * 1000 if len(timings) > 1 else 0.0  # ms
-    
+
     log_with_time(f"  - Analysis for '{operation_name}':")
     log_with_time(f"    - Total Time: {total_time:.4f} seconds for {len(timings)} calls")
     log_with_time(f"    - Average Latency: {mean_time:.4f} ms/call")
@@ -105,58 +101,60 @@ async def main():
     log_with_time("=" * 80)
 
     coordinator = init_data_coordinator(NUM_BUFFERS, force_local=True)
-    
+
     # --- Part 1: Detailed Profile of the Current "Sample-by-Sample" Method ---
     log_with_time("\n--- Part 1: Profiling Current Sample-by-Sample Approach ---")
     samples_per_producer = TOTAL_SAMPLES // NUM_PRODUCERS
-    
+
     producer_tasks = []
     for i in range(NUM_PRODUCERS):
         task = producer_task_detailed_profile(i, coordinator, samples_per_producer)
         producer_tasks.append(task)
-            
+
     results = await asyncio.gather(*producer_tasks)
-    
+
     all_ray_put_timings = [t for res in results for t in res[0]]
     all_coord_put_timings = [t for res in results for t in res[1]]
 
     analyze_timings("ray.put (Serialization)", all_ray_put_timings)
-    print() # Spacer
+    print()  # Spacer
     analyze_timings("coordinator.put.remote (RPC)", all_coord_put_timings)
 
     total_ray_put_time = sum(all_ray_put_timings)
     total_coord_put_time = sum(all_coord_put_timings)
-    
+
     log_with_time("\n  - Conclusion for Part 1:")
     if total_ray_put_time > total_coord_put_time:
-        ratio = total_ray_put_time / total_coord_put_time if total_coord_put_time > 0 else float('inf')
+        ratio = total_ray_put_time / total_coord_put_time if total_coord_put_time > 0 else float("inf")
         log_with_time(f"    - Serialization (`ray.put`) is the dominant cost, taking {total_ray_put_time:.4f}s.")
         log_with_time(f"    - `ray.put` is {ratio:.2f}x slower than the coordinator RPC.")
     else:
-        ratio = total_coord_put_time / total_ray_put_time if total_ray_put_time > 0 else float('inf')
+        ratio = total_coord_put_time / total_ray_put_time if total_ray_put_time > 0 else float("inf")
         log_with_time(f"    - RPC (`coordinator.put.remote`) is the dominant cost, taking {total_coord_put_time:.4f}s.")
         log_with_time(f"    - The RPC is {ratio:.2f}x slower than serialization.")
 
     # --- Part 2: Local Benchmark of a Potential "Batched" Optimization ---
     log_with_time("\n--- Part 2: Simulating Batched `ray.put` Optimization Potential ---")
-    
+
     # Create a batch of samples locally
     mock_batch = [create_mock_sample() for _ in range(BATCH_SIZE_FOR_SIM)]
-    
+
     # Time a single, batched ray.put
     start_batch_put = time.perf_counter()
     ray.put(mock_batch)
     end_batch_put = time.perf_counter()
     batched_put_time = end_batch_put - start_batch_put
-    
+
     # Get the average time for individual puts from our earlier test
     avg_single_put_time = statistics.mean(all_ray_put_timings)
     equivalent_individual_time = avg_single_put_time * BATCH_SIZE_FOR_SIM
-    
-    log_with_time(f"  - Time to `ray.put` {BATCH_SIZE_FOR_SIM} samples INDIVIDUALLY: {equivalent_individual_time:.4f} seconds (estimated from Part 1)")
+
+    log_with_time(
+        f"  - Time to `ray.put` {BATCH_SIZE_FOR_SIM} samples INDIVIDUALLY: {equivalent_individual_time:.4f} seconds (estimated from Part 1)"
+    )
     log_with_time(f"  - Time to `ray.put` {BATCH_SIZE_FOR_SIM} samples as a single BATCH: {batched_put_time:.4f} seconds")
-    
-    if batched_put_time > 0 :
+
+    if batched_put_time > 0:
         speedup_factor = equivalent_individual_time / batched_put_time
         log_with_time(f"  - Potential Speedup Factor: {speedup_factor:.2f}x")
     log_with_time("    - This demonstrates the potential performance gain from reducing serialization overhead.")

@@ -19,7 +19,6 @@ import shutil
 import torch
 import torch.distributed as dist
 from loguru import logger
-from typing import Optional
 
 from siirl.params import SiiRLArguments
 from siirl.utils.checkpoint.checkpoint_utils import find_latest_ckpt_path
@@ -53,11 +52,11 @@ class CheckpointManager:
     def save_checkpoint(self, global_steps: int) -> None:
         """
         Save checkpoint atomically across all ranks.
-        
+
         This method saves model states (actor/critic), dataloader state,
         and commits the checkpoint by writing a tracker file. After committing,
         it cleans up old global_step_* directories based on max_ckpt_to_keep.
-        
+
         Args:
             global_steps: Current global training step number.
         """
@@ -88,7 +87,7 @@ class CheckpointManager:
         self.actor_worker.save_checkpoint(
             local_path=actor_path,
             global_step=global_steps,
-            max_ckpt_to_keep=max_actor_ckpt
+            max_ckpt_to_keep=max_actor_ckpt,
         )
         logger.debug(f"Rank {self.rank}: Saved actor checkpoint to {actor_path}")
 
@@ -99,7 +98,7 @@ class CheckpointManager:
             self.critic_worker.save_checkpoint(
                 local_path=critic_path,
                 global_step=global_steps,
-                max_ckpt_to_keep=max_critic_ckpt
+                max_ckpt_to_keep=max_critic_ckpt,
             )
             logger.debug(f"Rank {self.rank}: Saved critic checkpoint to {critic_path}")
 
@@ -112,6 +111,7 @@ class CheckpointManager:
             return
 
         import ray
+
         dataloader_state = ray.get(self.data_coordinator.save_dataloader_state.remote())
         if dataloader_state is not None:
             dataloader_path = os.path.join(step_dir, "dataloader_state.pt")
@@ -120,10 +120,7 @@ class CheckpointManager:
 
     def _commit_checkpoint(self, global_steps: int) -> None:
         """Atomically commit checkpoint by writing tracker file."""
-        tracker_file = os.path.join(
-            self.config.trainer.default_local_dir,
-            "latest_checkpointed_iteration.txt"
-        )
+        tracker_file = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(tracker_file, "w") as f:
             f.write(str(global_steps))
         logger.info(f"Rank 0: Checkpoint {global_steps} committed")
@@ -131,43 +128,40 @@ class CheckpointManager:
     def _cleanup_old_global_steps(self) -> None:
         """
         Remove old global_step_* directories based on max_ckpt_to_keep config.
-        
+
         This method is called after checkpoint commit on rank 0 only.
         It uses the minimum of max_actor_ckpt_to_keep and max_critic_ckpt_to_keep
         to determine how many global_step_* directories to retain.
-        
+
         The cleanup happens at the global_step_* level, meaning entire checkpoint
         directories (including actor/, critic/, and dataloader_state.pt) are removed.
         """
         checkpoint_dir = self.config.trainer.default_local_dir
-        
+
         # Use the minimum of actor and critic limits for global directory cleanup
         max_actor_keep = self.config.trainer.max_actor_ckpt_to_keep
         max_critic_keep = self.config.trainer.max_critic_ckpt_to_keep
-        
+
         # If critic doesn't exist, just use actor limit
-        if self.critic_worker is None:
-            max_keep = max_actor_keep
-        else:
-            max_keep = min(max_actor_keep, max_critic_keep)
-        
+        max_keep = max_actor_keep if self.critic_worker is None else min(max_actor_keep, max_critic_keep)
+
         # Skip cleanup if max_keep is not set or <= 0
         if max_keep <= 0:
             return
-        
+
         # Find all global_step_* directories
         global_step_pattern = os.path.join(checkpoint_dir, "global_step_*")
         global_step_dirs = glob.glob(global_step_pattern)
-        
+
         if not global_step_dirs:
             return
-        
+
         # Sort by step number (ascending)
         global_step_dirs = sorted(
             global_step_dirs,
-            key=lambda x: int(os.path.basename(x).split("global_step_")[-1])
+            key=lambda x: int(os.path.basename(x).split("global_step_")[-1]),
         )
-        
+
         # Remove oldest directories if exceeding the limit
         if len(global_step_dirs) > max_keep:
             dirs_to_remove = global_step_dirs[:-max_keep]
@@ -208,7 +202,7 @@ class CheckpointManager:
 
         return global_steps
 
-    def _determine_checkpoint_path(self) -> Optional[str]:
+    def _determine_checkpoint_path(self) -> str | None:
         """Determine checkpoint path (rank 0 only)."""
         if self.rank != 0:
             return None
@@ -260,10 +254,11 @@ class CheckpointManager:
             return
 
         import ray
+
         dataloader_path = os.path.join(global_step_folder, "dataloader_state.pt")
 
         if os.path.exists(dataloader_path):
-            dataloader_state = torch.load(dataloader_path, map_location='cpu')
+            dataloader_state = torch.load(dataloader_path, map_location="cpu")
             ray.get(self.data_coordinator.load_dataloader_state.remote(dataloader_state))
             logger.debug(f"Rank {self.rank}: Loaded dataloader state from {dataloader_path}")
         else:

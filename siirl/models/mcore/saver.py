@@ -2,7 +2,13 @@ import torch
 from megatron.core import mpu
 
 
-def _megatron_calc_global_rank(tp_rank: int = 0, dp_rank: int = 0, pp_rank: int = 0, cp_rank: int = 0, ep_rank: int = 0):
+def _megatron_calc_global_rank(
+    tp_rank: int = 0,
+    dp_rank: int = 0,
+    pp_rank: int = 0,
+    cp_rank: int = 0,
+    ep_rank: int = 0,
+):
     """Calculate global rank with support for CP/EP parallelism"""
 
     # Get parallel sizes for each dimension
@@ -14,7 +20,9 @@ def _megatron_calc_global_rank(tp_rank: int = 0, dp_rank: int = 0, pp_rank: int 
 
     # Verify total GPU count matches (must be consistent with parallel_state.py)
     total_size = tp_size * dp_size * pp_size * cp_size
-    assert total_size == torch.distributed.get_world_size(), f"{tp_size}x{dp_size}x{pp_size}x{cp_size} != {torch.distributed.get_world_size()}"
+    assert (
+        total_size == torch.distributed.get_world_size()
+    ), f"{tp_size}x{dp_size}x{pp_size}x{cp_size} != {torch.distributed.get_world_size()}"
 
     # Core calculation logic (corresponds to RankGenerator order parameter)
     # Assumes default order is "tp-cp-ep-dp-pp"

@@ -1,23 +1,23 @@
 # Support swebench dataset
 # must have run build_env_images on dataset before run.
 
-from io import BytesIO
-from pydantic import BaseModel, Field
-from typing import cast, Optional
-from dataclasses import dataclass
 import tempfile
+from dataclasses import dataclass
+from io import BytesIO
+from typing import cast
 
-from .base import SWESampleData, Runtime, RuntimeBuilder
-from ..environment import ContainerStartArgs, ContainerEnv
-from ..base import SWESample
-
-from swebench.harness.test_spec.test_spec import make_test_spec, TestSpec
-from swebench.harness.constants import SWEbenchInstance, LATEST
+from pydantic import BaseModel, Field
+from swebench.harness.constants import LATEST, SWEbenchInstance
 from swebench.harness.grading import get_eval_report
+from swebench.harness.test_spec.test_spec import TestSpec, make_test_spec
+
+from ..base import SWESample
+from ..environment import ContainerEnv, ContainerStartArgs
+from .base import Runtime, RuntimeBuilder, SWESampleData
 
 
 class SWEBenchConfig(BaseModel):
-    namespace: Optional[str] = Field(default=None)
+    namespace: str | None = Field(default=None)
     base_image_tag: str = LATEST
     env_image_tag: str = LATEST
     instance_image_tag: str = LATEST
@@ -49,7 +49,7 @@ class SWEBenchRuntime(Runtime):
         # apply patch
         if self.m.rollout.patch is None:
             raise RuntimeError("must run diff before patch")
-        await env.execute(f"git checkout {self.instance["base_commit"]}")
+        await env.execute(f"git checkout {self.instance['base_commit']}")
         stdin = BytesIO(self.m.rollout.patch)
         await env.execute("git apply --verbose --reject -", stdin=stdin)
 
@@ -107,7 +107,7 @@ class SWEBenchRuntime(Runtime):
         await env.execute("cat - | bash", stdin=stdin)
 
         # apply test patch
-        await env.execute(f"git checkout {self.instance["base_commit"]}")
+        await env.execute(f"git checkout {self.instance['base_commit']}")
         stdin = BytesIO(self.instance["test_patch"].encode("utf-8"))
         await env.execute("git apply --verbose --reject -", stdin=stdin)
 

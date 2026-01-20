@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .checkpoint_utils import find_latest_ckpt_path
 from .base_checkpoint_manager import BaseCheckpointManager
+from .checkpoint_utils import find_latest_ckpt_path
 from .megatron_checkpoint_manager import MegatronCheckpointManager
 
 __all__ = [

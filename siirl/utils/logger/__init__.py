@@ -21,28 +21,28 @@ for multiple backends (console, wandb, tensorboard).
 Usage:
     # Basic logging with MetricTracker
     from siirl.utils.logger import MetricTracker, GenerationSample
-    
+
     tracker = MetricTracker(
         project_name="siirl_agentic",
         experiment_name="gsm8k_grpo",
         backends=["console", "wandb"],
         config={"lr": 1e-4, "batch_size": 32}
     )
-    
+
     # Log metrics
     tracker.log({"loss": 0.5, "accuracy": 0.9}, step=100)
-    
+
     # Log generation samples
     samples = [GenerationSample("2+2=?", "4", 1.0)]
     tracker.log_generation(samples, step=100)
-    
+
     # Close when done
     tracker.finish()
-    
+
     # Or use context manager
     with MetricTracker("project", "exp", ["console"]) as tracker:
         tracker.log({"loss": 0.5}, step=1)
-    
+
     # Custom backend registration
     from siirl.utils.logger import BackendRegistry
     BackendRegistry.register("custom", MyCustomBackend)
@@ -50,9 +50,9 @@ Usage:
 For distributed metrics collection, see siirl.utils.metrics module.
 """
 
+from .backends import BackendConfig, BackendRegistry
 from .logging_utils import set_basic_config
-from .tracker import MetricTracker, GenerationSample
-from .backends import BackendRegistry, BackendConfig
+from .tracker import GenerationSample, MetricTracker
 
 __all__ = [
     # Logging configuration
@@ -64,4 +64,3 @@ __all__ = [
     "BackendRegistry",
     "BackendConfig",
 ]
-

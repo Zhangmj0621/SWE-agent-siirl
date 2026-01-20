@@ -19,30 +19,30 @@ Provides distributed metrics collection and aggregation functionality.
 
 Usage:
     from siirl.utils.metrics import MetricWorker, MetricClient
-    
+
     # Create MetricWorker (Ray Actor)
     metric_worker = MetricWorker.remote()
     ray.get(metric_worker.start.remote())
-    
+
     # Create MetricClient in each Trainer
     client = MetricClient(metric_worker)
     client.submit_metric({"loss": 0.5}, world_size=4)
     client.wait_submit()
-    
+
     # Get aggregated results
     final_metrics = client.wait_final_res()
 """
 
-from .utils import Metric, MetricFunc, MeanMetric, SumMetric, MaxMetric, MinMetric, StdMetric, StdStats
-from .metric_worker import MetricWorker, MetricClient
 from .metric_utils import (
+    aggregate_validation_metrics,
     compute_data_metric,
-    compute_timing_metrics,
-    compute_throughput_metrics,
     compute_log_prob_diff_metrics,
+    compute_throughput_metrics,
+    compute_timing_metrics,
     extract_rollout_timing_metrics,
-    aggregate_validation_metrics
 )
+from .metric_worker import MetricClient, MetricWorker
+from .utils import MaxMetric, MeanMetric, Metric, MetricFunc, MinMetric, StdMetric, StdStats, SumMetric
 
 __all__ = [
     # Data structures and aggregation functions
@@ -65,4 +65,3 @@ __all__ = [
     "extract_rollout_timing_metrics",
     "aggregate_validation_metrics",
 ]
-

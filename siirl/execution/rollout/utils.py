@@ -1,6 +1,8 @@
-from typing import Any, List
 from enum import Enum
+from typing import Any
+
 from siirl.environment.tool_env.utils.tool_parser import FunctionCall
+
 
 class AgentState(Enum):
     PENDING = "pending"
@@ -9,21 +11,18 @@ class AgentState(Enum):
     TERMINATED = "terminated"
     BEFORE_PROCESSING_ENV = "before_processing_envs"
     ABORTED = "aborted"
-    
 
 
 class AgentData:
     """Encapsulates all state variables for the agent loop."""
-    def __init__(
-        self,
-        raw_prompt:List[dict[str, Any]]
-    ):
-        self.messages:List[dict[str, Any]] = raw_prompt
+
+    def __init__(self, raw_prompt: list[dict[str, Any]]):
+        self.messages: list[dict[str, Any]] = raw_prompt
         self.prompts_ids = []
         self.rollout_log_prob = []
         self.response_ids = []
         self.response_mask = []
-        self.env_calls :list[FunctionCall] = []
+        self.env_calls: list[FunctionCall] = []
         self.env_turns = 0
         self.assistant_turns = 0
         self.state = AgentState.PENDING

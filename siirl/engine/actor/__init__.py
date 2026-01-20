@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .megatron_actor import (
-    ActorWorker,
-    ReferenceWorker,
-    CriticWorker,
-    MegatronPPOActor,
-    MegatronPPOCritic,
-)
+from .megatron_actor import ActorWorker, CriticWorker, MegatronPPOActor, MegatronPPOCritic, ReferenceWorker
 
 __all__ = [
     "ActorWorker",

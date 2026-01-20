@@ -16,6 +16,7 @@ import json
 from siirl.environment.base import BasEnvironment
 from siirl.environment.tool_env.utils.schemas import OpenAIFunctionToolSchema
 
+
 class ToolEnv(BasEnvironment):
     def __init__(self, config, tool_schema: OpenAIFunctionToolSchema) -> None:
         super().__init__()
@@ -23,13 +24,18 @@ class ToolEnv(BasEnvironment):
         self.tool_schema = tool_schema or self.get_openai_tool_schema()
         assert self.tool_schema is not None, "Tool schema is not set!"
         self.name = self.tool_schema.function.name
-        self._instance_dict ={}
-        print(json.dumps(self.tool_schema.model_dump(exclude_unset=True, exclude_none=True), indent=2))
-    
+        self._instance_dict = {}
+        print(
+            json.dumps(
+                self.tool_schema.model_dump(exclude_unset=True, exclude_none=True),
+                indent=2,
+            )
+        )
+
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:
         return self.tool_schema
-    
-    async def release(self, instance_id:str):
+
+    async def release(self, instance_id: str):
         """Release the tool instance.
 
         Args:

@@ -1,6 +1,6 @@
-from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
-from typing import Optional, BinaryIO, Union
+from dataclasses import dataclass, field
+from typing import BinaryIO
 
 
 @dataclass
@@ -27,14 +27,14 @@ class ContainerStartArgs:
     """
 
     image: str
-    cmd: Optional[str] = None
-    cwd: Optional[str] = None
+    cmd: str | None = None
+    cwd: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     forward_env: list[str] = field(default_factory=list)
     container_timeout: str = "2h"
     startup_timeout: float = 180.0
-    resource_requests: Optional[dict[str, Union[int, str]]] = None
-    resource_limits: Optional[dict[str, Union[int, str]]] = None
+    resource_requests: dict[str, int | str] | None = None
+    resource_limits: dict[str, int | str] | None = None
 
 
 @dataclass
@@ -60,12 +60,12 @@ class ContainerBuildArgs:
 
     tag: str
     build_dir: str
-    dockerfile_path: Optional[str] = None
+    dockerfile_path: str | None = None
     nocache: bool = False
     rm: bool = True
     push: bool = False
     timeout: float = 0.0
-    resource_limits: Optional[dict[str, Union[int, str]]] = None
+    resource_limits: dict[str, int | str] | None = None
 
 
 class ContainerEnvBuilder(ABC):
@@ -132,9 +132,9 @@ class ContainerEnv(ABC):
     async def popen(
         self,
         cmd: str,
-        cwd: Optional[str] = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
     ) -> ContainerOutput:
         """TODO: design a Popen class like interface, that supports async interaction with
@@ -146,10 +146,10 @@ class ContainerEnv(ABC):
     async def execute(
         self,
         cmd: str,
-        stdin: Optional[BinaryIO] = None,
-        cwd: Optional[str] = None,
-        env: dict[str, str] = {},
-        forward_env: list[str] = [],
+        stdin: BinaryIO | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        forward_env: list[str] | None = None,
         timeout: float = 180.0,
         check: bool = True,
     ) -> ContainerOutput:
@@ -159,8 +159,8 @@ class ContainerEnv(ABC):
             cmd: The command to execute.
             stdin: The stdin put to command. Defaults to None.
             cwd: Working directory in which to execute the command. Defaults to None.
-            env: Environment variables to set for the command. Defaults to {}.
-            forward_env: Environment variables to forward from the host. Defaults to [].
+            env: Environment variables to set for the command. Defaults to None.
+            forward_env: Environment variables to forward from the host. Defaults to None.
             timeout: Maximum time in seconds to wait for command completion. Defaults to 180.0.
             check: Raise on non-0 return code if set to True. Defaults to True.
 
@@ -180,7 +180,7 @@ class ContainerEnv(ABC):
         src: str,
         dst: str,
         upload: bool = True,
-        cwd: Optional[str] = None,
+        cwd: str | None = None,
         timeout: float = 180.0,
     ):
         """Copies files between the host and container.
@@ -236,9 +236,7 @@ class ContainerEnv(ABC):
                 if self.alive:
                     import logging
 
-                    logging.warning(
-                        "Container should cleanup manually or use `async with as`; run in background"
-                    )
+                    logging.warning("Container should cleanup manually or use `async with as`; run in background")
                     await self.cleanup()
 
             asyncio.create_task(_check_and_cleanup())

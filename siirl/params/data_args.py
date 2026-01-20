@@ -14,16 +14,16 @@
 
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 
 @dataclass
 class DataArguments:
-    train_files: List[str] = field(
+    train_files: list[str] = field(
         default_factory=lambda: ["~/data/rlhf/gsm8k/train.parquet"],
         metadata={"help": "Training dataset path"},
     )
-    val_files: List[str] = field(
+    val_files: list[str] = field(
         default_factory=lambda: ["~/data/rlhf/gsm8k/test.parquet"],
         metadata={"help": "Validation dataset path"},
     )
@@ -31,14 +31,30 @@ class DataArguments:
     max_prompt_length: int = field(default=512, metadata={"help": "Max token length for prompts"})
     max_response_length: int = field(default=512, metadata={"help": "Max token length for responses"})
     train_batch_size: int = field(default=1024, metadata={"help": "Training batch size"})
-    val_batch_size: Optional[int] = field(default=None, metadata={"help": "Validation batch size. If None, uses entire validation set as one batch"})
-    gen_batch_size: Optional[int] = field(default=None, metadata={"help": "Generation batch size for DAPO (typically 3x train_batch_size)"})
+    val_batch_size: int | None = field(
+        default=None,
+        metadata={"help": "Validation batch size. If None, uses entire validation set as one batch"},
+    )
+    gen_batch_size: int | None = field(
+        default=None,
+        metadata={"help": "Generation batch size for DAPO (typically 3x train_batch_size)"},
+    )
     return_raw_chat: bool = field(default=True, metadata={"help": "Return unprocessed chat data"})
-    filter_overlong_prompts: bool = field(default=False, metadata={"help": "For large-scale dataset, filtering overlong prompts could be timeconsuming."})
+    filter_overlong_prompts: bool = field(
+        default=False,
+        metadata={"help": "For large-scale dataset, filtering overlong prompts could be timeconsuming."},
+    )
     shuffle: bool = field(default=True, metadata={"help": "Shuffle training data"})
     truncation: str = field(
         default="error",
-        metadata={"help": "Truncate the input_ids or prompt length if they exceed max_prompt_length. Default is 'error', not allow exceed the max_prompt_length. The users should increase the max_prompt_length if throwing the error. You can also set ``left`` ``middle`` and ``right``"},
+        metadata={
+            "help": (
+                "Truncate the input_ids or prompt length if they exceed max_prompt_length. "
+                "Default is 'error', not allow exceed the max_prompt_length. The users should "
+                "increase the max_prompt_length if throwing the error. You can also set "
+                "``left`` ``middle`` and ``right``"
+            )
+        },
     )
     train_on_prompt: bool = field(
         default=False,
@@ -48,9 +64,15 @@ class DataArguments:
         default=False,
         metadata={"help": "Whether or not to mask the history and train on the last turn only."},
     )
-    tokenized_path: Optional[str] = field(
+    tokenized_path: str | None = field(
         default=None,
-        metadata={"help": ("Path to save or load the tokenized datasets. If tokenized_path not exists, it will save the tokenized datasets. If tokenized_path exists, it will load the tokenized datasets.")},
+        metadata={
+            "help": (
+                "Path to save or load the tokenized datasets. If tokenized_path not exists, "
+                "it will save the tokenized datasets. If tokenized_path exists, it will load "
+                "the tokenized datasets."
+            )
+        },
     )
     filter_overlong_prompt: bool = field(
         default=False,
@@ -60,7 +82,7 @@ class DataArguments:
         default=False,
         metadata={"help": "Enable dataset streaming."},
     )
-    preprocessing_num_workers: Optional[int] = field(
+    preprocessing_num_workers: int | None = field(
         default=None,
         metadata={"help": "The number of processes to use for the pre-processing."},
     )
@@ -76,7 +98,7 @@ class DataArguments:
         default="concat",
         metadata={"help": "Strategy to use in dataset mixing (concat/interleave) (undersampling/oversampling)."},
     )
-    interleave_probs: Optional[str] = field(
+    interleave_probs: str | None = field(
         default=None,
         metadata={"help": "Probabilities to sample data from datasets. Use commas to separate multiple datasets."},
     )
@@ -89,9 +111,20 @@ class DataArguments:
         metadata={"help": "The cutoff length of the tokenized inputs in the dataset."},
     )
     reward_fn_key: str = field(default="data_source", metadata={"help": "reward data source key"})
-    auto_repeat: bool = field(default=False, metadata={"help": "Automatically repeats the training dataset. Recommended when the number of samples is smaller than the total training steps to prevent premature termination."})
+    auto_repeat: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Automatically repeats the training dataset. Recommended when the number of samples "
+                "is smaller than the total training steps to prevent premature termination."
+            )
+        },
+    )
     num_loader_workers: int = field(default=8, metadata={"help": "DataLoader worker number"})
-    force_on_the_fly: bool = field(default=False, metadata={"help": "If True, the data will be loaded on-the-fly, which is useful for large datasets that cannot fit into memory."})
+    force_on_the_fly: bool = field(
+        default=False,
+        metadata={"help": "If True, the data will be loaded on-the-fly, which is useful for large datasets that cannot fit into memory."},
+    )
 
     def __post_init__(self):
         def split_arg(arg):
@@ -114,5 +147,5 @@ class DataArguments:
             if self.val_files is not None and len(self.val_files) != len(self.interleave_probs):
                 raise ValueError("The length of eval dataset and interleave probs should be identical.")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)

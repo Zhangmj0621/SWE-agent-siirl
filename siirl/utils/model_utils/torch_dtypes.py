@@ -46,4 +46,3 @@ class PrecisionType:
             return torch.bfloat16
         else:
             raise RuntimeError(f"unexpected precision: {precision}")
-

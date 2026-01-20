@@ -2,3 +2,4 @@
 
 from siirl.utils.timer import Timer, TimerCollection
 
+__all__ = ["Timer", "TimerCollection"]
