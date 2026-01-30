@@ -882,12 +882,22 @@ class MegatronPPOActor:
                 micro_batch_size=micro_batch_size,
             )
 
+            def _unwrap_output_item(item):
+                if isinstance(item, dict):
+                    return item
+                if isinstance(item, tuple):
+                    for elem in item:
+                        if isinstance(elem, dict):
+                            return elem
+                raise TypeError(f"Unexpected output item type: {type(item)}")
+
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                log_probs = [o["log_probs"] for o in output["output"]]
+                output_items = [_unwrap_output_item(o) for o in output["output"]]
+                log_probs = [o["log_probs"] for o in output_items]
                 log_probs = torch.cat(log_probs, dim=0).to(torch.float32)
 
                 if calculate_entropy:
-                    entropys = torch.cat([o["entropy"] for o in output["output"]], dim=0).to(torch.float32)
+                    entropys = torch.cat([o["entropy"] for o in output_items], dim=0).to(torch.float32)
 
             else:
                 log_probs = torch.empty(
@@ -1193,8 +1203,18 @@ class MegatronPPOCritic:
         with torch.no_grad():
             output = self.forward_backward_batch(data=data, forward_only=True, micro_batch_size=micro_batch_size)
 
+            def _unwrap_output_item(item):
+                if isinstance(item, dict):
+                    return item
+                if isinstance(item, tuple):
+                    for elem in item:
+                        if isinstance(elem, dict):
+                            return elem
+                raise TypeError(f"Unexpected output item type: {type(item)}")
+
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                values = [o["vpreds"] for o in output["output"]]
+                output_items = [_unwrap_output_item(o) for o in output["output"]]
+                values = [o["vpreds"] for o in output_items]
                 values = torch.cat(values, dim=0).to(torch.float32)
             else:
                 attention_mask = data["attention_mask"]
