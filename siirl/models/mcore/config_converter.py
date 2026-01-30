@@ -64,6 +64,11 @@ def _get_base_transformer_config(
         "masked_softmax_fusion": True,
         "moe_token_dispatcher_type": "alltoall",
         "deallocate_pipeline_outputs": True,
+        # Activation Recomputation (Gradient Checkpointing) - saves ~40-80GB activation memory
+        # This trades compute for memory by recomputing activations during backward pass
+        "recompute_granularity": "full",
+        "recompute_method": "uniform",
+        "recompute_num_layers": 1,
     }
 
     # Update with any provided overrides

@@ -33,6 +33,7 @@ from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.params import SiiRLArguments, TrainingArguments
 from siirl.utils.backend.device import get_nccl_backend, get_torch_device
 from siirl.utils.distributed_utils import init_gloo_group
+from siirl.utils.megatron.megatron_utils import offload_megatron_model_to_cpu
 from siirl.utils.timer import Timer, TimerCollection
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
 
@@ -402,6 +403,12 @@ class Trainer:
                 response_mask = data_with_logprobs["response_mask"]
                 loss_agg_mode = self.config.actor_ref.actor.loss_agg_mode
                 entropy_loss = agg_loss(entropys, response_mask.to(entropys.device), loss_agg_mode)
+
+            # Memory optimization: offload actor before ref inference to avoid peak memory
+            # when both actor and ref models are on GPU simultaneously
+            if self.actor_worker._is_offload_param:
+                offload_megatron_model_to_cpu(self.actor_worker.actor_module)
+                get_torch_device().empty_cache()
 
             with timers["ref"]:
                 data_with_ref = self.ref_worker.compute_ref_log_prob(data_with_logprobs)

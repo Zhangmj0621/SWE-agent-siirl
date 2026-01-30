@@ -98,7 +98,7 @@ TRAINING_CMD=(
     actor_ref.actor.clip_ratio=0.2
     actor_ref.actor.kl_loss_coef=0.01
     actor_ref.actor.kl_loss_type=low_var_kl
-    actor_ref.actor.megatron.param_offload=False
+    actor_ref.actor.megatron.param_offload=True
     actor_ref.actor.megatron.optimizer_offload=False
     # Actor parallelism is configured via trainer.* below
     actor_ref.actor.megatron.use_mbridge=True
