@@ -264,12 +264,24 @@ class Trainer:
     # @timer
     def update_rollout_weight(self):
         assert self.param_sync is not None, "must setup param sync first"
+
+        # Load actor model to GPU before weight sync (needed when param_offload=True)
+        if self.actor_worker._is_offload_param:
+            from siirl.utils.megatron.megatron_utils import load_megatron_model_to_gpu
+
+            load_megatron_model_to_gpu(self.actor_worker.actor_module, load_grad=False)
+
         if isinstance(self.param_sync, ParamSyncDistributed):
             # TODO support elastic rollout connection
             rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
             if any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
                 self.param_sync.setup_param_sync_group(rollout_workers)
         self.param_sync.update_weights()
+
+        # Offload actor model back to CPU after weight sync
+        if self.actor_worker._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_worker.actor_module)
+            get_torch_device().empty_cache()
 
     def has_critic(self):
         return self.critic_worker is not None
