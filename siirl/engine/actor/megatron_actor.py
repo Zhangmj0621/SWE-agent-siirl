@@ -1078,6 +1078,11 @@ class MegatronPPOActor:
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
+        # Set model to eval mode for forward_only to disable dropout
+        if forward_only:
+            for model_chunk in self.actor_module:
+                model_chunk.eval()
+
         losses_reduced = forward_backward_func(
             forward_step_func=forward_step,
             data_iterator=batch_generator,
@@ -1086,7 +1091,13 @@ class MegatronPPOActor:
             seq_length=1,
             micro_batch_size=1,
             forward_only=forward_only,
+            collect_non_loss_data=forward_only,  # Collect outputs without computing gradients
         )
+
+        # Restore train mode after forward_only
+        if forward_only:
+            for model_chunk in self.actor_module:
+                model_chunk.train()
 
         losses_reduced = {"output": losses_reduced}
 
@@ -1277,6 +1288,11 @@ class MegatronPPOCritic:
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.critic_module))
 
+        # Set model to eval mode for forward_only to disable dropout
+        if forward_only:
+            for model_chunk in self.critic_module:
+                model_chunk.eval()
+
         losses_reduced = forward_backward_func(
             forward_step_func=forward_step,
             data_iterator=batch_generator,
@@ -1285,7 +1301,13 @@ class MegatronPPOCritic:
             seq_length=total_seqlen,
             micro_batch_size=1,
             forward_only=forward_only,
+            collect_non_loss_data=forward_only,  # Collect outputs without computing gradients
         )
+
+        # Restore train mode after forward_only
+        if forward_only:
+            for model_chunk in self.critic_module:
+                model_chunk.train()
 
         losses_reduced = {"output": losses_reduced}
 
