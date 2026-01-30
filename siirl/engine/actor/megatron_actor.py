@@ -264,20 +264,31 @@ class ActorWorker:
         get_torch_device().empty_cache()
 
     def update_actor(self, data: TensorDict):
+        # Import memory profiler for debugging
+        from siirl.utils.memory_profiler import log_memory, memory_trace
+
+        log_memory("Before update_actor", reset_peak=True)
+
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
+            log_memory("After load_megatron_model_to_gpu")
+
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.actor_optimizer)
+            log_memory("After load_megatron_optimizer")
 
         data = data.to(get_device_name())
         micro_batch_size = self.actor_ref_config.actor.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
         data["temperature"] = NonTensorData(self.actor_ref_config.actor.temperature)
+        log_memory("Before update_policy (forward+backward)")
 
         # Time the update_policy call for MFU calculation
-        with Timer("update_policy") as timer:
+        with Timer("update_policy") as timer, memory_trace("update_policy (forward+backward)"):
             metrics = self.actor.update_policy(data=data)
         delta_time = timer.elapsed
+
+        log_memory("After update_policy")
 
         # Calculate MFU (Model FLOPs Utilization)
         # Note: flops_counter calculates FLOPs for the entire model, but with TP each GPU
@@ -308,14 +319,21 @@ class ActorWorker:
         return data
 
     def compute_log_prob(self, data: TensorDict):
+        from siirl.utils.memory_profiler import log_memory, memory_trace
+
+        log_memory("Before compute_log_prob", reset_peak=True)
+
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
+            log_memory("After load model for log_prob")
 
         data["micro_batch_size"] = NonTensorData(self.actor_ref_config.actor.ppo_micro_batch_size_per_gpu)
         data["temperature"] = NonTensorData(self.actor_ref_config.actor.temperature)
         data = data.to(get_device_id())
+        log_memory("Before forward (compute_log_prob)")
 
-        output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+        with memory_trace("compute_log_prob forward"):
+            output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
 
         data["old_log_probs"] = output
         data["entropys"] = entropys

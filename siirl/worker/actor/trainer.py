@@ -431,6 +431,14 @@ class Trainer:
     def train_step(self, batch_data):
         timers = TimerCollection()
 
+        # Memory profiling: Set SIIRL_MEMORY_PROFILE=1 to enable detailed profiling
+        enable_memory_profile = os.environ.get("SIIRL_MEMORY_PROFILE", "0") == "1"
+        if enable_memory_profile and self.global_step == 0:
+            from siirl.utils.memory_profiler import start_memory_recording
+
+            start_memory_recording()
+            logger.warning("[Memory Profiler] Recording started for step 0")
+
         with timers["step"]:
             data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
 
@@ -554,6 +562,17 @@ class Trainer:
 
             except Exception as e:
                 logger.warning(f"[Trainer rank={self.rank}] Failed to submit metrics: {e}")
+
+        # Memory profiling: Export memory snapshot after first step
+        if enable_memory_profile and self.global_step == 0 and self.rank == 0:
+            from siirl.utils.memory_profiler import log_memory, stop_memory_recording_and_export
+
+            log_memory("End of train_step 0")
+            # Save to output dir or current working directory
+            output_dir = os.environ.get("SIIRL_PROFILE_OUTPUT_DIR", os.getcwd())
+            snapshot_path = os.path.join(output_dir, f"memory_snapshot_rank{self.rank}_step{self.global_step}.pickle")
+            stop_memory_recording_and_export(snapshot_path)
+            logger.warning(f"[Memory Profiler] Snapshot exported to: {snapshot_path}")
 
         logger.success(
             f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} completed in {timers['step'].formatted}"
