@@ -1010,7 +1010,7 @@ class MegatronPPOActor:
         n_micro_batch = len(micro_batches)
         forward_backward_func = get_forward_backward_func()
 
-        def loss_func(output, data):
+        def loss_func(output, data, non_loss_data=False):
             device = output["log_probs"].device
             responses = data["responses"]
             response_length = responses.size(1)
@@ -1022,7 +1022,7 @@ class MegatronPPOActor:
                 entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
                 model_output["entropy"] = entropy
 
-            if forward_only:
+            if forward_only or non_loss_data:
                 return torch.tensor(1.0, device=device), model_output
 
             policy_loss, metrics = self.compute_ppo_loss(model_output, data)
@@ -1235,8 +1235,8 @@ class MegatronPPOCritic:
         n_micro_batch = len(micro_batches)
         forward_backward_func = get_forward_backward_func()
 
-        def loss_func(output, data):
-            if forward_only:
+        def loss_func(output, data, non_loss_data=False):
+            if forward_only or non_loss_data:
                 return torch.tensor(1.0, device=output.device), {"vpreds": output}
 
             responses = data["responses"]
