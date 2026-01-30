@@ -1,4 +1,3 @@
-import logging
 import os
 from functools import partial
 
@@ -8,6 +7,7 @@ os.environ.setdefault("NVTE_FRAMEWORK", "none")
 
 import torch  # noqa: E402
 import torch.distributed  # noqa: E402
+from loguru import logger  # noqa: E402
 from megatron.core import parallel_state as mpu  # noqa: E402
 from megatron.core.optimizer import DistributedOptimizer  # noqa: E402
 from megatron.core.pipeline_parallel import get_forward_backward_func  # noqa: E402
@@ -34,8 +34,6 @@ from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmo
 from siirl.utils.model_utils.torch_dtypes import PrecisionType  # noqa: E402
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean  # noqa: E402
 from siirl.utils.timer import Timer  # noqa: E402
-
-logger = logging.getLogger(__name__)
 
 
 class ActorWorker:
@@ -122,48 +120,36 @@ class ActorWorker:
             tf_config = bridge.config
 
             # Comprehensive logging for memory optimization debugging
-            logger.info("=" * 60)
-            logger.info("[Memory Optimization] TransformerConfig Details")
-            logger.info("=" * 60)
-            logger.info(f"  Model: {getattr(hf_config, 'model_type', 'unknown')}")
-            logger.info(f"  num_layers: {getattr(tf_config, 'num_layers', 'N/A')}")
-            logger.info(f"  hidden_size: {getattr(tf_config, 'hidden_size', 'N/A')}")
-            logger.info(f"  num_attention_heads: {getattr(tf_config, 'num_attention_heads', 'N/A')}")
-            logger.info("-" * 60)
-            logger.info("[Recompute/Activation Checkpointing Config]")
-            logger.info(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
-            logger.info(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
-            logger.info(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
-            logger.info(f"  recompute_modules: {getattr(tf_config, 'recompute_modules', 'NOT SET')}")
-            logger.info("-" * 60)
-            logger.info("[mbridge merged_config passed to set_extra_args]")
-            for k, v in merged_config.items():
-                logger.info(f"  {k}: {v}")
-            logger.info("-" * 60)
-            logger.info("[override_transformer_config from user]")
-            if override_transformer_config:
-                for k, v in dict(override_transformer_config).items():
-                    logger.info(f"  {k}: {v}")
-            else:
-                logger.info("  (empty)")
-            logger.info("=" * 60)
+            logger.warning("=" * 60)
+            logger.warning("[Memory Optimization] ActorWorker TransformerConfig")
+            logger.warning("=" * 60)
+            logger.warning(f"  Model: {getattr(hf_config, 'model_type', 'unknown')}")
+            logger.warning(f"  num_layers: {getattr(tf_config, 'num_layers', 'N/A')}")
+            logger.warning(f"  hidden_size: {getattr(tf_config, 'hidden_size', 'N/A')}")
+            logger.warning("-" * 60)
+            logger.warning("[Recompute/Activation Checkpointing Config] <<<< CRITICAL >>>>")
+            logger.warning(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
+            logger.warning(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
+            logger.warning(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
+            logger.warning("-" * 60)
+            logger.warning(f"[mbridge merged_config]: {merged_config}")
+            logger.warning("=" * 60)
 
             self.bridge = bridge
         else:
             self.bridge = None
             # Log config when not using mbridge
-            logger.info("=" * 60)
-            logger.info("[Memory Optimization] TransformerConfig (non-mbridge mode)")
-            logger.info("=" * 60)
-            logger.info(f"  Model: {getattr(hf_config, 'model_type', 'unknown')}")
-            logger.info(f"  num_layers: {getattr(tf_config, 'num_layers', 'N/A')}")
-            logger.info(f"  hidden_size: {getattr(tf_config, 'hidden_size', 'N/A')}")
-            logger.info("-" * 60)
-            logger.info("[Recompute/Activation Checkpointing Config]")
-            logger.info(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
-            logger.info(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
-            logger.info(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
-            logger.info("=" * 60)
+            logger.warning("=" * 60)
+            logger.warning("[Memory Optimization] ActorWorker (non-mbridge mode)")
+            logger.warning("=" * 60)
+            logger.warning(f"  Model: {getattr(hf_config, 'model_type', 'unknown')}")
+            logger.warning(f"  num_layers: {getattr(tf_config, 'num_layers', 'N/A')}")
+            logger.warning("-" * 60)
+            logger.warning("[Recompute Config] <<<< CRITICAL >>>>")
+            logger.warning(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
+            logger.warning(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
+            logger.warning(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
+            logger.warning("=" * 60)
 
         self.hf_config = hf_config
         self.tf_config = tf_config
@@ -451,13 +437,14 @@ class ReferenceWorker:
             bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
 
-            logger.info("=" * 60)
-            logger.info("[Memory Optimization] ReferenceWorker TransformerConfig")
-            logger.info("=" * 60)
-            logger.info(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
-            logger.info(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
-            logger.info(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
-            logger.info("=" * 60)
+            logger.warning("=" * 60)
+            logger.warning("[Memory Optimization] ReferenceWorker TransformerConfig")
+            logger.warning("=" * 60)
+            logger.warning("[Recompute Config] <<<< CRITICAL >>>>")
+            logger.warning(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
+            logger.warning(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
+            logger.warning(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
+            logger.warning("=" * 60)
 
             self.bridge = bridge
         else:
@@ -632,13 +619,14 @@ class CriticWorker:
             bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
 
-            logger.info("=" * 60)
-            logger.info("[Memory Optimization] CriticWorker TransformerConfig")
-            logger.info("=" * 60)
-            logger.info(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
-            logger.info(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
-            logger.info(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
-            logger.info("=" * 60)
+            logger.warning("=" * 60)
+            logger.warning("[Memory Optimization] CriticWorker TransformerConfig")
+            logger.warning("=" * 60)
+            logger.warning("[Recompute Config] <<<< CRITICAL >>>>")
+            logger.warning(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
+            logger.warning(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
+            logger.warning(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
+            logger.warning("=" * 60)
 
             self.bridge = bridge
         else:
