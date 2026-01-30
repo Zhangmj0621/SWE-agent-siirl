@@ -1,3 +1,4 @@
+import logging
 import os
 from functools import partial
 
@@ -5,34 +6,36 @@ from functools import partial
 # This is needed when transformer_engine is compiled for a different PyTorch version
 os.environ.setdefault("NVTE_FRAMEWORK", "none")
 
-import torch
-import torch.distributed
-from megatron.core import parallel_state as mpu
-from megatron.core.optimizer import DistributedOptimizer
-from megatron.core.pipeline_parallel import get_forward_backward_func
-from omegaconf import OmegaConf
-from tensordict import NonTensorData, TensorDict
-from torch import nn
+import torch  # noqa: E402
+import torch.distributed  # noqa: E402
+from megatron.core import parallel_state as mpu  # noqa: E402
+from megatron.core.optimizer import DistributedOptimizer  # noqa: E402
+from megatron.core.pipeline_parallel import get_forward_backward_func  # noqa: E402
+from omegaconf import OmegaConf  # noqa: E402
+from tensordict import NonTensorData, TensorDict  # noqa: E402
+from torch import nn  # noqa: E402
 
-from siirl.algorithm.kl_penalty import kl_penalty
-from siirl.algorithm.loss import agg_loss, compute_value_loss, get_policy_loss_fn
-from siirl.engine.actor.utils import append_to_dict
-from siirl.params import SiiRLArguments
-from siirl.utils.backend.device import get_device_id, get_device_name, get_torch_device
-from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
-from siirl.utils.megatron.megatron_utils import (
+from siirl.algorithm.kl_penalty import kl_penalty  # noqa: E402
+from siirl.algorithm.loss import agg_loss, compute_value_loss, get_policy_loss_fn  # noqa: E402
+from siirl.engine.actor.utils import append_to_dict  # noqa: E402
+from siirl.params import SiiRLArguments  # noqa: E402
+from siirl.utils.backend.device import get_device_id, get_device_name, get_torch_device  # noqa: E402
+from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager  # noqa: E402
+from siirl.utils.megatron.megatron_utils import (  # noqa: E402
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
 )
-from siirl.utils.megatron.pipeline_parallel import make_batch_generator
-from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
-from siirl.utils.model_utils.flops_counter import FlopsCounter
-from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
-from siirl.utils.model_utils.torch_dtypes import PrecisionType
-from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean
-from siirl.utils.timer import Timer
+from siirl.utils.megatron.pipeline_parallel import make_batch_generator  # noqa: E402
+from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits  # noqa: E402
+from siirl.utils.model_utils.flops_counter import FlopsCounter  # noqa: E402
+from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights  # noqa: E402
+from siirl.utils.model_utils.torch_dtypes import PrecisionType  # noqa: E402
+from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean  # noqa: E402
+from siirl.utils.timer import Timer  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 class ActorWorker:
@@ -106,11 +109,61 @@ class ActorWorker:
                 print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
-            bridge.set_extra_args(**override_transformer_config)
+            # Default activation recomputation config for memory optimization
+            # These can be overridden by override_transformer_config
+            recompute_defaults = {
+                "recompute_granularity": "full",
+                "recompute_method": "uniform",
+                "recompute_num_layers": 1,
+            }
+            # Merge defaults with user overrides (user overrides take precedence)
+            merged_config = {**recompute_defaults, **override_transformer_config}
+            bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
+
+            # Comprehensive logging for memory optimization debugging
+            logger.info("=" * 60)
+            logger.info("[Memory Optimization] TransformerConfig Details")
+            logger.info("=" * 60)
+            logger.info(f"  Model: {getattr(hf_config, 'model_type', 'unknown')}")
+            logger.info(f"  num_layers: {getattr(tf_config, 'num_layers', 'N/A')}")
+            logger.info(f"  hidden_size: {getattr(tf_config, 'hidden_size', 'N/A')}")
+            logger.info(f"  num_attention_heads: {getattr(tf_config, 'num_attention_heads', 'N/A')}")
+            logger.info("-" * 60)
+            logger.info("[Recompute/Activation Checkpointing Config]")
+            logger.info(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
+            logger.info(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
+            logger.info(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
+            logger.info(f"  recompute_modules: {getattr(tf_config, 'recompute_modules', 'NOT SET')}")
+            logger.info("-" * 60)
+            logger.info("[mbridge merged_config passed to set_extra_args]")
+            for k, v in merged_config.items():
+                logger.info(f"  {k}: {v}")
+            logger.info("-" * 60)
+            logger.info("[override_transformer_config from user]")
+            if override_transformer_config:
+                for k, v in dict(override_transformer_config).items():
+                    logger.info(f"  {k}: {v}")
+            else:
+                logger.info("  (empty)")
+            logger.info("=" * 60)
+
             self.bridge = bridge
         else:
             self.bridge = None
+            # Log config when not using mbridge
+            logger.info("=" * 60)
+            logger.info("[Memory Optimization] TransformerConfig (non-mbridge mode)")
+            logger.info("=" * 60)
+            logger.info(f"  Model: {getattr(hf_config, 'model_type', 'unknown')}")
+            logger.info(f"  num_layers: {getattr(tf_config, 'num_layers', 'N/A')}")
+            logger.info(f"  hidden_size: {getattr(tf_config, 'hidden_size', 'N/A')}")
+            logger.info("-" * 60)
+            logger.info("[Recompute/Activation Checkpointing Config]")
+            logger.info(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
+            logger.info(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
+            logger.info(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
+            logger.info("=" * 60)
 
         self.hf_config = hf_config
         self.tf_config = tf_config
@@ -385,11 +438,27 @@ class ReferenceWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
+                logger.warning("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
-            bridge.set_extra_args(**override_transformer_config)
+            # Default activation recomputation config for memory optimization (ReferenceWorker)
+            recompute_defaults = {
+                "recompute_granularity": "full",
+                "recompute_method": "uniform",
+                "recompute_num_layers": 1,
+            }
+            merged_config = {**recompute_defaults, **override_transformer_config}
+            bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
+
+            logger.info("=" * 60)
+            logger.info("[Memory Optimization] ReferenceWorker TransformerConfig")
+            logger.info("=" * 60)
+            logger.info(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
+            logger.info(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
+            logger.info(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
+            logger.info("=" * 60)
+
             self.bridge = bridge
         else:
             self.bridge = None
@@ -550,11 +619,27 @@ class CriticWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
+                logger.warning("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
-            bridge.set_extra_args(**override_transformer_config)
+            # Default activation recomputation config for memory optimization (CriticWorker)
+            recompute_defaults = {
+                "recompute_granularity": "full",
+                "recompute_method": "uniform",
+                "recompute_num_layers": 1,
+            }
+            merged_config = {**recompute_defaults, **override_transformer_config}
+            bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
+
+            logger.info("=" * 60)
+            logger.info("[Memory Optimization] CriticWorker TransformerConfig")
+            logger.info("=" * 60)
+            logger.info(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
+            logger.info(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
+            logger.info(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
+            logger.info("=" * 60)
+
             self.bridge = bridge
         else:
             self.bridge = None
