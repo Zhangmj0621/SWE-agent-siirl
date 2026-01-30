@@ -65,6 +65,34 @@ def global_initialize_model_parallel(config: TrainingArguments):
             expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
             nccl_communicator_config_path=None,
         )
+
+        # Set Megatron global args for recompute (activation checkpointing)
+        # This is required because Megatron's forward_backward_func reads from global args
+        try:
+            from argparse import Namespace
+
+            from megatron.training.global_vars import get_args, set_args
+
+            # Try to get existing args, or create new one
+            try:
+                megatron_args = get_args()
+                if megatron_args is None:
+                    megatron_args = Namespace()
+            except Exception:
+                megatron_args = Namespace()
+
+            # Set recompute parameters for memory optimization
+            megatron_args.recompute_granularity = "full"
+            megatron_args.recompute_method = "uniform"
+            megatron_args.recompute_num_layers = 1
+            megatron_args.distribute_saved_activations = False
+
+            set_args(megatron_args)
+            logger.warning("[Memory Optimization] Set Megatron global args for recompute")
+            logger.warning("  recompute_granularity=full, recompute_method=uniform, recompute_num_layers=1")
+        except ImportError:
+            logger.warning("[Memory Optimization] Could not import megatron.training.global_vars")
+
         set_random_seed(seed=megatron_config.seed)
 
 
