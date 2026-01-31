@@ -1093,17 +1093,26 @@ class MegatronPPOActor:
                 if debug_logprob:
                     logger.warning("[LogProb Debug] use_fused={}", use_fused)
 
+                def _fused_log_probs(logits_chunk, labels_chunk):
+                    try:
+                        import torch._dynamo as _dynamo  # type: ignore
+
+                        fused_fn = _dynamo.disable(fused_vocab_parallel_cross_entropy)
+                    except Exception:
+                        fused_fn = fused_vocab_parallel_cross_entropy
+                    return fused_fn(
+                        logits_chunk.unsqueeze(1),
+                        labels_chunk.unsqueeze(1),
+                        mpu.get_tensor_model_parallel_group(),
+                    ).squeeze(1)
+
                 for start in range(0, response_indices.numel(), chunk_size):
                     idx = response_indices[start : start + chunk_size]
                     logits_chunk = packed_logits.index_select(0, idx)
                     labels_chunk = packed_label.index_select(0, idx)
 
                     if use_fused:
-                        log_probs_chunk = -fused_vocab_parallel_cross_entropy(
-                            logits_chunk.unsqueeze(1),
-                            labels_chunk.unsqueeze(1),
-                            mpu.get_tensor_model_parallel_group(),
-                        ).squeeze(1)
+                        log_probs_chunk = -_fused_log_probs(logits_chunk, labels_chunk)
                     else:
                         log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
 
