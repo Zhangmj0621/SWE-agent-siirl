@@ -1327,26 +1327,72 @@ class MegatronPPOActor:
                         all_logits = packed_logits.index_select(0, logits_idx)
                         all_labels = packed_label.index_select(0, label_idx)
 
+                        # === CHUNKED Cross Entropy (slime-style) ===
+                        # Instead of one giant cross_entropy call, split into chunks
+                        # This reduces peak memory by avoiding large intermediate tensors
+                        chunk_size_env = os.environ.get("SIIRL_CE_CHUNK_SIZE", "").strip()
+                        ce_chunk_size = int(chunk_size_env) if chunk_size_env else 4096  # default 4096 tokens
+
                         if debug_logprob:
                             all_logits_gb = all_logits.numel() * all_logits.element_size() / (1024**3)
                             logger.warning(
-                                "[LogProb Debug] Gathered response logits: {} ({:.2f}GB)",
+                                "[LogProb Debug] CHUNKED mode: gathered_logits={} ({:.2f}GB) chunk_size={}",
                                 tuple(all_logits.shape),
                                 all_logits_gb,
+                                ce_chunk_size,
                             )
 
-                        # ONE cross_entropy call for ALL response tokens
-                        if use_fused:
-                            all_log_probs = -fused_vocab_parallel_cross_entropy(
-                                all_logits.unsqueeze(1),
-                                all_labels.unsqueeze(1),
-                                mpu.get_tensor_model_parallel_group(),
-                            ).squeeze(1)
-                        else:
-                            all_log_probs = vocab_parallel_log_probs_from_logits(all_logits, all_labels)
+                        # Chunked computation (reference: slime/slime/utils/ppo_utils.py:calculate_log_probs_and_entropy)
+                        if total_response_tokens <= ce_chunk_size:
+                            # Small enough, compute in one go
+                            if use_fused:
+                                all_log_probs = -fused_vocab_parallel_cross_entropy(
+                                    all_logits.unsqueeze(1),
+                                    all_labels.unsqueeze(1),
+                                    mpu.get_tensor_model_parallel_group(),
+                                ).squeeze(1)
+                            else:
+                                all_log_probs = vocab_parallel_log_probs_from_logits(all_logits, all_labels)
 
-                        if calculate_entropy:
-                            all_entropy = vocab_parallel_entropy(all_logits)
+                            if calculate_entropy:
+                                all_entropy = vocab_parallel_entropy(all_logits)
+                        else:
+                            # Chunked computation to reduce peak memory
+                            num_chunks = (total_response_tokens - 1) // ce_chunk_size + 1
+                            logits_chunks = all_logits.chunk(num_chunks, dim=0)
+                            labels_chunks = all_labels.chunk(num_chunks, dim=0)
+
+                            log_probs_list = []
+                            entropy_list = [] if calculate_entropy else None
+
+                            for logits_chunk, labels_chunk in zip(logits_chunks, labels_chunks, strict=False):
+                                # .clone() is critical to avoid inplace modification issues (slime pattern)
+                                if use_fused:
+                                    log_probs_chunk = -fused_vocab_parallel_cross_entropy(
+                                        logits_chunk.clone().unsqueeze(1),
+                                        labels_chunk.unsqueeze(1),
+                                        mpu.get_tensor_model_parallel_group(),
+                                    ).squeeze(1)
+                                else:
+                                    log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk.clone(), labels_chunk)
+                                log_probs_list.append(log_probs_chunk)
+
+                                if calculate_entropy:
+                                    entropy_chunk = vocab_parallel_entropy(logits_chunk.clone())
+                                    entropy_list.append(entropy_chunk)
+
+                            all_log_probs = torch.cat(log_probs_list, dim=0)
+                            if calculate_entropy:
+                                all_entropy = torch.cat(entropy_list, dim=0)
+
+                            # Release intermediate tensors
+                            del logits_chunks, labels_chunks, log_probs_list
+                            if calculate_entropy:
+                                del entropy_list
+
+                        # Release gathered tensors early
+                        del all_logits, all_labels
+                        torch.cuda.empty_cache()
 
                         # Scatter results back to [batch, resp_len] output
                         for i, start_pos, length in sample_boundaries:
