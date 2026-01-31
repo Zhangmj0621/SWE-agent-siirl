@@ -1056,11 +1056,25 @@ class MegatronPPOActor:
             responses = data["responses"]
             response_length = responses.size(1)
 
-            log_prob = output["log_probs"][:, -response_length - 1 : -1].contiguous()
+            # Check output format:
+            # - Response-only: shape is [batch, response_length], use directly
+            # - Packed/full: shape is [batch, seq_len], extract response part
+            log_probs_shape = output["log_probs"].shape
+            if log_probs_shape[-1] == response_length:
+                # Response-only format: already [batch, response_length]
+                log_prob = output["log_probs"].contiguous()
+            else:
+                # Full sequence format: [batch, seq_len], extract response part
+                log_prob = output["log_probs"][:, -response_length - 1 : -1].contiguous()
+
             model_output = {"log_probs": log_prob}
 
             if calculate_entropy:
-                entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
+                entropy_shape = output["entropy"].shape
+                if entropy_shape[-1] == response_length:
+                    entropy = output["entropy"].contiguous()
+                else:
+                    entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
                 model_output["entropy"] = entropy
 
             if forward_only or non_loss_data:
@@ -1097,18 +1111,22 @@ class MegatronPPOActor:
                 except Exception:
                     pass
 
-            def logits_processor(logits, label, label_mask, _cu_seqlens=None, _attention_mask=None):
+            def logits_processor(
+                logits, label, label_mask, _cu_seqlens=None, _attention_mask=None, _forward_only=None, _response_length=None
+            ):
                 """
-                Optimized logits processor using per-sample slice (like slime).
-                Memory optimization: uses slice instead of index_select to avoid copying.
+                Memory-optimized logits processor.
+
+                Returns response-only tensors [batch, response_length] directly, avoiding:
+                1. Large packed tensor allocation
+                2. Expensive postprocess_packed_seqs unpack operation
+
+                Like slime's approach: process per-sample, return only what's needed.
                 """
                 debug_logprob = os.environ.get("SIIRL_LOGPROB_DEBUG", "0") == "1"
                 logits.div_(temperature)
                 packed_logits = logits.squeeze(0)  # [packed_len, vocab_size]
                 packed_label = label.squeeze(0)  # [packed_len]
-
-                log_probs = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32)
-                entropy = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32) if calculate_entropy else None
 
                 use_fused = os.environ.get("SIIRL_USE_FUSED_LOGPROB", "1") == "1"
                 if use_fused:
@@ -1117,7 +1135,7 @@ class MegatronPPOActor:
                     except Exception:
                         use_fused = False
 
-                # Disable dynamo once before loop to avoid SymInt incompatibility
+                # Disable dynamo to avoid SymInt incompatibility with fused kernel
                 import torch._dynamo as _dynamo
 
                 orig_dynamo_disable = _dynamo.config.disable
@@ -1125,75 +1143,83 @@ class MegatronPPOActor:
                     _dynamo.config.disable = True
                     _dynamo.reset()
 
+                # Determine if we can use response-only optimization
+                # Requirements: boundary info + response_length known
+                use_response_only = _cu_seqlens is not None and _attention_mask is not None and _response_length is not None
+                needs_clone = _forward_only is not True  # Clone for backward safety
+
                 try:
-                    # Per-sample processing using slice (memory efficient, like slime)
-                    if _cu_seqlens is not None and _attention_mask is not None:
+                    if use_response_only:
+                        # === Response-only mode (like slime) ===
+                        # Directly output [batch, response_length], no postprocess needed
                         batch_size = _attention_mask.shape[0]
-                        seq_lens = _attention_mask.sum(dim=1).tolist()  # valid lengths per sample
+                        resp_len = _response_length
+                        seq_lens = _attention_mask.sum(dim=1).tolist()
                         cu_seqlens_cpu = _cu_seqlens.tolist()
-                        packed_mask = label_mask.squeeze(0).to(torch.bool)
+
+                        # Allocate only response-sized tensors
+                        log_probs = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32)
+                        entropy = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32) if calculate_entropy else None
 
                         if debug_logprob:
                             logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
-                            total_response_tokens = packed_mask.sum().item()
+                            output_gb = log_probs.numel() * log_probs.element_size() / (1024**3)
+                            mode = "clone" if needs_clone else "slice"
                             logger.warning(
-                                "[LogProb Debug] Per-sample mode: batch_size={} packed_logits={} size={:.2f}GB response_tokens={}",
+                                "[LogProb Debug] Response-only mode ({}): batch_size={} resp_len={} "
+                                "packed_logits={} ({:.2f}GB) -> output=({}, {}) ({:.4f}GB)",
+                                mode,
                                 batch_size,
+                                resp_len,
                                 tuple(packed_logits.shape),
                                 logits_gb,
-                                total_response_tokens,
+                                batch_size,
+                                resp_len,
+                                output_gb,
                             )
 
                         for i in range(batch_size):
                             sample_start = cu_seqlens_cpu[i]
                             sample_len = seq_lens[i]
-                            sample_end = sample_start + sample_len
 
-                            # Skip samples with too few tokens
                             if sample_len < 2:
                                 continue
 
-                            # Find response positions in this sample using label_mask
-                            sample_mask = packed_mask[sample_start:sample_end]
-                            sample_response_indices = sample_mask.nonzero(as_tuple=False).squeeze(-1)
+                            # Response tokens are at the end of each sample
+                            # label_mask marks response positions, but we know response is at [-resp_len-1:-1]
+                            # logits for token at position p are at position p-1
+                            # So logits for response at [sample_end-resp_len, sample_end) are at [sample_end-resp_len-1, sample_end-1)
+                            sample_end = sample_start + sample_len
+                            logits_start = sample_end - resp_len - 1
+                            logits_end = sample_end - 1
+                            label_start = sample_end - resp_len
+                            label_end = sample_end
 
-                            if sample_response_indices.numel() == 0:
-                                continue
+                            # Slice logits and labels (zero-copy view)
+                            logits_chunk = packed_logits[logits_start:logits_end]  # [resp_len, vocab]
+                            labels_chunk = packed_label[label_start:label_end]  # [resp_len]
 
-                            # Get response range within this sample (local indices)
-                            local_start = sample_response_indices[0].item()
-                            local_end = sample_response_indices[-1].item() + 1
-
-                            # Ensure we have at least 1 prompt token for prediction
-                            if local_start == 0:
-                                local_start = 1
-                                if local_end <= local_start:
-                                    continue
-
-                            # Convert to global packed sequence positions
-                            resp_start = sample_start + local_start
-                            resp_end = sample_start + local_end
-
-                            # Use slice (shares memory, no copy!) instead of index_select
-                            # logits for predicting tokens at positions [resp_start, resp_end)
-                            # are at positions [resp_start-1, resp_end-1)
-                            logits_chunk = packed_logits[resp_start - 1 : resp_end - 1]  # [resp_len, vocab]
-                            labels_chunk = packed_label[resp_start:resp_end]  # [resp_len]
+                            # Clone for backward safety when training
+                            if needs_clone:
+                                logits_chunk = logits_chunk.clone()
 
                             if debug_logprob and i == 0:
                                 logger.warning(
-                                    "[LogProb Debug] Sample 0: sample_start={} sample_len={} local_start={} local_end={} "
-                                    "resp_start={} resp_end={} logits_chunk={} labels_chunk={}",
+                                    "[LogProb Debug] Sample 0: sample_start={} sample_len={} sample_end={} "
+                                    "logits_range=[{},{}) labels_range=[{},{}) shapes=({}, {}) cloned={}",
                                     sample_start,
                                     sample_len,
-                                    local_start,
-                                    local_end,
-                                    resp_start,
-                                    resp_end,
+                                    sample_end,
+                                    logits_start,
+                                    logits_end,
+                                    label_start,
+                                    label_end,
                                     logits_chunk.shape,
                                     labels_chunk.shape,
+                                    needs_clone,
                                 )
 
+                            # Compute log probs
                             if use_fused:
                                 log_probs_chunk = -fused_vocab_parallel_cross_entropy(
                                     logits_chunk.unsqueeze(1),
@@ -1203,13 +1229,30 @@ class MegatronPPOActor:
                             else:
                                 log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
 
-                            log_probs[resp_start:resp_end] = log_probs_chunk.to(torch.float32)
+                            # Write directly to [batch, resp_len] output
+                            log_probs[i, :] = log_probs_chunk.to(torch.float32)
 
                             if calculate_entropy:
                                 entropy_chunk = vocab_parallel_entropy(logits_chunk)
-                                entropy[resp_start:resp_end] = entropy_chunk.to(torch.float32)
+                                entropy[i, :] = entropy_chunk.to(torch.float32)
+
+                        if debug_logprob:
+                            logger.warning(
+                                "[LogProb Debug] Response-only output: log_probs={} entropy={}",
+                                tuple(log_probs.shape),
+                                tuple(entropy.shape) if entropy is not None else None,
+                            )
+
+                        ret = {"log_probs": log_probs, "_response_only": True}
+                        if calculate_entropy:
+                            ret["entropy"] = entropy
+                        return ret
                     else:
-                        # Fallback: original chunked processing with index_select
+                        # === Fallback: packed tensor mode ===
+                        # Used when boundary info not available
+                        log_probs = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32)
+                        entropy = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32) if calculate_entropy else None
+
                         packed_mask = label_mask.squeeze(0).to(torch.bool)
                         response_indices = packed_mask.nonzero(as_tuple=False).squeeze(-1)
                         chunk_size_env = os.environ.get("SIIRL_LOGPROB_CHUNK_SIZE", "").strip()
@@ -1218,7 +1261,7 @@ class MegatronPPOActor:
                         if debug_logprob:
                             logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
                             logger.warning(
-                                "[LogProb Debug] Fallback mode: packed_logits={} size={:.2f}GB response_tokens={} chunk_size={}",
+                                "[LogProb Debug] Packed mode (fallback): packed_logits={} ({:.2f}GB) " "response_tokens={} chunk_size={}",
                                 tuple(packed_logits.shape),
                                 logits_gb,
                                 response_indices.numel(),
@@ -1244,22 +1287,13 @@ class MegatronPPOActor:
                             if calculate_entropy:
                                 entropy_chunk = vocab_parallel_entropy(logits_chunk)
                                 entropy.index_copy_(0, idx, entropy_chunk.to(torch.float32))
+
+                        ret = {"log_probs": log_probs.unsqueeze(0), "_response_only": False}
+                        if calculate_entropy:
+                            ret["entropy"] = entropy.unsqueeze(0)
+                        return ret
                 finally:
                     _dynamo.config.disable = orig_dynamo_disable
-
-                if debug_logprob:
-                    log_probs_gb = log_probs.numel() * log_probs.element_size() / (1024**3)
-                    logger.warning(
-                        "[LogProb Debug] log_probs shape={} dtype={} size_gb={:.2f}",
-                        tuple(log_probs.shape),
-                        log_probs.dtype,
-                        log_probs_gb,
-                    )
-
-                ret = {"log_probs": log_probs.unsqueeze(0)}
-                if calculate_entropy:
-                    ret["entropy"] = entropy.unsqueeze(0)
-                return ret
 
             try:
                 import torch._dynamo as _dynamo  # type: ignore
@@ -1268,7 +1302,12 @@ class MegatronPPOActor:
             except Exception:
                 pass
 
-            logits_processor_args = {"label": label, "label_mask": label_mask}
+            logits_processor_args = {
+                "label": label,
+                "label_mask": label_mask,
+                "_forward_only": forward_only,
+                "_response_length": response_length,
+            }
             output = forward_fn(
                 model,
                 input_ids,

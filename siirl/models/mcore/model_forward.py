@@ -96,10 +96,14 @@ def gptmodel_forward(
             _log_tensor("output_orig (logits)", output_orig)
 
         if post_process and logits_processor is not None:
-            args = {k: preprocess_packed_seqs(v, attention_mask, pre_process=True)[0] for k, v in logits_processor_args.items()}
+            # Separate special args (prefixed with _) from regular args that need packing
+            regular_args = {k: v for k, v in logits_processor_args.items() if not k.startswith("_")}
+            special_args = {k: v for k, v in logits_processor_args.items() if k.startswith("_")}
+            args = {k: preprocess_packed_seqs(v, attention_mask, pre_process=True)[0] for k, v in regular_args.items()}
             # Pass boundary info for per-sample processing optimization
             args["_cu_seqlens"] = packed_seq_params.cu_seqlens_q_padded
             args["_attention_mask"] = attention_mask
+            args.update(special_args)  # Add special args without preprocessing
 
             if debug:
                 _log_memory("Before logits_processor()")
@@ -109,7 +113,8 @@ def gptmodel_forward(
             if debug:
                 _log_memory("After logits_processor() - before del output_orig")
                 for k, v in output_dict.items():
-                    _log_tensor(f"output_dict['{k}']", v)
+                    if isinstance(v, torch.Tensor):
+                        _log_tensor(f"output_dict['{k}']", v)
 
             # Release output_orig immediately to free memory
             del output_orig
@@ -118,21 +123,36 @@ def gptmodel_forward(
             if debug:
                 _log_memory("After del output_orig + empty_cache")
 
-            output = {}
-            for k, v in output_dict.items():
+            # Check if logits_processor returned response-only format
+            # If so, skip postprocess_packed_seqs (data is already [batch, response_len])
+            is_response_only = output_dict.pop("_response_only", False)
+
+            if is_response_only:
+                # Response-only mode: output is already [batch, response_len], no unpack needed
+                output = {k: v for k, v in output_dict.items() if isinstance(v, torch.Tensor)}
                 if debug:
-                    _log_memory(f"Before postprocess_packed_seqs for '{k}'")
-                output[k] = postprocess_packed_seqs(
-                    v,
-                    packed_seq_params,
-                    attention_mask,
-                    batch_size,
-                    seq_len,
-                    post_process=post_process,
-                )
-                if debug:
-                    _log_tensor(f"output['{k}'] (after postprocess)", output[k])
-                    _log_memory(f"After postprocess_packed_seqs for '{k}'")
+                    logger.warning("[MemDebug] Response-only mode: skipping postprocess_packed_seqs")
+                    for k, v in output.items():
+                        _log_tensor(f"output['{k}'] (response-only)", v)
+            else:
+                # Packed mode: need to unpack to [batch, seq_len]
+                output = {}
+                for k, v in output_dict.items():
+                    if not isinstance(v, torch.Tensor):
+                        continue
+                    if debug:
+                        _log_memory(f"Before postprocess_packed_seqs for '{k}'")
+                    output[k] = postprocess_packed_seqs(
+                        v,
+                        packed_seq_params,
+                        attention_mask,
+                        batch_size,
+                        seq_len,
+                        post_process=post_process,
+                    )
+                    if debug:
+                        _log_tensor(f"output['{k}'] (after postprocess)", output[k])
+                        _log_memory(f"After postprocess_packed_seqs for '{k}'")
 
             # Release output_dict to free memory
             del output_dict
