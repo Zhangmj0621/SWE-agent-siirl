@@ -28,7 +28,6 @@ from siirl.utils.megatron.megatron_utils import (  # noqa: E402
     offload_megatron_optimizer,
 )
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator  # noqa: E402
-from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits  # noqa: E402
 from siirl.utils.model_utils.flops_counter import FlopsCounter  # noqa: E402
 from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights  # noqa: E402
 from siirl.utils.model_utils.torch_dtypes import PrecisionType  # noqa: E402
@@ -1114,409 +1113,76 @@ class MegatronPPOActor:
             def logits_processor(
                 logits, label, label_mask, _cu_seqlens=None, _attention_mask=None, _forward_only=None, _response_length=None
             ):
-                """
-                Memory-optimized logits processor.
+                """Memory-optimized logits processor.
 
-                Returns response-only tensors [batch, response_length] directly, avoiding:
-                1. Large packed tensor allocation
-                2. Expensive postprocess_packed_seqs unpack operation
+                Computes log probabilities (and optionally entropy) from model logits
+                using memory-efficient strategies:
+                - SLICE mode: Zero-copy tensor views for inference
+                - BATCHED mode: Chunked cross entropy with gradient checkpointing for training
+                - Fallback mode: Standard processing when boundary info unavailable
 
-                Like slime's approach: process per-sample, return only what's needed.
+                Returns response-only tensors [batch, response_length] to minimize memory.
                 """
-                debug_logprob = os.environ.get("SIIRL_LOGPROB_DEBUG", "0") == "1"
+                from siirl.utils.logits_processing import (
+                    LogitsProcessorConfig,
+                    process_batched_mode,
+                    process_fallback_mode,
+                    process_slice_mode,
+                )
+
+                # Apply temperature scaling
                 logits.div_(temperature)
                 packed_logits = logits.squeeze(0)  # [packed_len, vocab_size]
                 packed_label = label.squeeze(0)  # [packed_len]
 
-                use_fused = os.environ.get("SIIRL_USE_FUSED_LOGPROB", "1") == "1"
-                if use_fused:
-                    try:
-                        from megatron.core.fusions.fused_cross_entropy import fused_vocab_parallel_cross_entropy
-                    except Exception:
-                        use_fused = False
+                # Load configuration from environment
+                config = LogitsProcessorConfig.from_env()
 
-                # Disable dynamo to avoid SymInt incompatibility with fused kernel
+                # Disable dynamo for fused kernel compatibility
                 import torch._dynamo as _dynamo
 
                 orig_dynamo_disable = _dynamo.config.disable
-                if use_fused:
+                if config.use_fused:
                     _dynamo.config.disable = True
                     _dynamo.reset()
 
-                # Determine if we can use response-only optimization
-                # Requirements: boundary info + response_length known
-                use_response_only = _cu_seqlens is not None and _attention_mask is not None and _response_length is not None
-
                 try:
-                    if use_response_only and _forward_only:
-                        # === Per-sample SLICE mode (forward-only, most memory efficient) ===
-                        # Use tensor slicing (views) to avoid copying large logits
-                        # No gradient needed, so views are safe
-                        batch_size = _attention_mask.shape[0]
-                        resp_len = _response_length
-                        seq_lens = _attention_mask.sum(dim=1).tolist()
-                        cu_seqlens_cpu = _cu_seqlens.tolist()
-                        packed_mask = label_mask.squeeze(0).to(torch.bool)
+                    # Check if we can use response-only optimization
+                    has_boundary_info = _cu_seqlens is not None and _attention_mask is not None and _response_length is not None
 
-                        # Allocate output tensors
-                        log_probs = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32)
-                        entropy = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32) if calculate_entropy else None
-
-                        if debug_logprob:
-                            logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
-                            output_gb = log_probs.numel() * log_probs.element_size() / (1024**3)
-                            logger.warning(
-                                "[LogProb Debug] SLICE mode (forward-only): batch_size={} resp_len={} "
-                                "packed_logits={} ({:.2f}GB) -> output=({}, {}) ({:.4f}GB)",
-                                batch_size,
-                                resp_len,
-                                tuple(packed_logits.shape),
-                                logits_gb,
-                                batch_size,
-                                resp_len,
-                                output_gb,
-                            )
-
-                        # Process each sample using tensor slicing (views, zero-copy)
-                        for i in range(batch_size):
-                            sample_start = cu_seqlens_cpu[i]
-                            sample_len = seq_lens[i]
-
-                            if sample_len < 2:
-                                continue
-
-                            sample_end = sample_start + sample_len
-                            sample_mask = packed_mask[sample_start:sample_end]
-                            sample_resp_indices = sample_mask.nonzero(as_tuple=False).squeeze(-1)
-
-                            if sample_resp_indices.numel() == 0:
-                                continue
-
-                            local_start = sample_resp_indices[0].item()
-                            local_end = sample_resp_indices[-1].item() + 1
-
-                            if local_start == 0:
-                                local_start = 1
-                                if local_end <= local_start:
-                                    continue
-
-                            actual_resp_len = local_end - local_start
-
-                            # Use SLICING (view) instead of index_select (copy)
-                            logits_start = sample_start + local_start - 1
-                            logits_end = logits_start + actual_resp_len
-                            label_start = sample_start + local_start
-                            label_end = label_start + actual_resp_len
-
-                            # Slice creates a view, NOT a copy - this is the key memory optimization
-                            logits_chunk = packed_logits[logits_start:logits_end]
-                            labels_chunk = packed_label[label_start:label_end]
-
-                            # Compute log_probs for this sample
-                            if use_fused:
-                                log_probs_chunk = -fused_vocab_parallel_cross_entropy(
-                                    logits_chunk.unsqueeze(1),
-                                    labels_chunk.unsqueeze(1),
-                                    mpu.get_tensor_model_parallel_group(),
-                                ).squeeze(1)
-                            else:
-                                log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
-
-                            # Compute entropy if needed
-                            entropy_chunk = None
-                            if calculate_entropy:
-                                entropy_chunk = vocab_parallel_entropy(logits_chunk)
-
-                            # Write to output (right-aligned)
-                            pad_len = resp_len - actual_resp_len
-                            log_probs[i, pad_len:] = log_probs_chunk.to(torch.float32)
-                            if calculate_entropy and entropy_chunk is not None:
-                                entropy[i, pad_len:] = entropy_chunk.to(torch.float32)
-
-                        if debug_logprob:
-                            logger.warning(
-                                "[LogProb Debug] SLICE output: log_probs={} entropy={}",
-                                tuple(log_probs.shape),
-                                tuple(entropy.shape) if entropy is not None else None,
-                            )
-
-                        ret = {"log_probs": log_probs, "_response_only": True}
-                        if calculate_entropy:
-                            ret["entropy"] = entropy
-                        return ret
-
-                    elif use_response_only:
-                        # === BATCHED mode (training with gradients) ===
-                        # Use index_select to gather all response tokens, then ONE cross_entropy call
-                        # index_select creates copies which is necessary for gradient computation
-                        batch_size = _attention_mask.shape[0]
-                        resp_len = _response_length
-                        seq_lens = _attention_mask.sum(dim=1).tolist()
-                        cu_seqlens_cpu = _cu_seqlens.tolist()
-                        packed_mask = label_mask.squeeze(0).to(torch.bool)
-
-                        # Collect ALL response token indices across all samples
-                        all_logits_indices = []
-                        all_label_indices = []
-                        sample_boundaries = []  # (sample_idx, start_in_output, length)
-
-                        output_pos = 0
-                        for i in range(batch_size):
-                            sample_start = cu_seqlens_cpu[i]
-                            sample_len = seq_lens[i]
-
-                            if sample_len < 2:
-                                sample_boundaries.append((i, output_pos, 0))
-                                continue
-
-                            sample_end = sample_start + sample_len
-                            sample_mask = packed_mask[sample_start:sample_end]
-                            sample_resp_indices = sample_mask.nonzero(as_tuple=False).squeeze(-1)
-
-                            if sample_resp_indices.numel() == 0:
-                                sample_boundaries.append((i, output_pos, 0))
-                                continue
-
-                            local_start = sample_resp_indices[0].item()
-                            local_end = sample_resp_indices[-1].item() + 1
-
-                            if local_start == 0:
-                                local_start = 1
-                                if local_end <= local_start:
-                                    sample_boundaries.append((i, output_pos, 0))
-                                    continue
-
-                            actual_resp_len = local_end - local_start
-                            logits_start = sample_start + local_start - 1
-                            label_start = sample_start + local_start
-
-                            for j in range(actual_resp_len):
-                                all_logits_indices.append(logits_start + j)
-                                all_label_indices.append(label_start + j)
-
-                            sample_boundaries.append((i, output_pos, actual_resp_len))
-                            output_pos += actual_resp_len
-
-                        total_response_tokens = len(all_logits_indices)
-
-                        if debug_logprob:
-                            logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
-                            logger.warning(
-                                "[LogProb Debug] BATCHED mode (training): batch_size={} resp_len={} "
-                                "packed_logits={} ({:.2f}GB) total_response_tokens={}",
-                                batch_size,
-                                resp_len,
-                                tuple(packed_logits.shape),
-                                logits_gb,
-                                total_response_tokens,
-                            )
-
-                        # Allocate output tensors
-                        log_probs = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32)
-                        entropy = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32) if calculate_entropy else None
-
-                        if total_response_tokens == 0:
-                            ret = {"log_probs": log_probs, "_response_only": True}
-                            if calculate_entropy:
-                                ret["entropy"] = entropy
-                            return ret
-
-                        # === CHUNKED Cross Entropy with Gradient Checkpointing ===
-                        # KEY: Use gradient checkpointing to avoid keeping all logits chunks in memory
-                        # This trades compute for memory: during backward, logits are recomputed per-chunk
-                        chunk_size_env = os.environ.get("SIIRL_CE_CHUNK_SIZE", "").strip()
-                        ce_chunk_size = int(chunk_size_env) if chunk_size_env else 4096  # default 4096 tokens
-
-                        # Enable gradient checkpointing by default for training mode
-                        use_checkpoint = os.environ.get("SIIRL_USE_CHECKPOINT", "1") == "1"
-
-                        # Create index tensors
-                        logits_idx = torch.tensor(all_logits_indices, device=packed_logits.device, dtype=torch.long)
-                        label_idx = torch.tensor(all_label_indices, device=packed_logits.device, dtype=torch.long)
-
-                        if debug_logprob:
-                            # Estimate gathered logits size without actually creating it
-                            estimated_gb = total_response_tokens * packed_logits.shape[-1] * packed_logits.element_size() / (1024**3)
-                            logger.warning(
-                                "[LogProb Debug] CHUNKED mode: total_response_tokens={} vocab_size={} "
-                                "estimated_gathered_logits={:.2f}GB chunk_size={} use_checkpoint={}",
-                                total_response_tokens,
-                                packed_logits.shape[-1],
-                                estimated_gb,
-                                ce_chunk_size,
-                                use_checkpoint,
-                            )
-
-                        # Define checkpointed function for computing log_probs (and entropy) per chunk
-                        # This function will be recomputed during backward pass, avoiding memory retention
-                        def _checkpoint_chunk_fn(packed_logits_in, packed_label_in, logits_idx_chunk, label_idx_chunk):
-                            """Compute log_probs for a single chunk. Called via gradient checkpoint."""
-                            logits_chunk = packed_logits_in.index_select(0, logits_idx_chunk)
-                            labels_chunk = packed_label_in.index_select(0, label_idx_chunk)
-
-                            if use_fused:
-                                log_probs_chunk = -fused_vocab_parallel_cross_entropy(
-                                    logits_chunk.unsqueeze(1),
-                                    labels_chunk.unsqueeze(1),
-                                    mpu.get_tensor_model_parallel_group(),
-                                ).squeeze(1)
-                            else:
-                                log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
-
-                            if calculate_entropy:
-                                entropy_chunk = vocab_parallel_entropy(logits_chunk)
-                                return log_probs_chunk, entropy_chunk
-                            return log_probs_chunk
-
-                        # Chunked computation: gather and process per-chunk to minimize peak memory
-                        if total_response_tokens <= ce_chunk_size:
-                            # Small enough, compute in one go (no checkpoint needed)
-                            all_logits = packed_logits.index_select(0, logits_idx)
-                            all_labels = packed_label.index_select(0, label_idx)
-
-                            if use_fused:
-                                all_log_probs = -fused_vocab_parallel_cross_entropy(
-                                    all_logits.unsqueeze(1),
-                                    all_labels.unsqueeze(1),
-                                    mpu.get_tensor_model_parallel_group(),
-                                ).squeeze(1)
-                            else:
-                                all_log_probs = vocab_parallel_log_probs_from_logits(all_logits, all_labels)
-
-                            if calculate_entropy:
-                                all_entropy = vocab_parallel_entropy(all_logits)
-
-                            del all_logits, all_labels
-                        else:
-                            # Chunked computation with gradient checkpointing
-                            # Peak memory = packed_logits + ONE chunk instead of packed_logits + ALL chunks
-                            num_chunks = (total_response_tokens - 1) // ce_chunk_size + 1
-                            logits_idx_chunks = logits_idx.chunk(num_chunks, dim=0)
-                            label_idx_chunks = label_idx.chunk(num_chunks, dim=0)
-
-                            log_probs_list = []
-                            entropy_list = [] if calculate_entropy else None
-
-                            if use_checkpoint:
-                                # Use gradient checkpointing: recompute logits during backward
-                                # This avoids keeping all logits_chunks in memory for gradient computation
-                                from torch.utils.checkpoint import checkpoint as torch_checkpoint
-
-                                for logits_idx_chunk, label_idx_chunk in zip(logits_idx_chunks, label_idx_chunks, strict=False):
-                                    result = torch_checkpoint(
-                                        _checkpoint_chunk_fn,
-                                        packed_logits,
-                                        packed_label,
-                                        logits_idx_chunk,
-                                        label_idx_chunk,
-                                        use_reentrant=False,
-                                    )
-                                    if calculate_entropy:
-                                        log_probs_list.append(result[0])
-                                        entropy_list.append(result[1])
-                                    else:
-                                        log_probs_list.append(result)
-                            else:
-                                # Original mode without checkpointing (faster but more memory)
-                                for logits_idx_chunk, label_idx_chunk in zip(logits_idx_chunks, label_idx_chunks, strict=False):
-                                    logits_chunk = packed_logits.index_select(0, logits_idx_chunk)
-                                    labels_chunk = packed_label.index_select(0, label_idx_chunk)
-
-                                    if use_fused:
-                                        log_probs_chunk = -fused_vocab_parallel_cross_entropy(
-                                            logits_chunk.unsqueeze(1),
-                                            labels_chunk.unsqueeze(1),
-                                            mpu.get_tensor_model_parallel_group(),
-                                        ).squeeze(1)
-                                    else:
-                                        log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
-                                    log_probs_list.append(log_probs_chunk)
-
-                                    if calculate_entropy:
-                                        entropy_chunk = vocab_parallel_entropy(logits_chunk)
-                                        entropy_list.append(entropy_chunk)
-
-                                    # Release chunk tensors immediately (may not help due to autograd graph)
-                                    del logits_chunk, labels_chunk
-
-                            all_log_probs = torch.cat(log_probs_list, dim=0)
-                            if calculate_entropy:
-                                all_entropy = torch.cat(entropy_list, dim=0)
-
-                            # Release intermediate tensors
-                            del logits_idx_chunks, label_idx_chunks, log_probs_list
-                            if calculate_entropy:
-                                del entropy_list
-
-                        # Release index tensors
-                        del logits_idx, label_idx
-                        torch.cuda.empty_cache()
-
-                        # Scatter results back to [batch, resp_len] output
-                        for i, start_pos, length in sample_boundaries:
-                            if length == 0:
-                                continue
-                            pad_len = resp_len - length
-                            log_probs[i, pad_len:] = all_log_probs[start_pos : start_pos + length].to(torch.float32)
-                            if calculate_entropy:
-                                entropy[i, pad_len:] = all_entropy[start_pos : start_pos + length].to(torch.float32)
-
-                        if debug_logprob:
-                            logger.warning(
-                                "[LogProb Debug] BATCHED output: log_probs={} entropy={}",
-                                tuple(log_probs.shape),
-                                tuple(entropy.shape) if entropy is not None else None,
-                            )
-
-                        ret = {"log_probs": log_probs, "_response_only": True}
-                        if calculate_entropy:
-                            ret["entropy"] = entropy
-                        return ret
+                    if has_boundary_info and _forward_only:
+                        # SLICE mode: Zero-copy tensor views (inference only)
+                        return process_slice_mode(
+                            packed_logits=packed_logits,
+                            packed_label=packed_label,
+                            attention_mask=_attention_mask,
+                            cu_seqlens=_cu_seqlens,
+                            label_mask=label_mask,
+                            response_length=_response_length,
+                            calculate_entropy=calculate_entropy,
+                            config=config,
+                        )
+                    elif has_boundary_info:
+                        # BATCHED mode: Chunked cross entropy with gradient checkpointing
+                        return process_batched_mode(
+                            packed_logits=packed_logits,
+                            packed_label=packed_label,
+                            attention_mask=_attention_mask,
+                            cu_seqlens=_cu_seqlens,
+                            label_mask=label_mask,
+                            response_length=_response_length,
+                            calculate_entropy=calculate_entropy,
+                            config=config,
+                        )
                     else:
-                        # === Fallback: packed tensor mode ===
-                        # Used when boundary info not available
-                        log_probs = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32)
-                        entropy = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32) if calculate_entropy else None
-
-                        packed_mask = label_mask.squeeze(0).to(torch.bool)
-                        response_indices = packed_mask.nonzero(as_tuple=False).squeeze(-1)
-                        chunk_size_env = os.environ.get("SIIRL_LOGPROB_CHUNK_SIZE", "").strip()
-                        chunk_size = int(chunk_size_env) if chunk_size_env else response_indices.numel()
-
-                        if debug_logprob:
-                            logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
-                            logger.warning(
-                                "[LogProb Debug] Packed mode (fallback): packed_logits={} ({:.2f}GB) " "response_tokens={} chunk_size={}",
-                                tuple(packed_logits.shape),
-                                logits_gb,
-                                response_indices.numel(),
-                                chunk_size,
-                            )
-
-                        for start in range(0, response_indices.numel(), chunk_size):
-                            idx = response_indices[start : start + chunk_size]
-                            logits_chunk = packed_logits.index_select(0, idx)
-                            labels_chunk = packed_label.index_select(0, idx)
-
-                            if use_fused:
-                                log_probs_chunk = -fused_vocab_parallel_cross_entropy(
-                                    logits_chunk.unsqueeze(1),
-                                    labels_chunk.unsqueeze(1),
-                                    mpu.get_tensor_model_parallel_group(),
-                                ).squeeze(1)
-                            else:
-                                log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
-
-                            log_probs.index_copy_(0, idx, log_probs_chunk.to(torch.float32))
-
-                            if calculate_entropy:
-                                entropy_chunk = vocab_parallel_entropy(logits_chunk)
-                                entropy.index_copy_(0, idx, entropy_chunk.to(torch.float32))
-
-                        ret = {"log_probs": log_probs.unsqueeze(0), "_response_only": False}
-                        if calculate_entropy:
-                            ret["entropy"] = entropy.unsqueeze(0)
-                        return ret
+                        # Fallback mode: Standard processing
+                        return process_fallback_mode(
+                            packed_logits=packed_logits,
+                            packed_label=packed_label,
+                            label_mask=label_mask,
+                            calculate_entropy=calculate_entropy,
+                            config=config,
+                        )
                 finally:
                     _dynamo.config.disable = orig_dynamo_disable
 

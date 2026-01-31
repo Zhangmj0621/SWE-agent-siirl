@@ -1,14 +1,19 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
 """GPU Memory Profiler for debugging memory usage during training.
 
-Usage:
-    1. Call start_memory_recording() at the beginning of training
-    2. Call stop_memory_recording_and_export("memory_snapshot.pickle") after training
-    3. Analyze using PyTorch Memory Visualizer: https://pytorch.org/memory_viz
+Environment variables:
+    SIIRL_MEMORY_DEBUG=1     Enable detailed memory logging
+    SIIRL_MEMORY_PROFILE=1   Export memory snapshots
 
-    Or use PyTorch Profiler:
-    1. Use profile_with_memory() context manager in training loop
-    2. View generated Chrome trace files
+Usage:
+    from siirl.utils.memory_profiler import log_memory, memory_trace
+
+    log_memory("Before forward", reset_peak=True)
+    with memory_trace("compute_log_prob"):
+        output = model(...)
+
+    # Or analyze a snapshot file:
+    python -m siirl.utils.memory_profiler snapshot.pickle
 """
 
 import gc
@@ -19,6 +24,15 @@ from datetime import datetime
 
 import torch
 from loguru import logger
+
+__all__ = [
+    "start_memory_recording",
+    "stop_memory_recording_and_export",
+    "get_memory_stats",
+    "log_memory",
+    "memory_trace",
+    "profile_with_memory",
+]
 
 # ============================================================================
 # Memory Recording (Detailed memory allocation tracking)
@@ -33,14 +47,14 @@ def start_memory_recording():
     Note: Has performance overhead, only use during profiling.
     """
     if not torch.cuda.is_available():
-        logger.warning("CUDA not available, skipping memory recording")
+        logger.debug("CUDA not available, skipping memory recording")
         return
 
     torch.cuda.memory._record_memory_history(
         max_entries=100000,
         context="all",  # Record both Python and C++ call stacks
     )
-    logger.warning("[Memory Profiler] Started memory recording with full stack traces")
+    logger.info("[Memory Profiler] Started memory recording with full stack traces")
 
 
 def stop_memory_recording_and_export(output_path: str = "memory_snapshot.pickle"):
@@ -64,8 +78,8 @@ def stop_memory_recording_and_export(output_path: str = "memory_snapshot.pickle"
 
             with open(output_path, "wb") as f:
                 pickle.dump(snapshot, f)
-            logger.warning(f"[Memory Profiler] Exported memory snapshot to {output_path}")
-            logger.warning("[Memory Profiler] Analyze at: https://pytorch.org/memory_viz")
+            logger.info(f"[Memory Profiler] Exported snapshot to {output_path}")
+            logger.info("[Memory Profiler] Analyze at: https://pytorch.org/memory_viz")
         torch.cuda.memory._record_memory_history(enabled=None)
     except Exception as e:
         logger.error(f"[Memory Profiler] Failed to export snapshot: {e}")
@@ -112,10 +126,10 @@ def profile_with_memory(output_dir: str = "./profiler_output", wait: int = 1, wa
     # Export Chrome trace
     chrome_trace_path = os.path.join(output_dir, f"trace_{timestamp}.json")
     prof.export_chrome_trace(chrome_trace_path)
-    logger.warning(f"[Memory Profiler] Exported Chrome trace to {chrome_trace_path}")
+    logger.info(f"[Memory Profiler] Exported Chrome trace to {chrome_trace_path}")
 
     # Print top memory consuming operations
-    logger.warning("[Memory Profiler] Top 10 memory consuming operations:")
+    logger.info("[Memory Profiler] Top 10 memory consuming operations:")
     print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
 
 
@@ -143,15 +157,13 @@ def log_memory(tag: str = "", reset_peak: bool = False):
         return
 
     stats = get_memory_stats()
-    logger.warning(f"[Memory Profile] {tag}")
-    logger.warning(f"  Allocated: {stats['allocated_gb']:.2f} GB")
-    logger.warning(f"  Reserved:  {stats['reserved_gb']:.2f} GB")
-    logger.warning(f"  Peak Allocated: {stats['max_allocated_gb']:.2f} GB")
-    logger.warning(f"  Peak Reserved:  {stats['max_reserved_gb']:.2f} GB")
+    logger.info(f"[Memory] {tag}")
+    logger.info(f"  Allocated: {stats['allocated_gb']:.2f} GB | Reserved: {stats['reserved_gb']:.2f} GB")
+    logger.info(f"  Peak Allocated: {stats['max_allocated_gb']:.2f} GB | Peak Reserved: {stats['max_reserved_gb']:.2f} GB")
 
     if reset_peak:
         torch.cuda.reset_peak_memory_stats()
-        logger.warning("  (Peak stats reset)")
+        logger.debug("  (Peak stats reset)")
 
 
 @contextmanager
@@ -166,23 +178,20 @@ def memory_trace(tag: str):
     torch.cuda.empty_cache()
 
     start_allocated = torch.cuda.memory_allocated()
-    start_reserved = torch.cuda.memory_reserved()
     torch.cuda.reset_peak_memory_stats()
 
     yield
 
     torch.cuda.synchronize()
     end_allocated = torch.cuda.memory_allocated()
-    end_reserved = torch.cuda.memory_reserved()
     peak_allocated = torch.cuda.max_memory_allocated()
-    peak_reserved = torch.cuda.max_memory_reserved()
 
-    logger.warning(f"[Memory Trace] {tag}")
-    logger.warning(f"  Start:  {start_allocated / (1024**3):.2f} GB allocated, " f"{start_reserved / (1024**3):.2f} GB reserved")
-    logger.warning(f"  End:    {end_allocated / (1024**3):.2f} GB allocated, " f"{end_reserved / (1024**3):.2f} GB reserved")
-    logger.warning(f"  Peak:   {peak_allocated / (1024**3):.2f} GB allocated, " f"{peak_reserved / (1024**3):.2f} GB reserved")
-    logger.warning(f"  Delta:  {(end_allocated - start_allocated) / (1024**3):+.2f} GB allocated")
-    logger.warning(f"  Peak Delta: {(peak_allocated - start_allocated) / (1024**3):+.2f} GB from start")
+    delta_alloc = (end_allocated - start_allocated) / (1024**3)
+    peak_delta = (peak_allocated - start_allocated) / (1024**3)
+
+    logger.info(f"[Memory Trace] {tag}")
+    logger.info(f"  Start: {start_allocated / (1024**3):.2f}GB -> End: {end_allocated / (1024**3):.2f}GB (delta: {delta_alloc:+.2f}GB)")
+    logger.info(f"  Peak: {peak_allocated / (1024**3):.2f}GB (peak delta: {peak_delta:+.2f}GB from start)")
 
 
 def get_tensor_memory_breakdown() -> dict:
@@ -219,7 +228,7 @@ def get_tensor_memory_breakdown() -> dict:
             "top_10": tensors[:10],
         }
     except Exception as e:
-        logger.warning(f"Failed to get tensor breakdown: {e}")
+        logger.debug(f"Failed to get tensor breakdown: {e}")
         return {}
 
 
@@ -229,14 +238,13 @@ def log_tensor_breakdown(top_n: int = 10):
     if not breakdown:
         return
 
-    logger.warning("[Tensor Memory Breakdown]")
-    logger.warning(f"  Total tensors: {breakdown['num_tensors']}")
-    logger.warning(f"  Total size: {breakdown['total_tensor_gb']:.2f} GB")
-    logger.warning(f"  Top {top_n} tensors:")
+    logger.info("[Tensor Memory Breakdown]")
+    logger.info(f"  Total tensors: {breakdown['num_tensors']} | Total size: {breakdown['total_tensor_gb']:.2f} GB")
+    logger.info(f"  Top {top_n} tensors:")
 
     for i, t in enumerate(breakdown.get("top_10", [])[:top_n]):
         size_mb = t["size"] / (1024**2)
-        logger.warning(f"    {i+1}. {size_mb:.1f} MB - shape={t['shape']} dtype={t['dtype']}")
+        logger.info(f"    {i+1}. {size_mb:.1f} MB - shape={t['shape']} dtype={t['dtype']}")
 
 
 def print_memory_summary():
@@ -244,9 +252,9 @@ def print_memory_summary():
     if not torch.cuda.is_available():
         return
 
-    logger.warning("=" * 60)
-    logger.warning("[PyTorch CUDA Memory Summary]")
-    logger.warning("=" * 60)
+    logger.info("=" * 60)
+    logger.info("[PyTorch CUDA Memory Summary]")
+    logger.info("=" * 60)
     print(torch.cuda.memory_summary())
 
 

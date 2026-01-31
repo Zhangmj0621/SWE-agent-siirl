@@ -38,6 +38,59 @@ from siirl.utils.timer import Timer, TimerCollection
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
 
 
+class _MemoryProfiler:
+    """Helper class for memory profiling during training.
+
+    Enabled via environment variables:
+        SIIRL_MEMORY_PROFILE=1      Export memory snapshot for first step
+        SIIRL_MEMORY_STEP_PROFILE=1 Log peak memory per step
+    """
+
+    def __init__(self, step: int, rank: int, profile_step: bool = False):
+        self.step = step
+        self.rank = rank
+        self.profile_step = profile_step
+
+    @classmethod
+    def create_if_enabled(cls, step: int, rank: int) -> "_MemoryProfiler | None":
+        """Create profiler if environment variables are set."""
+        enable_profile = os.environ.get("SIIRL_MEMORY_PROFILE", "0") == "1"
+        enable_step_profile = os.environ.get("SIIRL_MEMORY_STEP_PROFILE", "0") == "1"
+
+        if not (enable_profile or enable_step_profile):
+            return None
+
+        profiler = cls(step, rank, profile_step=enable_step_profile)
+
+        if enable_step_profile:
+            get_torch_device().reset_peak_memory_stats()
+
+        if enable_profile and step == 0:
+            from siirl.utils.memory_profiler import start_memory_recording
+
+            start_memory_recording()
+
+        return profiler
+
+    def export_snapshot(self):
+        """Export memory snapshot and log peak memory."""
+        # Log peak memory stats
+        if self.profile_step:
+            max_alloc_gb = get_torch_device().max_memory_allocated() / (1024**3)
+            max_reserved_gb = get_torch_device().max_memory_reserved() / (1024**3)
+            logger.info(f"[Memory] step={self.step} peak_alloc={max_alloc_gb:.2f}GB peak_reserved={max_reserved_gb:.2f}GB")
+
+        # Export detailed snapshot for step 0
+        enable_profile = os.environ.get("SIIRL_MEMORY_PROFILE", "0") == "1"
+        if enable_profile and self.step == 0 and self.rank == 0:
+            from siirl.utils.memory_profiler import log_memory, stop_memory_recording_and_export
+
+            log_memory("End of train_step 0")
+            output_dir = os.environ.get("SIIRL_PROFILE_OUTPUT_DIR", os.getcwd())
+            snapshot_path = os.path.join(output_dir, f"memory_snapshot_rank{self.rank}_step{self.step}.pickle")
+            stop_memory_recording_and_export(snapshot_path)
+
+
 def global_initialize_model_parallel(config: TrainingArguments):
     """Initialize Megatron model parallel groups"""
     megatron_config = config
@@ -88,10 +141,9 @@ def global_initialize_model_parallel(config: TrainingArguments):
             megatron_args.distribute_saved_activations = False
 
             set_args(megatron_args)
-            logger.warning("[Memory Optimization] Set Megatron global args for recompute")
-            logger.warning("  recompute_granularity=full, recompute_method=uniform, recompute_num_layers=1")
+            logger.debug("[Memory] Enabled Megatron activation recompute: granularity=full, method=uniform")
         except ImportError:
-            logger.warning("[Memory Optimization] Could not import megatron.training.global_vars")
+            pass  # Megatron global_vars not available, skip recompute config
 
         set_random_seed(seed=megatron_config.seed)
 
@@ -431,17 +483,8 @@ class Trainer:
     def train_step(self, batch_data):
         timers = TimerCollection()
 
-        # Memory profiling: Set SIIRL_MEMORY_PROFILE=1 to enable detailed profiling
-        enable_memory_profile = os.environ.get("SIIRL_MEMORY_PROFILE", "0") == "1"
-        enable_step_profile = os.environ.get("SIIRL_MEMORY_STEP_PROFILE", "0") == "1"
-        if enable_step_profile:
-            get_torch_device().reset_peak_memory_stats()
-            logger.warning("[Memory Step] reset_peak_memory_stats at step start")
-        if enable_memory_profile and self.global_step == 0:
-            from siirl.utils.memory_profiler import start_memory_recording
-
-            start_memory_recording()
-            logger.warning("[Memory Profiler] Recording started for step 0")
+        # Optional memory profiling (enabled via SIIRL_MEMORY_PROFILE=1)
+        memory_profiler = _MemoryProfiler.create_if_enabled(self.global_step, self.rank)
 
         with timers["step"]:
             data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
@@ -567,45 +610,13 @@ class Trainer:
             except Exception as e:
                 logger.warning(f"[Trainer rank={self.rank}] Failed to submit metrics: {e}")
 
-        # Memory profiling: Export memory snapshot after first step
-        if enable_memory_profile and self.global_step == 0 and self.rank == 0:
-            from siirl.utils.memory_profiler import log_memory, stop_memory_recording_and_export
-
-            log_memory("End of train_step 0")
-            # Save to output dir or current working directory
-            output_dir = os.environ.get("SIIRL_PROFILE_OUTPUT_DIR", os.getcwd())
-            snapshot_path = os.path.join(output_dir, f"memory_snapshot_rank{self.rank}_step{self.global_step}.pickle")
-            stop_memory_recording_and_export(snapshot_path)
-            logger.warning(f"[Memory Profiler] Snapshot exported to: {snapshot_path}")
+        # Export memory snapshot if profiling enabled
+        if memory_profiler:
+            memory_profiler.export_snapshot()
 
         logger.success(
             f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} completed in {timers['step'].formatted}"
         )
-        if enable_step_profile:
-            max_alloc_gb = get_torch_device().max_memory_allocated() / (1024**3)
-            max_reserved_gb = get_torch_device().max_memory_reserved() / (1024**3)
-            logger.warning(
-                "[Memory Step] step={} max_allocated_gb={:.2f} max_reserved_gb={:.2f}",
-                self.global_step,
-                max_alloc_gb,
-                max_reserved_gb,
-            )
-            if os.environ.get("SIIRL_MEMORY_STEP_SNAPSHOT", "0") == "1" and self.rank == 0:
-                try:
-                    import pickle
-
-                    output_dir = os.environ.get("SIIRL_PROFILE_OUTPUT_DIR", os.getcwd())
-                    os.makedirs(output_dir, exist_ok=True)
-                    snapshot_path = os.path.join(
-                        output_dir,
-                        f"memory_snapshot_step{self.global_step}_rank{self.rank}.pickle",
-                    )
-                    snapshot = torch.cuda.memory._snapshot()
-                    with open(snapshot_path, "wb") as f:
-                        pickle.dump(snapshot, f)
-                    logger.warning("[Memory Step] Snapshot exported to: {}", snapshot_path)
-                except Exception as e:
-                    logger.warning("[Memory Step] Snapshot export failed: {}", e)
 
         return metrics
 
