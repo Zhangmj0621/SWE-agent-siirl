@@ -1146,126 +1146,137 @@ class MegatronPPOActor:
                 # Determine if we can use response-only optimization
                 # Requirements: boundary info + response_length known
                 use_response_only = _cu_seqlens is not None and _attention_mask is not None and _response_length is not None
-                needs_clone = _forward_only is not True  # Clone for backward safety
 
                 try:
                     if use_response_only:
-                        # === Response-only mode (like slime) ===
-                        # Directly output [batch, response_length], no postprocess needed
+                        # === Response-only mode with BATCHED computation ===
+                        # Key optimization: compute ALL response log_probs in ONE cross_entropy call
+                        # This avoids cumulative intermediate results from multiple calls
                         batch_size = _attention_mask.shape[0]
                         resp_len = _response_length
                         seq_lens = _attention_mask.sum(dim=1).tolist()
                         cu_seqlens_cpu = _cu_seqlens.tolist()
 
-                        # Allocate only response-sized tensors
-                        log_probs = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32)
-                        entropy = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32) if calculate_entropy else None
-
-                        if debug_logprob:
-                            logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
-                            output_gb = log_probs.numel() * log_probs.element_size() / (1024**3)
-                            mode = "clone" if needs_clone else "slice"
-                            logger.warning(
-                                "[LogProb Debug] Response-only mode ({}): batch_size={} resp_len={} "
-                                "packed_logits={} ({:.2f}GB) -> output=({}, {}) ({:.4f}GB)",
-                                mode,
-                                batch_size,
-                                resp_len,
-                                tuple(packed_logits.shape),
-                                logits_gb,
-                                batch_size,
-                                resp_len,
-                                output_gb,
-                            )
-
-                        # Get label_mask to find actual response positions per sample
+                        # Get label_mask to find all response positions
                         packed_mask = label_mask.squeeze(0).to(torch.bool)
 
+                        # Collect ALL response token indices across all samples
+                        # response_indices[i] = global index of i-th response token in packed tensor
+                        all_logits_indices = []  # indices into packed_logits (shifted by -1)
+                        all_label_indices = []  # indices into packed_label
+                        sample_boundaries = []  # (sample_idx, start_in_output, length)
+
+                        output_pos = 0
                         for i in range(batch_size):
                             sample_start = cu_seqlens_cpu[i]
                             sample_len = seq_lens[i]
 
                             if sample_len < 2:
+                                sample_boundaries.append((i, output_pos, 0))
                                 continue
 
                             sample_end = sample_start + sample_len
-
-                            # Find actual response positions using label_mask (True = response token)
                             sample_mask = packed_mask[sample_start:sample_end]
                             sample_resp_indices = sample_mask.nonzero(as_tuple=False).squeeze(-1)
 
                             if sample_resp_indices.numel() == 0:
-                                # No response tokens in this sample
+                                sample_boundaries.append((i, output_pos, 0))
                                 continue
 
-                            # Get actual response range within this sample
                             local_start = sample_resp_indices[0].item()
                             local_end = sample_resp_indices[-1].item() + 1
-                            actual_resp_len = local_end - local_start
 
-                            # Ensure at least 1 prompt token for prediction
+                            # Ensure at least 1 prompt token
                             if local_start == 0:
                                 local_start = 1
                                 if local_end <= local_start:
+                                    sample_boundaries.append((i, output_pos, 0))
                                     continue
-                                actual_resp_len = local_end - local_start
 
-                            # Convert to global packed positions
-                            # logits for token at position p are at position p-1
+                            actual_resp_len = local_end - local_start
+
+                            # Global positions in packed tensor
                             logits_start = sample_start + local_start - 1
-                            logits_end = sample_start + local_end - 1
                             label_start = sample_start + local_start
-                            label_end = sample_start + local_end
 
-                            # Slice logits and labels (zero-copy view)
-                            logits_chunk = packed_logits[logits_start:logits_end]  # [actual_resp_len, vocab]
-                            labels_chunk = packed_label[label_start:label_end]  # [actual_resp_len]
+                            # Collect indices for this sample
+                            for j in range(actual_resp_len):
+                                all_logits_indices.append(logits_start + j)
+                                all_label_indices.append(label_start + j)
 
-                            # Clone for backward safety when training
-                            if needs_clone:
-                                logits_chunk = logits_chunk.clone()
+                            sample_boundaries.append((i, output_pos, actual_resp_len))
+                            output_pos += actual_resp_len
 
-                            if debug_logprob and i == 0:
-                                logger.warning(
-                                    "[LogProb Debug] Sample 0: sample_start={} sample_len={} "
-                                    "local_range=[{},{}) actual_resp_len={} "
-                                    "logits_range=[{},{}) labels_range=[{},{}) shapes=({}, {}) cloned={}",
-                                    sample_start,
-                                    sample_len,
-                                    local_start,
-                                    local_end,
-                                    actual_resp_len,
-                                    logits_start,
-                                    logits_end,
-                                    label_start,
-                                    label_end,
-                                    logits_chunk.shape,
-                                    labels_chunk.shape,
-                                    needs_clone,
-                                )
+                        total_response_tokens = len(all_logits_indices)
 
-                            # Compute log probs
-                            if use_fused:
-                                log_probs_chunk = -fused_vocab_parallel_cross_entropy(
-                                    logits_chunk.unsqueeze(1),
-                                    labels_chunk.unsqueeze(1),
-                                    mpu.get_tensor_model_parallel_group(),
-                                ).squeeze(1)
-                            else:
-                                log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
+                        if debug_logprob:
+                            logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
+                            logger.warning(
+                                "[LogProb Debug] BATCHED mode: batch_size={} resp_len={} "
+                                "packed_logits={} ({:.2f}GB) total_response_tokens={} "
+                                "forward_only={}",
+                                batch_size,
+                                resp_len,
+                                tuple(packed_logits.shape),
+                                logits_gb,
+                                total_response_tokens,
+                                _forward_only,
+                            )
 
-                            # Write to output: pad to resp_len if actual_resp_len < resp_len
-                            # Response is right-aligned: put actual values at the end
-                            pad_len = resp_len - actual_resp_len
-                            log_probs[i, pad_len:] = log_probs_chunk.to(torch.float32)
+                        # Allocate output tensors
+                        log_probs = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32)
+                        entropy = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32) if calculate_entropy else None
 
+                        if total_response_tokens == 0:
+                            ret = {"log_probs": log_probs, "_response_only": True}
                             if calculate_entropy:
-                                entropy_chunk = vocab_parallel_entropy(logits_chunk)
-                                entropy[i, pad_len:] = entropy_chunk.to(torch.float32)
+                                ret["entropy"] = entropy
+                            return ret
+
+                        # Convert indices to tensor
+                        logits_idx = torch.tensor(all_logits_indices, device=packed_logits.device, dtype=torch.long)
+                        label_idx = torch.tensor(all_label_indices, device=packed_logits.device, dtype=torch.long)
+
+                        # === KEY OPTIMIZATION: ONE cross_entropy call for ALL response tokens ===
+                        # Gather all response logits and labels at once
+                        all_logits = packed_logits.index_select(0, logits_idx)  # [total_resp_tokens, vocab]
+                        all_labels = packed_label.index_select(0, label_idx)  # [total_resp_tokens]
+
+                        if debug_logprob:
+                            all_logits_gb = all_logits.numel() * all_logits.element_size() / (1024**3)
+                            logger.warning(
+                                "[LogProb Debug] Gathered response logits: {} ({:.2f}GB)",
+                                tuple(all_logits.shape),
+                                all_logits_gb,
+                            )
+
+                        # Compute log_probs for ALL response tokens in ONE call
+                        if use_fused:
+                            all_log_probs = -fused_vocab_parallel_cross_entropy(
+                                all_logits.unsqueeze(1),
+                                all_labels.unsqueeze(1),
+                                mpu.get_tensor_model_parallel_group(),
+                            ).squeeze(1)
+                        else:
+                            all_log_probs = vocab_parallel_log_probs_from_logits(all_logits, all_labels)
+
+                        # Compute entropy if needed (also ONE call)
+                        if calculate_entropy:
+                            all_entropy = vocab_parallel_entropy(all_logits)
+
+                        # Scatter results back to [batch, resp_len] output
+                        # Each sample's response is right-aligned (padded on the left)
+                        for i, start_pos, length in sample_boundaries:
+                            if length == 0:
+                                continue
+                            pad_len = resp_len - length
+                            log_probs[i, pad_len:] = all_log_probs[start_pos : start_pos + length].to(torch.float32)
+                            if calculate_entropy:
+                                entropy[i, pad_len:] = all_entropy[start_pos : start_pos + length].to(torch.float32)
 
                         if debug_logprob:
                             logger.warning(
-                                "[LogProb Debug] Response-only output: log_probs={} entropy={}",
+                                "[LogProb Debug] BATCHED output: log_probs={} entropy={}",
                                 tuple(log_probs.shape),
                                 tuple(entropy.shape) if entropy is not None else None,
                             )
