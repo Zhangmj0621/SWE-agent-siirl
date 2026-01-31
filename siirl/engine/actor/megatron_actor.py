@@ -1084,23 +1084,17 @@ class MegatronPPOActor:
                 log_probs = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32)
                 entropy = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32) if calculate_entropy else None
 
-                try:
-                    from megatron.core.fusions.fused_cross_entropy import fused_vocab_parallel_cross_entropy
-
-                    use_fused = True
-                except Exception:
-                    use_fused = False
+                use_fused = os.environ.get("SIIRL_USE_FUSED_LOGPROB", "1") == "1"
+                if use_fused:
+                    try:
+                        from megatron.core.fusions.fused_cross_entropy import fused_vocab_parallel_cross_entropy
+                    except Exception:
+                        use_fused = False
                 if debug_logprob:
                     logger.warning("[LogProb Debug] use_fused={}", use_fused)
 
                 def _fused_log_probs(logits_chunk, labels_chunk):
-                    try:
-                        import torch._dynamo as _dynamo  # type: ignore
-
-                        fused_fn = _dynamo.disable(fused_vocab_parallel_cross_entropy)
-                    except Exception:
-                        fused_fn = fused_vocab_parallel_cross_entropy
-                    return fused_fn(
+                    return fused_vocab_parallel_cross_entropy(
                         logits_chunk.unsqueeze(1),
                         labels_chunk.unsqueeze(1),
                         mpu.get_tensor_model_parallel_group(),
@@ -1142,6 +1136,13 @@ class MegatronPPOActor:
                 if calculate_entropy:
                     ret["entropy"] = entropy.unsqueeze(0)
                 return ret
+
+            try:
+                import torch._dynamo as _dynamo  # type: ignore
+
+                logits_processor = _dynamo.disable(logits_processor)
+            except Exception:
+                pass
 
             logits_processor_args = {"label": label, "label_mask": label_mask}
             output = forward_fn(
