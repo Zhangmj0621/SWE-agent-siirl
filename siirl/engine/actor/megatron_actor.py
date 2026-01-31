@@ -1321,11 +1321,14 @@ class MegatronPPOActor:
                                 ret["entropy"] = entropy
                             return ret
 
-                        # === CHUNKED Cross Entropy (slime-style) ===
-                        # KEY: Chunk the INDICES first, then gather per-chunk to minimize peak memory
-                        # This avoids creating a giant all_logits tensor (~18GB) in memory
+                        # === CHUNKED Cross Entropy with Gradient Checkpointing ===
+                        # KEY: Use gradient checkpointing to avoid keeping all logits chunks in memory
+                        # This trades compute for memory: during backward, logits are recomputed per-chunk
                         chunk_size_env = os.environ.get("SIIRL_CE_CHUNK_SIZE", "").strip()
                         ce_chunk_size = int(chunk_size_env) if chunk_size_env else 4096  # default 4096 tokens
+
+                        # Enable gradient checkpointing by default for training mode
+                        use_checkpoint = os.environ.get("SIIRL_USE_CHECKPOINT", "1") == "1"
 
                         # Create index tensors
                         logits_idx = torch.tensor(all_logits_indices, device=packed_logits.device, dtype=torch.long)
@@ -1336,16 +1339,38 @@ class MegatronPPOActor:
                             estimated_gb = total_response_tokens * packed_logits.shape[-1] * packed_logits.element_size() / (1024**3)
                             logger.warning(
                                 "[LogProb Debug] CHUNKED mode: total_response_tokens={} vocab_size={} "
-                                "estimated_gathered_logits={:.2f}GB chunk_size={}",
+                                "estimated_gathered_logits={:.2f}GB chunk_size={} use_checkpoint={}",
                                 total_response_tokens,
                                 packed_logits.shape[-1],
                                 estimated_gb,
                                 ce_chunk_size,
+                                use_checkpoint,
                             )
+
+                        # Define checkpointed function for computing log_probs (and entropy) per chunk
+                        # This function will be recomputed during backward pass, avoiding memory retention
+                        def _checkpoint_chunk_fn(packed_logits_in, packed_label_in, logits_idx_chunk, label_idx_chunk):
+                            """Compute log_probs for a single chunk. Called via gradient checkpoint."""
+                            logits_chunk = packed_logits_in.index_select(0, logits_idx_chunk)
+                            labels_chunk = packed_label_in.index_select(0, label_idx_chunk)
+
+                            if use_fused:
+                                log_probs_chunk = -fused_vocab_parallel_cross_entropy(
+                                    logits_chunk.unsqueeze(1),
+                                    labels_chunk.unsqueeze(1),
+                                    mpu.get_tensor_model_parallel_group(),
+                                ).squeeze(1)
+                            else:
+                                log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
+
+                            if calculate_entropy:
+                                entropy_chunk = vocab_parallel_entropy(logits_chunk)
+                                return log_probs_chunk, entropy_chunk
+                            return log_probs_chunk
 
                         # Chunked computation: gather and process per-chunk to minimize peak memory
                         if total_response_tokens <= ce_chunk_size:
-                            # Small enough, compute in one go
+                            # Small enough, compute in one go (no checkpoint needed)
                             all_logits = packed_logits.index_select(0, logits_idx)
                             all_labels = packed_label.index_select(0, label_idx)
 
@@ -1363,9 +1388,8 @@ class MegatronPPOActor:
 
                             del all_logits, all_labels
                         else:
-                            # Chunked computation: split indices first, then gather per-chunk
-                            # This keeps peak memory = packed_logits + ONE chunk (~4GB) instead of
-                            # packed_logits + ALL gathered logits (~18GB)
+                            # Chunked computation with gradient checkpointing
+                            # Peak memory = packed_logits + ONE chunk instead of packed_logits + ALL chunks
                             num_chunks = (total_response_tokens - 1) // ce_chunk_size + 1
                             logits_idx_chunks = logits_idx.chunk(num_chunks, dim=0)
                             label_idx_chunks = label_idx.chunk(num_chunks, dim=0)
@@ -1373,27 +1397,47 @@ class MegatronPPOActor:
                             log_probs_list = []
                             entropy_list = [] if calculate_entropy else None
 
-                            for logits_idx_chunk, label_idx_chunk in zip(logits_idx_chunks, label_idx_chunks, strict=False):
-                                # Gather only this chunk's logits/labels
-                                logits_chunk = packed_logits.index_select(0, logits_idx_chunk)
-                                labels_chunk = packed_label.index_select(0, label_idx_chunk)
+                            if use_checkpoint:
+                                # Use gradient checkpointing: recompute logits during backward
+                                # This avoids keeping all logits_chunks in memory for gradient computation
+                                from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
-                                if use_fused:
-                                    log_probs_chunk = -fused_vocab_parallel_cross_entropy(
-                                        logits_chunk.unsqueeze(1),
-                                        labels_chunk.unsqueeze(1),
-                                        mpu.get_tensor_model_parallel_group(),
-                                    ).squeeze(1)
-                                else:
-                                    log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
-                                log_probs_list.append(log_probs_chunk)
+                                for logits_idx_chunk, label_idx_chunk in zip(logits_idx_chunks, label_idx_chunks, strict=False):
+                                    result = torch_checkpoint(
+                                        _checkpoint_chunk_fn,
+                                        packed_logits,
+                                        packed_label,
+                                        logits_idx_chunk,
+                                        label_idx_chunk,
+                                        use_reentrant=False,
+                                    )
+                                    if calculate_entropy:
+                                        log_probs_list.append(result[0])
+                                        entropy_list.append(result[1])
+                                    else:
+                                        log_probs_list.append(result)
+                            else:
+                                # Original mode without checkpointing (faster but more memory)
+                                for logits_idx_chunk, label_idx_chunk in zip(logits_idx_chunks, label_idx_chunks, strict=False):
+                                    logits_chunk = packed_logits.index_select(0, logits_idx_chunk)
+                                    labels_chunk = packed_label.index_select(0, label_idx_chunk)
 
-                                if calculate_entropy:
-                                    entropy_chunk = vocab_parallel_entropy(logits_chunk)
-                                    entropy_list.append(entropy_chunk)
+                                    if use_fused:
+                                        log_probs_chunk = -fused_vocab_parallel_cross_entropy(
+                                            logits_chunk.unsqueeze(1),
+                                            labels_chunk.unsqueeze(1),
+                                            mpu.get_tensor_model_parallel_group(),
+                                        ).squeeze(1)
+                                    else:
+                                        log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
+                                    log_probs_list.append(log_probs_chunk)
 
-                                # Release chunk tensors immediately
-                                del logits_chunk, labels_chunk
+                                    if calculate_entropy:
+                                        entropy_chunk = vocab_parallel_entropy(logits_chunk)
+                                        entropy_list.append(entropy_chunk)
+
+                                    # Release chunk tensors immediately (may not help due to autograd graph)
+                                    del logits_chunk, labels_chunk
 
                             all_log_probs = torch.cat(log_probs_list, dim=0)
                             if calculate_entropy:
