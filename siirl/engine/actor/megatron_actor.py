@@ -1058,6 +1058,13 @@ class MegatronPPOActor:
             from siirl.models.mcore import get_mcore_forward_fn
 
             forward_fn = get_mcore_forward_fn(self.hf_config)
+            if forward_only:
+                try:
+                    import torch._dynamo as _dynamo  # type: ignore
+
+                    forward_fn = _dynamo.disable(forward_fn)
+                except Exception:
+                    pass
 
             def logits_processor(logits, label, label_mask):
                 debug_logprob = os.environ.get("SIIRL_LOGPROB_DEBUG", "0") == "1"
@@ -1093,28 +1100,36 @@ class MegatronPPOActor:
                 if debug_logprob:
                     logger.warning("[LogProb Debug] use_fused={}", use_fused)
 
-                def _fused_log_probs(logits_chunk, labels_chunk):
-                    return fused_vocab_parallel_cross_entropy(
-                        logits_chunk.unsqueeze(1),
-                        labels_chunk.unsqueeze(1),
-                        mpu.get_tensor_model_parallel_group(),
-                    ).squeeze(1)
+                # Disable dynamo once before loop to avoid SymInt incompatibility in Megatron's @torch.compile
+                import torch._dynamo as _dynamo
 
-                for start in range(0, response_indices.numel(), chunk_size):
-                    idx = response_indices[start : start + chunk_size]
-                    logits_chunk = packed_logits.index_select(0, idx)
-                    labels_chunk = packed_label.index_select(0, idx)
+                orig_dynamo_disable = _dynamo.config.disable
+                if use_fused:
+                    _dynamo.config.disable = True
+                    _dynamo.reset()
 
-                    if use_fused:
-                        log_probs_chunk = -_fused_log_probs(logits_chunk, labels_chunk)
-                    else:
-                        log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
+                try:
+                    for start in range(0, response_indices.numel(), chunk_size):
+                        idx = response_indices[start : start + chunk_size]
+                        logits_chunk = packed_logits.index_select(0, idx)
+                        labels_chunk = packed_label.index_select(0, idx)
 
-                    log_probs.index_copy_(0, idx, log_probs_chunk.to(torch.float32))
+                        if use_fused:
+                            log_probs_chunk = -fused_vocab_parallel_cross_entropy(
+                                logits_chunk.unsqueeze(1),
+                                labels_chunk.unsqueeze(1),
+                                mpu.get_tensor_model_parallel_group(),
+                            ).squeeze(1)
+                        else:
+                            log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
 
-                    if calculate_entropy:
-                        entropy_chunk = vocab_parallel_entropy(logits_chunk)
-                        entropy.index_copy_(0, idx, entropy_chunk.to(torch.float32))
+                        log_probs.index_copy_(0, idx, log_probs_chunk.to(torch.float32))
+
+                        if calculate_entropy:
+                            entropy_chunk = vocab_parallel_entropy(logits_chunk)
+                            entropy.index_copy_(0, idx, entropy_chunk.to(torch.float32))
+                finally:
+                    _dynamo.config.disable = orig_dynamo_disable
                 if debug_logprob:
                     log_probs_gb = log_probs.numel() * log_probs.element_size() / (1024**3)
                     logger.warning(
