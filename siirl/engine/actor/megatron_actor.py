@@ -1178,6 +1178,9 @@ class MegatronPPOActor:
                                 output_gb,
                             )
 
+                        # Get label_mask to find actual response positions per sample
+                        packed_mask = label_mask.squeeze(0).to(torch.bool)
+
                         for i in range(batch_size):
                             sample_start = cu_seqlens_cpu[i]
                             sample_len = seq_lens[i]
@@ -1185,19 +1188,38 @@ class MegatronPPOActor:
                             if sample_len < 2:
                                 continue
 
-                            # Response tokens are at the end of each sample
-                            # label_mask marks response positions, but we know response is at [-resp_len-1:-1]
-                            # logits for token at position p are at position p-1
-                            # So logits for response at [sample_end-resp_len, sample_end) are at [sample_end-resp_len-1, sample_end-1)
                             sample_end = sample_start + sample_len
-                            logits_start = sample_end - resp_len - 1
-                            logits_end = sample_end - 1
-                            label_start = sample_end - resp_len
-                            label_end = sample_end
+
+                            # Find actual response positions using label_mask (True = response token)
+                            sample_mask = packed_mask[sample_start:sample_end]
+                            sample_resp_indices = sample_mask.nonzero(as_tuple=False).squeeze(-1)
+
+                            if sample_resp_indices.numel() == 0:
+                                # No response tokens in this sample
+                                continue
+
+                            # Get actual response range within this sample
+                            local_start = sample_resp_indices[0].item()
+                            local_end = sample_resp_indices[-1].item() + 1
+                            actual_resp_len = local_end - local_start
+
+                            # Ensure at least 1 prompt token for prediction
+                            if local_start == 0:
+                                local_start = 1
+                                if local_end <= local_start:
+                                    continue
+                                actual_resp_len = local_end - local_start
+
+                            # Convert to global packed positions
+                            # logits for token at position p are at position p-1
+                            logits_start = sample_start + local_start - 1
+                            logits_end = sample_start + local_end - 1
+                            label_start = sample_start + local_start
+                            label_end = sample_start + local_end
 
                             # Slice logits and labels (zero-copy view)
-                            logits_chunk = packed_logits[logits_start:logits_end]  # [resp_len, vocab]
-                            labels_chunk = packed_label[label_start:label_end]  # [resp_len]
+                            logits_chunk = packed_logits[logits_start:logits_end]  # [actual_resp_len, vocab]
+                            labels_chunk = packed_label[label_start:label_end]  # [actual_resp_len]
 
                             # Clone for backward safety when training
                             if needs_clone:
@@ -1205,11 +1227,14 @@ class MegatronPPOActor:
 
                             if debug_logprob and i == 0:
                                 logger.warning(
-                                    "[LogProb Debug] Sample 0: sample_start={} sample_len={} sample_end={} "
+                                    "[LogProb Debug] Sample 0: sample_start={} sample_len={} "
+                                    "local_range=[{},{}) actual_resp_len={} "
                                     "logits_range=[{},{}) labels_range=[{},{}) shapes=({}, {}) cloned={}",
                                     sample_start,
                                     sample_len,
-                                    sample_end,
+                                    local_start,
+                                    local_end,
+                                    actual_resp_len,
                                     logits_start,
                                     logits_end,
                                     label_start,
@@ -1229,12 +1254,14 @@ class MegatronPPOActor:
                             else:
                                 log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
 
-                            # Write directly to [batch, resp_len] output
-                            log_probs[i, :] = log_probs_chunk.to(torch.float32)
+                            # Write to output: pad to resp_len if actual_resp_len < resp_len
+                            # Response is right-aligned: put actual values at the end
+                            pad_len = resp_len - actual_resp_len
+                            log_probs[i, pad_len:] = log_probs_chunk.to(torch.float32)
 
                             if calculate_entropy:
                                 entropy_chunk = vocab_parallel_entropy(logits_chunk)
-                                entropy[i, :] = entropy_chunk.to(torch.float32)
+                                entropy[i, pad_len:] = entropy_chunk.to(torch.float32)
 
                         if debug_logprob:
                             logger.warning(
