@@ -1097,27 +1097,15 @@ class MegatronPPOActor:
                 except Exception:
                     pass
 
-            def logits_processor(logits, label, label_mask):
+            def logits_processor(logits, label, label_mask, _cu_seqlens=None, _attention_mask=None):
+                """
+                Optimized logits processor using per-sample slice (like slime).
+                Memory optimization: uses slice instead of index_select to avoid copying.
+                """
                 debug_logprob = os.environ.get("SIIRL_LOGPROB_DEBUG", "0") == "1"
                 logits.div_(temperature)
-                packed_logits = logits.squeeze(0)
-                packed_label = label.squeeze(0)
-                packed_mask = label_mask.squeeze(0).to(torch.bool)
-                response_indices = packed_mask.nonzero(as_tuple=False).squeeze(-1)
-                chunk_size_env = os.environ.get("SIIRL_LOGPROB_CHUNK_SIZE", "").strip()
-                chunk_size = int(chunk_size_env) if chunk_size_env else 0
-                if chunk_size <= 0:
-                    chunk_size = response_indices.numel()
-                if debug_logprob:
-                    logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
-                    logger.warning(
-                        "[LogProb Debug] packed_logits shape={} dtype={} size_gb={:.2f} response_tokens={} chunk_size={}",
-                        tuple(packed_logits.shape),
-                        packed_logits.dtype,
-                        logits_gb,
-                        response_indices.numel(),
-                        chunk_size,
-                    )
+                packed_logits = logits.squeeze(0)  # [packed_len, vocab_size]
+                packed_label = label.squeeze(0)  # [packed_len]
 
                 log_probs = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32)
                 entropy = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32) if calculate_entropy else None
@@ -1128,10 +1116,8 @@ class MegatronPPOActor:
                         from megatron.core.fusions.fused_cross_entropy import fused_vocab_parallel_cross_entropy
                     except Exception:
                         use_fused = False
-                if debug_logprob:
-                    logger.warning("[LogProb Debug] use_fused={}", use_fused)
 
-                # Disable dynamo once before loop to avoid SymInt incompatibility in Megatron's @torch.compile
+                # Disable dynamo once before loop to avoid SymInt incompatibility
                 import torch._dynamo as _dynamo
 
                 orig_dynamo_disable = _dynamo.config.disable
@@ -1140,27 +1126,91 @@ class MegatronPPOActor:
                     _dynamo.reset()
 
                 try:
-                    for start in range(0, response_indices.numel(), chunk_size):
-                        idx = response_indices[start : start + chunk_size]
-                        logits_chunk = packed_logits.index_select(0, idx)
-                        labels_chunk = packed_label.index_select(0, idx)
+                    # Per-sample processing using slice (memory efficient, like slime)
+                    if _cu_seqlens is not None and _attention_mask is not None:
+                        batch_size = _attention_mask.shape[0]
+                        seq_lens = _attention_mask.sum(dim=1).tolist()  # valid lengths per sample
+                        cu_seqlens_cpu = _cu_seqlens.tolist()
 
-                        if use_fused:
-                            log_probs_chunk = -fused_vocab_parallel_cross_entropy(
-                                logits_chunk.unsqueeze(1),
-                                labels_chunk.unsqueeze(1),
-                                mpu.get_tensor_model_parallel_group(),
-                            ).squeeze(1)
-                        else:
-                            log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
+                        if debug_logprob:
+                            logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
+                            total_response_tokens = sum(min(s, response_length) for s in seq_lens)
+                            logger.warning(
+                                "[LogProb Debug] Per-sample mode: batch_size={} packed_logits={} size={:.2f}GB response_tokens={}",
+                                batch_size,
+                                tuple(packed_logits.shape),
+                                logits_gb,
+                                total_response_tokens,
+                            )
 
-                        log_probs.index_copy_(0, idx, log_probs_chunk.to(torch.float32))
+                        for i in range(batch_size):
+                            sample_start = cu_seqlens_cpu[i]
+                            sample_len = seq_lens[i]
+                            sample_response_len = min(sample_len, response_length)
 
-                        if calculate_entropy:
-                            entropy_chunk = vocab_parallel_entropy(logits_chunk)
-                            entropy.index_copy_(0, idx, entropy_chunk.to(torch.float32))
+                            # Response positions in packed sequence (response is at the end of each sample)
+                            resp_start = sample_start + sample_len - sample_response_len
+                            resp_end = sample_start + sample_len
+
+                            # Use slice (shares memory, no copy!) instead of index_select
+                            # logits for predicting tokens at positions [resp_start, resp_end)
+                            # are at positions [resp_start-1, resp_end-1)
+                            logits_chunk = packed_logits[resp_start - 1 : resp_end - 1]  # [resp_len, vocab]
+                            labels_chunk = packed_label[resp_start:resp_end]  # [resp_len]
+
+                            if use_fused:
+                                log_probs_chunk = -fused_vocab_parallel_cross_entropy(
+                                    logits_chunk.unsqueeze(1),
+                                    labels_chunk.unsqueeze(1),
+                                    mpu.get_tensor_model_parallel_group(),
+                                ).squeeze(1)
+                            else:
+                                log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
+
+                            log_probs[resp_start:resp_end] = log_probs_chunk.to(torch.float32)
+
+                            if calculate_entropy:
+                                entropy_chunk = vocab_parallel_entropy(logits_chunk)
+                                entropy[resp_start:resp_end] = entropy_chunk.to(torch.float32)
+                    else:
+                        # Fallback: original chunked processing with index_select
+                        packed_mask = label_mask.squeeze(0).to(torch.bool)
+                        response_indices = packed_mask.nonzero(as_tuple=False).squeeze(-1)
+                        chunk_size_env = os.environ.get("SIIRL_LOGPROB_CHUNK_SIZE", "").strip()
+                        chunk_size = int(chunk_size_env) if chunk_size_env else response_indices.numel()
+
+                        if debug_logprob:
+                            logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
+                            logger.warning(
+                                "[LogProb Debug] Fallback mode: packed_logits={} size={:.2f}GB response_tokens={} chunk_size={}",
+                                tuple(packed_logits.shape),
+                                logits_gb,
+                                response_indices.numel(),
+                                chunk_size,
+                            )
+
+                        for start in range(0, response_indices.numel(), chunk_size):
+                            idx = response_indices[start : start + chunk_size]
+                            logits_chunk = packed_logits.index_select(0, idx)
+                            labels_chunk = packed_label.index_select(0, idx)
+
+                            if use_fused:
+                                log_probs_chunk = -fused_vocab_parallel_cross_entropy(
+                                    logits_chunk.unsqueeze(1),
+                                    labels_chunk.unsqueeze(1),
+                                    mpu.get_tensor_model_parallel_group(),
+                                ).squeeze(1)
+                            else:
+                                log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
+
+                            log_probs.index_copy_(0, idx, log_probs_chunk.to(torch.float32))
+
+                            if calculate_entropy:
+                                entropy_chunk = vocab_parallel_entropy(logits_chunk)
+                                entropy.index_copy_(0, idx, entropy_chunk.to(torch.float32))
                 finally:
                     _dynamo.config.disable = orig_dynamo_disable
+
                 if debug_logprob:
                     log_probs_gb = log_probs.numel() * log_probs.element_size() / (1024**3)
                     logger.warning(
@@ -1169,14 +1219,6 @@ class MegatronPPOActor:
                         log_probs.dtype,
                         log_probs_gb,
                     )
-                    if calculate_entropy and entropy is not None:
-                        entropy_gb = entropy.numel() * entropy.element_size() / (1024**3)
-                        logger.warning(
-                            "[LogProb Debug] entropy shape={} dtype={} size_gb={:.2f}",
-                            tuple(entropy.shape),
-                            entropy.dtype,
-                            entropy_gb,
-                        )
 
                 ret = {"log_probs": log_probs.unsqueeze(0)}
                 if calculate_entropy:

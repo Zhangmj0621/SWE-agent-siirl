@@ -97,6 +97,9 @@ def gptmodel_forward(
 
         if post_process and logits_processor is not None:
             args = {k: preprocess_packed_seqs(v, attention_mask, pre_process=True)[0] for k, v in logits_processor_args.items()}
+            # Pass boundary info for per-sample processing optimization
+            args["_cu_seqlens"] = packed_seq_params.cu_seqlens_q_padded
+            args["_attention_mask"] = attention_mask
 
             if debug:
                 _log_memory("Before logits_processor()")
