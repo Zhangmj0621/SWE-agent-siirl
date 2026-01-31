@@ -433,6 +433,10 @@ class Trainer:
 
         # Memory profiling: Set SIIRL_MEMORY_PROFILE=1 to enable detailed profiling
         enable_memory_profile = os.environ.get("SIIRL_MEMORY_PROFILE", "0") == "1"
+        enable_step_profile = os.environ.get("SIIRL_MEMORY_STEP_PROFILE", "0") == "1"
+        if enable_step_profile:
+            get_torch_device().reset_peak_memory_stats()
+            logger.warning("[Memory Step] reset_peak_memory_stats at step start")
         if enable_memory_profile and self.global_step == 0:
             from siirl.utils.memory_profiler import start_memory_recording
 
@@ -577,6 +581,31 @@ class Trainer:
         logger.success(
             f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} completed in {timers['step'].formatted}"
         )
+        if enable_step_profile:
+            max_alloc_gb = get_torch_device().max_memory_allocated() / (1024**3)
+            max_reserved_gb = get_torch_device().max_memory_reserved() / (1024**3)
+            logger.warning(
+                "[Memory Step] step={} max_allocated_gb={:.2f} max_reserved_gb={:.2f}",
+                self.global_step,
+                max_alloc_gb,
+                max_reserved_gb,
+            )
+            if os.environ.get("SIIRL_MEMORY_STEP_SNAPSHOT", "0") == "1" and self.rank == 0:
+                try:
+                    import pickle
+
+                    output_dir = os.environ.get("SIIRL_PROFILE_OUTPUT_DIR", os.getcwd())
+                    os.makedirs(output_dir, exist_ok=True)
+                    snapshot_path = os.path.join(
+                        output_dir,
+                        f"memory_snapshot_step{self.global_step}_rank{self.rank}.pickle",
+                    )
+                    snapshot = torch.cuda.memory._snapshot()
+                    with open(snapshot_path, "wb") as f:
+                        pickle.dump(snapshot, f)
+                    logger.warning("[Memory Step] Snapshot exported to: {}", snapshot_path)
+                except Exception as e:
+                    logger.warning("[Memory Step] Snapshot export failed: {}", e)
 
         return metrics
 

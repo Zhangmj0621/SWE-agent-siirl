@@ -1060,17 +1060,78 @@ class MegatronPPOActor:
             forward_fn = get_mcore_forward_fn(self.hf_config)
 
             def logits_processor(logits, label, label_mask):
+                debug_logprob = os.environ.get("SIIRL_LOGPROB_DEBUG", "0") == "1"
                 logits.div_(temperature)
-                ret = {}
+                packed_logits = logits.squeeze(0)
+                packed_label = label.squeeze(0)
+                packed_mask = label_mask.squeeze(0).to(torch.bool)
+                response_indices = packed_mask.nonzero(as_tuple=False).squeeze(-1)
+                chunk_size_env = os.environ.get("SIIRL_LOGPROB_CHUNK_SIZE", "").strip()
+                chunk_size = int(chunk_size_env) if chunk_size_env else 0
+                if chunk_size <= 0:
+                    chunk_size = response_indices.numel()
+                if debug_logprob:
+                    logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
+                    logger.warning(
+                        "[LogProb Debug] packed_logits shape={} dtype={} size_gb={:.2f} response_tokens={} chunk_size={}",
+                        tuple(packed_logits.shape),
+                        packed_logits.dtype,
+                        logits_gb,
+                        response_indices.numel(),
+                        chunk_size,
+                    )
+
+                log_probs = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32)
+                entropy = packed_logits.new_zeros(packed_label.shape, dtype=torch.float32) if calculate_entropy else None
+
+                try:
+                    from megatron.core.fusions.fused_cross_entropy import fused_vocab_parallel_cross_entropy
+
+                    use_fused = True
+                except Exception:
+                    use_fused = False
+                if debug_logprob:
+                    logger.warning("[LogProb Debug] use_fused={}", use_fused)
+
+                for start in range(0, response_indices.numel(), chunk_size):
+                    idx = response_indices[start : start + chunk_size]
+                    logits_chunk = packed_logits.index_select(0, idx)
+                    labels_chunk = packed_label.index_select(0, idx)
+
+                    if use_fused:
+                        log_probs_chunk = -fused_vocab_parallel_cross_entropy(
+                            logits_chunk.unsqueeze(1),
+                            labels_chunk.unsqueeze(1),
+                            mpu.get_tensor_model_parallel_group(),
+                        ).squeeze(1)
+                    else:
+                        log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
+
+                    log_probs.index_copy_(0, idx, log_probs_chunk.to(torch.float32))
+
+                    if calculate_entropy:
+                        entropy_chunk = vocab_parallel_entropy(logits_chunk)
+                        entropy.index_copy_(0, idx, entropy_chunk.to(torch.float32))
+                if debug_logprob:
+                    log_probs_gb = log_probs.numel() * log_probs.element_size() / (1024**3)
+                    logger.warning(
+                        "[LogProb Debug] log_probs shape={} dtype={} size_gb={:.2f}",
+                        tuple(log_probs.shape),
+                        log_probs.dtype,
+                        log_probs_gb,
+                    )
+                    if calculate_entropy and entropy is not None:
+                        entropy_gb = entropy.numel() * entropy.element_size() / (1024**3)
+                        logger.warning(
+                            "[LogProb Debug] entropy shape={} dtype={} size_gb={:.2f}",
+                            tuple(entropy.shape),
+                            entropy.dtype,
+                            entropy_gb,
+                        )
+
+                ret = {"log_probs": log_probs.unsqueeze(0)}
                 if calculate_entropy:
-                    logits_bak = logits.clone()
-                    entropy = vocab_parallel_entropy(logits)
-                    ret["entropy"] = entropy
-                else:
-                    logits_bak = logits
-                log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
-                log_probs = log_probs.masked_fill(~label_mask, 0.0)
-                ret["log_probs"] = log_probs
+                    ret["entropy"] = entropy.unsqueeze(0)
                 return ret
 
             logits_processor_args = {"label": label, "label_mask": label_mask}
