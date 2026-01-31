@@ -1148,22 +1148,116 @@ class MegatronPPOActor:
                 use_response_only = _cu_seqlens is not None and _attention_mask is not None and _response_length is not None
 
                 try:
-                    if use_response_only:
-                        # === Response-only mode with BATCHED computation ===
-                        # Key optimization: compute ALL response log_probs in ONE cross_entropy call
-                        # This avoids cumulative intermediate results from multiple calls
+                    if use_response_only and _forward_only:
+                        # === Per-sample SLICE mode (forward-only, most memory efficient) ===
+                        # Use tensor slicing (views) to avoid copying large logits
+                        # No gradient needed, so views are safe
                         batch_size = _attention_mask.shape[0]
                         resp_len = _response_length
                         seq_lens = _attention_mask.sum(dim=1).tolist()
                         cu_seqlens_cpu = _cu_seqlens.tolist()
+                        packed_mask = label_mask.squeeze(0).to(torch.bool)
 
-                        # Get label_mask to find all response positions
+                        # Allocate output tensors
+                        log_probs = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32)
+                        entropy = packed_logits.new_zeros((batch_size, resp_len), dtype=torch.float32) if calculate_entropy else None
+
+                        if debug_logprob:
+                            logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
+                            output_gb = log_probs.numel() * log_probs.element_size() / (1024**3)
+                            logger.warning(
+                                "[LogProb Debug] SLICE mode (forward-only): batch_size={} resp_len={} "
+                                "packed_logits={} ({:.2f}GB) -> output=({}, {}) ({:.4f}GB)",
+                                batch_size,
+                                resp_len,
+                                tuple(packed_logits.shape),
+                                logits_gb,
+                                batch_size,
+                                resp_len,
+                                output_gb,
+                            )
+
+                        # Process each sample using tensor slicing (views, zero-copy)
+                        for i in range(batch_size):
+                            sample_start = cu_seqlens_cpu[i]
+                            sample_len = seq_lens[i]
+
+                            if sample_len < 2:
+                                continue
+
+                            sample_end = sample_start + sample_len
+                            sample_mask = packed_mask[sample_start:sample_end]
+                            sample_resp_indices = sample_mask.nonzero(as_tuple=False).squeeze(-1)
+
+                            if sample_resp_indices.numel() == 0:
+                                continue
+
+                            local_start = sample_resp_indices[0].item()
+                            local_end = sample_resp_indices[-1].item() + 1
+
+                            if local_start == 0:
+                                local_start = 1
+                                if local_end <= local_start:
+                                    continue
+
+                            actual_resp_len = local_end - local_start
+
+                            # Use SLICING (view) instead of index_select (copy)
+                            logits_start = sample_start + local_start - 1
+                            logits_end = logits_start + actual_resp_len
+                            label_start = sample_start + local_start
+                            label_end = label_start + actual_resp_len
+
+                            # Slice creates a view, NOT a copy - this is the key memory optimization
+                            logits_chunk = packed_logits[logits_start:logits_end]
+                            labels_chunk = packed_label[label_start:label_end]
+
+                            # Compute log_probs for this sample
+                            if use_fused:
+                                log_probs_chunk = -fused_vocab_parallel_cross_entropy(
+                                    logits_chunk.unsqueeze(1),
+                                    labels_chunk.unsqueeze(1),
+                                    mpu.get_tensor_model_parallel_group(),
+                                ).squeeze(1)
+                            else:
+                                log_probs_chunk = vocab_parallel_log_probs_from_logits(logits_chunk, labels_chunk)
+
+                            # Compute entropy if needed
+                            entropy_chunk = None
+                            if calculate_entropy:
+                                entropy_chunk = vocab_parallel_entropy(logits_chunk)
+
+                            # Write to output (right-aligned)
+                            pad_len = resp_len - actual_resp_len
+                            log_probs[i, pad_len:] = log_probs_chunk.to(torch.float32)
+                            if calculate_entropy and entropy_chunk is not None:
+                                entropy[i, pad_len:] = entropy_chunk.to(torch.float32)
+
+                        if debug_logprob:
+                            logger.warning(
+                                "[LogProb Debug] SLICE output: log_probs={} entropy={}",
+                                tuple(log_probs.shape),
+                                tuple(entropy.shape) if entropy is not None else None,
+                            )
+
+                        ret = {"log_probs": log_probs, "_response_only": True}
+                        if calculate_entropy:
+                            ret["entropy"] = entropy
+                        return ret
+
+                    elif use_response_only:
+                        # === BATCHED mode (training with gradients) ===
+                        # Use index_select to gather all response tokens, then ONE cross_entropy call
+                        # index_select creates copies which is necessary for gradient computation
+                        batch_size = _attention_mask.shape[0]
+                        resp_len = _response_length
+                        seq_lens = _attention_mask.sum(dim=1).tolist()
+                        cu_seqlens_cpu = _cu_seqlens.tolist()
                         packed_mask = label_mask.squeeze(0).to(torch.bool)
 
                         # Collect ALL response token indices across all samples
-                        # response_indices[i] = global index of i-th response token in packed tensor
-                        all_logits_indices = []  # indices into packed_logits (shifted by -1)
-                        all_label_indices = []  # indices into packed_label
+                        all_logits_indices = []
+                        all_label_indices = []
                         sample_boundaries = []  # (sample_idx, start_in_output, length)
 
                         output_pos = 0
@@ -1186,7 +1280,6 @@ class MegatronPPOActor:
                             local_start = sample_resp_indices[0].item()
                             local_end = sample_resp_indices[-1].item() + 1
 
-                            # Ensure at least 1 prompt token
                             if local_start == 0:
                                 local_start = 1
                                 if local_end <= local_start:
@@ -1194,12 +1287,9 @@ class MegatronPPOActor:
                                     continue
 
                             actual_resp_len = local_end - local_start
-
-                            # Global positions in packed tensor
                             logits_start = sample_start + local_start - 1
                             label_start = sample_start + local_start
 
-                            # Collect indices for this sample
                             for j in range(actual_resp_len):
                                 all_logits_indices.append(logits_start + j)
                                 all_label_indices.append(label_start + j)
@@ -1212,15 +1302,13 @@ class MegatronPPOActor:
                         if debug_logprob:
                             logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
                             logger.warning(
-                                "[LogProb Debug] BATCHED mode: batch_size={} resp_len={} "
-                                "packed_logits={} ({:.2f}GB) total_response_tokens={} "
-                                "forward_only={}",
+                                "[LogProb Debug] BATCHED mode (training): batch_size={} resp_len={} "
+                                "packed_logits={} ({:.2f}GB) total_response_tokens={}",
                                 batch_size,
                                 resp_len,
                                 tuple(packed_logits.shape),
                                 logits_gb,
                                 total_response_tokens,
-                                _forward_only,
                             )
 
                         # Allocate output tensors
@@ -1233,14 +1321,11 @@ class MegatronPPOActor:
                                 ret["entropy"] = entropy
                             return ret
 
-                        # Convert indices to tensor
+                        # Gather all response logits/labels at once
                         logits_idx = torch.tensor(all_logits_indices, device=packed_logits.device, dtype=torch.long)
                         label_idx = torch.tensor(all_label_indices, device=packed_logits.device, dtype=torch.long)
-
-                        # === KEY OPTIMIZATION: ONE cross_entropy call for ALL response tokens ===
-                        # Gather all response logits and labels at once
-                        all_logits = packed_logits.index_select(0, logits_idx)  # [total_resp_tokens, vocab]
-                        all_labels = packed_label.index_select(0, label_idx)  # [total_resp_tokens]
+                        all_logits = packed_logits.index_select(0, logits_idx)
+                        all_labels = packed_label.index_select(0, label_idx)
 
                         if debug_logprob:
                             all_logits_gb = all_logits.numel() * all_logits.element_size() / (1024**3)
@@ -1250,7 +1335,7 @@ class MegatronPPOActor:
                                 all_logits_gb,
                             )
 
-                        # Compute log_probs for ALL response tokens in ONE call
+                        # ONE cross_entropy call for ALL response tokens
                         if use_fused:
                             all_log_probs = -fused_vocab_parallel_cross_entropy(
                                 all_logits.unsqueeze(1),
@@ -1260,12 +1345,10 @@ class MegatronPPOActor:
                         else:
                             all_log_probs = vocab_parallel_log_probs_from_logits(all_logits, all_labels)
 
-                        # Compute entropy if needed (also ONE call)
                         if calculate_entropy:
                             all_entropy = vocab_parallel_entropy(all_logits)
 
                         # Scatter results back to [batch, resp_len] output
-                        # Each sample's response is right-aligned (padded on the left)
                         for i, start_pos, length in sample_boundaries:
                             if length == 0:
                                 continue
