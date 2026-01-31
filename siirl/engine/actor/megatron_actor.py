@@ -1131,10 +1131,11 @@ class MegatronPPOActor:
                         batch_size = _attention_mask.shape[0]
                         seq_lens = _attention_mask.sum(dim=1).tolist()  # valid lengths per sample
                         cu_seqlens_cpu = _cu_seqlens.tolist()
+                        packed_mask = label_mask.squeeze(0).to(torch.bool)
 
                         if debug_logprob:
                             logits_gb = packed_logits.numel() * packed_logits.element_size() / (1024**3)
-                            total_response_tokens = sum(min(s, response_length) for s in seq_lens)
+                            total_response_tokens = packed_mask.sum().item()
                             logger.warning(
                                 "[LogProb Debug] Per-sample mode: batch_size={} packed_logits={} size={:.2f}GB response_tokens={}",
                                 batch_size,
@@ -1146,17 +1147,52 @@ class MegatronPPOActor:
                         for i in range(batch_size):
                             sample_start = cu_seqlens_cpu[i]
                             sample_len = seq_lens[i]
-                            sample_response_len = min(sample_len, response_length)
+                            sample_end = sample_start + sample_len
 
-                            # Response positions in packed sequence (response is at the end of each sample)
-                            resp_start = sample_start + sample_len - sample_response_len
-                            resp_end = sample_start + sample_len
+                            # Skip samples with too few tokens
+                            if sample_len < 2:
+                                continue
+
+                            # Find response positions in this sample using label_mask
+                            sample_mask = packed_mask[sample_start:sample_end]
+                            sample_response_indices = sample_mask.nonzero(as_tuple=False).squeeze(-1)
+
+                            if sample_response_indices.numel() == 0:
+                                continue
+
+                            # Get response range within this sample (local indices)
+                            local_start = sample_response_indices[0].item()
+                            local_end = sample_response_indices[-1].item() + 1
+
+                            # Ensure we have at least 1 prompt token for prediction
+                            if local_start == 0:
+                                local_start = 1
+                                if local_end <= local_start:
+                                    continue
+
+                            # Convert to global packed sequence positions
+                            resp_start = sample_start + local_start
+                            resp_end = sample_start + local_end
 
                             # Use slice (shares memory, no copy!) instead of index_select
                             # logits for predicting tokens at positions [resp_start, resp_end)
                             # are at positions [resp_start-1, resp_end-1)
                             logits_chunk = packed_logits[resp_start - 1 : resp_end - 1]  # [resp_len, vocab]
                             labels_chunk = packed_label[resp_start:resp_end]  # [resp_len]
+
+                            if debug_logprob and i == 0:
+                                logger.warning(
+                                    "[LogProb Debug] Sample 0: sample_start={} sample_len={} local_start={} local_end={} "
+                                    "resp_start={} resp_end={} logits_chunk={} labels_chunk={}",
+                                    sample_start,
+                                    sample_len,
+                                    local_start,
+                                    local_end,
+                                    resp_start,
+                                    resp_end,
+                                    logits_chunk.shape,
+                                    labels_chunk.shape,
+                                )
 
                             if use_fused:
                                 log_probs_chunk = -fused_vocab_parallel_cross_entropy(
