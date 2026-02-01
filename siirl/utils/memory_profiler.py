@@ -152,7 +152,9 @@ def get_memory_stats() -> dict:
 
 
 def log_memory(tag: str = "", reset_peak: bool = False):
-    """Log current GPU memory usage."""
+    """Log current GPU memory usage. Controlled by SIIRL_MEMORY_PROFILE env var."""
+    if os.environ.get("SIIRL_MEMORY_PROFILE", "0") != "1":
+        return
     if not torch.cuda.is_available():
         return
 
@@ -168,8 +170,8 @@ def log_memory(tag: str = "", reset_peak: bool = False):
 
 @contextmanager
 def memory_trace(tag: str):
-    """Context manager to trace memory usage of a code block."""
-    if not torch.cuda.is_available():
+    """Context manager to trace memory usage. Controlled by SIIRL_MEMORY_PROFILE env var."""
+    if os.environ.get("SIIRL_MEMORY_PROFILE", "0") != "1" or not torch.cuda.is_available():
         yield
         return
 

@@ -117,38 +117,9 @@ class ActorWorker:
             merged_config = {**recompute_defaults, **override_transformer_config}
             bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
-
-            # Comprehensive logging for memory optimization debugging
-            logger.warning("=" * 60)
-            logger.warning("[Memory Optimization] ActorWorker TransformerConfig")
-            logger.warning("=" * 60)
-            logger.warning(f"  Model: {getattr(hf_config, 'model_type', 'unknown')}")
-            logger.warning(f"  num_layers: {getattr(tf_config, 'num_layers', 'N/A')}")
-            logger.warning(f"  hidden_size: {getattr(tf_config, 'hidden_size', 'N/A')}")
-            logger.warning("-" * 60)
-            logger.warning("[Recompute/Activation Checkpointing Config] <<<< CRITICAL >>>>")
-            logger.warning(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
-            logger.warning(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
-            logger.warning(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
-            logger.warning("-" * 60)
-            logger.warning(f"[mbridge merged_config]: {merged_config}")
-            logger.warning("=" * 60)
-
             self.bridge = bridge
         else:
             self.bridge = None
-            # Log config when not using mbridge
-            logger.warning("=" * 60)
-            logger.warning("[Memory Optimization] ActorWorker (non-mbridge mode)")
-            logger.warning("=" * 60)
-            logger.warning(f"  Model: {getattr(hf_config, 'model_type', 'unknown')}")
-            logger.warning(f"  num_layers: {getattr(tf_config, 'num_layers', 'N/A')}")
-            logger.warning("-" * 60)
-            logger.warning("[Recompute Config] <<<< CRITICAL >>>>")
-            logger.warning(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
-            logger.warning(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
-            logger.warning(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
-            logger.warning("=" * 60)
 
         self.hf_config = hf_config
         self.tf_config = tf_config
@@ -625,16 +596,6 @@ class CriticWorker:
             merged_config = {**recompute_defaults, **override_transformer_config}
             bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
-
-            logger.warning("=" * 60)
-            logger.warning("[Memory Optimization] CriticWorker TransformerConfig")
-            logger.warning("=" * 60)
-            logger.warning("[Recompute Config] <<<< CRITICAL >>>>")
-            logger.warning(f"  recompute_granularity: {getattr(tf_config, 'recompute_granularity', 'NOT SET')}")
-            logger.warning(f"  recompute_method: {getattr(tf_config, 'recompute_method', 'NOT SET')}")
-            logger.warning(f"  recompute_num_layers: {getattr(tf_config, 'recompute_num_layers', 'NOT SET')}")
-            logger.warning("=" * 60)
-
             self.bridge = bridge
         else:
             self.bridge = None
