@@ -1,3 +1,4 @@
+# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
 """Environment setup for actor module.
 
 This module sets environment variables that must be configured before importing
