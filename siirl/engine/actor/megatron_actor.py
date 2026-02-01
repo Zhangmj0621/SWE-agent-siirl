@@ -1135,9 +1135,20 @@ class MegatronPPOActor:
 
                 try:
                     # Check if we can use response-only optimization
+                    # Set SIIRL_LOGPROB_FALLBACK=1 to force fallback mode (useful for debugging)
+                    use_fallback = os.environ.get("SIIRL_LOGPROB_FALLBACK", "0") == "1"
                     has_boundary_info = _cu_seqlens is not None and _attention_mask is not None and _response_length is not None
 
-                    if has_boundary_info and _forward_only:
+                    if use_fallback or not has_boundary_info:
+                        # Fallback mode: Standard processing (matches original master)
+                        return process_fallback_mode(
+                            packed_logits=packed_logits,
+                            packed_label=packed_label,
+                            label_mask=label_mask,
+                            calculate_entropy=calculate_entropy,
+                            config=config,
+                        )
+                    elif _forward_only:
                         # SLICE mode: Zero-copy tensor views (inference only)
                         return process_slice_mode(
                             packed_logits=packed_logits,
@@ -1149,7 +1160,7 @@ class MegatronPPOActor:
                             calculate_entropy=calculate_entropy,
                             config=config,
                         )
-                    elif has_boundary_info:
+                    else:
                         # BATCHED mode: Chunked cross entropy with gradient checkpointing
                         return process_batched_mode(
                             packed_logits=packed_logits,
@@ -1158,15 +1169,6 @@ class MegatronPPOActor:
                             cu_seqlens=_cu_seqlens,
                             label_mask=label_mask,
                             response_length=_response_length,
-                            calculate_entropy=calculate_entropy,
-                            config=config,
-                        )
-                    else:
-                        # Fallback mode: Standard processing
-                        return process_fallback_mode(
-                            packed_logits=packed_logits,
-                            packed_label=packed_label,
-                            label_mask=label_mask,
                             calculate_entropy=calculate_entropy,
                             config=config,
                         )
