@@ -49,22 +49,24 @@ def _get_socket_family(address: str) -> tuple[int, str]:
     return socket.AF_INET, address
 
 
-def _try_bind_port(port: int, address: str) -> socket.socket | None:
+def _try_bind_port(port: int, address: str, reuseport: bool = True) -> socket.socket | None:
     """
     Try to bind to a port and return the socket if successful.
 
-    Uses SO_REUSEADDR and SO_REUSEPORT for compatibility.
+    Uses SO_REUSEADDR and optionally SO_REUSEPORT for compatibility.
     The socket remains bound - caller is responsible for closing it.
     """
     family, addr = _get_socket_family(address)
+    sock = socket.socket(family, socket.SOCK_STREAM)
     try:
-        sock = socket.socket(family, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        if reuseport:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         sock.bind((addr, port))
         sock.listen(1)
         return sock
     except OSError:
+        sock.close()
         return None
 
 
@@ -92,7 +94,7 @@ def is_port_available(port: int, address: str = "", strict: bool = False) -> boo
         except OSError:
             return False
     else:
-        sock = _try_bind_port(port, address)
+        sock = _try_bind_port(port, address, reuseport=True)
         if sock:
             sock.close()
             return True
@@ -106,6 +108,7 @@ def get_free_port(address: str = "", start_port: int = DEFAULT_START_PORT, stric
     Args:
         address: IP address to bind (empty for all interfaces)
         start_port: Starting port number (default: 15000)
+        reuseport: Whether to set SO_REUSEPORT on the held socket
         strict: If True, don't use SO_REUSEPORT during availability checks
 
     Returns:
@@ -120,7 +123,11 @@ def get_free_port(address: str = "", start_port: int = DEFAULT_START_PORT, stric
     raise RuntimeError(f"No available port in range [{start_port}, {MAX_PORT})")
 
 
-def get_free_port_with_socket(address: str = "", start_port: int = DEFAULT_START_PORT) -> tuple[int, socket.socket]:
+def get_free_port_with_socket(
+    address: str = "",
+    start_port: int = DEFAULT_START_PORT,
+    reuseport: bool = True,
+) -> tuple[int, socket.socket]:
     """
     Find a free port and return (port, bound_socket) with socket held open.
 
@@ -140,7 +147,7 @@ def get_free_port_with_socket(address: str = "", start_port: int = DEFAULT_START
         RuntimeError: If no available port found
     """
     for port in range(start_port, MAX_PORT):
-        sock = _try_bind_port(port, address)
+        sock = _try_bind_port(port, address, reuseport=reuseport)
         if sock:
             return port, sock
     raise RuntimeError(f"No available port in range [{start_port}, {MAX_PORT})")

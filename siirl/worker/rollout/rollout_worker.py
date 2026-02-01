@@ -103,7 +103,11 @@ class RolloutWorker:
         Returns:
             int: Available port number
         """
-        port, sock = get_free_port_with_socket(get_net_interface_ip(), start_port=start_port)
+        port, sock = get_free_port_with_socket(
+            get_net_interface_ip(),
+            start_port=start_port,
+            reuseport=False,
+        )
         if slot == "port":
             self._port_sock = sock
         return port
