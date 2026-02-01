@@ -1,38 +1,34 @@
-import os
 from functools import partial
 
-# Disable Transformer Engine to avoid ABI compatibility issues
-# This is needed when transformer_engine is compiled for a different PyTorch version
-os.environ.setdefault("NVTE_FRAMEWORK", "none")
+import torch
+import torch.distributed
+from loguru import logger
+from megatron.core import parallel_state as mpu
+from megatron.core.optimizer import DistributedOptimizer
+from megatron.core.pipeline_parallel import get_forward_backward_func
+from omegaconf import OmegaConf
+from tensordict import NonTensorData, TensorDict
+from torch import nn
 
-import torch  # noqa: E402
-import torch.distributed  # noqa: E402
-from loguru import logger  # noqa: E402
-from megatron.core import parallel_state as mpu  # noqa: E402
-from megatron.core.optimizer import DistributedOptimizer  # noqa: E402
-from megatron.core.pipeline_parallel import get_forward_backward_func  # noqa: E402
-from omegaconf import OmegaConf  # noqa: E402
-from tensordict import NonTensorData, TensorDict  # noqa: E402
-from torch import nn  # noqa: E402
-
-from siirl.algorithm.kl_penalty import kl_penalty  # noqa: E402
-from siirl.algorithm.loss import agg_loss, compute_value_loss, get_policy_loss_fn  # noqa: E402
-from siirl.engine.actor.utils import append_to_dict  # noqa: E402
-from siirl.params import SiiRLArguments  # noqa: E402
-from siirl.utils.backend.device import get_device_id, get_device_name, get_torch_device  # noqa: E402
-from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager  # noqa: E402
-from siirl.utils.megatron.megatron_utils import (  # noqa: E402
+import siirl.engine.actor._env_setup  # noqa: F401 - sets NVTE_FRAMEWORK before torch import
+from siirl.algorithm.kl_penalty import kl_penalty
+from siirl.algorithm.loss import agg_loss, compute_value_loss, get_policy_loss_fn
+from siirl.engine.actor.utils import append_to_dict
+from siirl.params import SiiRLArguments
+from siirl.utils.backend.device import get_device_id, get_device_name, get_torch_device
+from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
+from siirl.utils.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
 )
-from siirl.utils.megatron.pipeline_parallel import make_batch_generator  # noqa: E402
-from siirl.utils.model_utils.flops_counter import FlopsCounter  # noqa: E402
-from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights  # noqa: E402
-from siirl.utils.model_utils.torch_dtypes import PrecisionType  # noqa: E402
-from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean  # noqa: E402
-from siirl.utils.timer import Timer  # noqa: E402
+from siirl.utils.megatron.pipeline_parallel import make_batch_generator
+from siirl.utils.model_utils.flops_counter import FlopsCounter
+from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
+from siirl.utils.model_utils.torch_dtypes import PrecisionType
+from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean
+from siirl.utils.timer import Timer
 
 
 class ActorWorker:
