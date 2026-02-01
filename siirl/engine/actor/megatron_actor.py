@@ -1110,33 +1110,30 @@ class MegatronPPOActor:
                 except Exception:
                     pass
 
+            # Create logits processor config from actor arguments
+            actor_cfg = self.actor_config
+            _logits_config = None
+            from siirl.utils.logits_processing import LogitsProcessorConfig
+
+            _logits_config = LogitsProcessorConfig.from_actor_config(
+                chunk_size=getattr(actor_cfg, "logprob_chunk_size", 4096),
+                use_checkpoint=getattr(actor_cfg, "use_logprob_checkpoint", True),
+                use_fused=getattr(actor_cfg, "use_fused_logprob", False),
+            )
+
             def logits_processor(
                 logits, label, label_mask, _cu_seqlens=None, _attention_mask=None, _forward_only=None, _response_length=None
             ):
-                """Memory-optimized logits processor.
-
-                Computes log probabilities (and optionally entropy) from model logits
-                using memory-efficient strategies:
-                - SLICE mode: Zero-copy tensor views for inference
-                - BATCHED mode: Chunked cross entropy with gradient checkpointing for training
-                - Fallback mode: Standard processing when boundary info unavailable
-
-                Returns response-only tensors [batch, response_length] to minimize memory.
-                """
-                from siirl.utils.logits_processing import (
-                    LogitsProcessorConfig,
-                    process_batched_mode,
-                    process_fallback_mode,
-                    process_slice_mode,
-                )
+                """Memory-optimized logits processor."""
+                from siirl.utils.logits_processing import process_batched_mode, process_fallback_mode, process_slice_mode
 
                 # Apply temperature scaling
                 logits.div_(temperature)
                 packed_logits = logits.squeeze(0)  # [packed_len, vocab_size]
                 packed_label = label.squeeze(0)  # [packed_len]
 
-                # Load configuration from environment
-                config = LogitsProcessorConfig.from_env()
+                # Use config from actor arguments (captured from outer scope)
+                config = _logits_config
 
                 # Disable dynamo for fused kernel compatibility
                 import torch._dynamo as _dynamo

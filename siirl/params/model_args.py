@@ -122,6 +122,11 @@ class ActorArguments:
     )
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
 
+    # Memory optimization for logits processing
+    logprob_chunk_size: int = field(default=4096, metadata={"help": "Chunk size for cross entropy computation"})
+    use_logprob_checkpoint: bool = field(default=True, metadata={"help": "Use gradient checkpointing for logits"})
+    use_fused_logprob: bool = field(default=False, metadata={"help": "Use fused cross entropy kernel"})
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

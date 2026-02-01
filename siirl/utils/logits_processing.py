@@ -28,8 +28,25 @@ class LogitsProcessorConfig:
     debug: bool = False
 
     @classmethod
+    def from_actor_config(
+        cls,
+        chunk_size: int = 4096,
+        use_checkpoint: bool = True,
+        use_fused: bool = False,
+    ) -> LogitsProcessorConfig:
+        """Create config from ActorArguments, with env var overrides for debug."""
+        # Allow env var override for chunk_size (useful for tuning)
+        chunk_size_env = os.environ.get("SIIRL_CE_CHUNK_SIZE", "").strip()
+        return cls(
+            chunk_size=int(chunk_size_env) if chunk_size_env else chunk_size,
+            use_checkpoint=use_checkpoint,
+            use_fused=use_fused,
+            debug=os.environ.get("SIIRL_LOGPROB_DEBUG", "0") == "1",
+        )
+
+    @classmethod
     def from_env(cls) -> LogitsProcessorConfig:
-        """Create config from environment variables."""
+        """Create config from environment variables (fallback)."""
         chunk_size_env = os.environ.get("SIIRL_CE_CHUNK_SIZE", "").strip()
         return cls(
             chunk_size=int(chunk_size_env) if chunk_size_env else 4096,
