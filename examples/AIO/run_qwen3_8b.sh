@@ -83,7 +83,7 @@ TRAINING_CMD=(
     actor_ref.actor.clip_ratio=0.2
     actor_ref.actor.kl_loss_coef=0.01
     actor_ref.actor.kl_loss_type=low_var_kl
-    actor_ref.actor.megatron.param_offload=True
+    actor_ref.actor.megatron.param_offload=False
     actor_ref.actor.megatron.optimizer_offload=False
     # === Reference Model Settings ===
     actor_ref.ref.log_prob_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
