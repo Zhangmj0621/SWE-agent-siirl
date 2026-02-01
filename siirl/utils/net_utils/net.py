@@ -53,7 +53,7 @@ def _try_bind_port(port: int, address: str) -> socket.socket | None:
     """
     Try to bind to a port and return the socket if successful.
 
-    Uses SO_REUSEADDR and SO_REUSEPORT for better compatibility.
+    Uses SO_REUSEADDR and SO_REUSEPORT for compatibility.
     The socket remains bound - caller is responsible for closing it.
     """
     family, addr = _get_socket_family(address)
@@ -68,22 +68,45 @@ def _try_bind_port(port: int, address: str) -> socket.socket | None:
         return None
 
 
-def is_port_available(port: int, address: str = "") -> bool:
-    """Check if a port is available by attempting to bind to it."""
-    sock = _try_bind_port(port, address)
-    if sock:
-        sock.close()
-        return True
-    return False
+def is_port_available(port: int, address: str = "", strict: bool = False) -> bool:
+    """
+    Check if a port is available by attempting to bind to it.
+
+    Args:
+        port: Port number to check
+        address: IP address to bind (empty for all interfaces)
+        strict: If True, don't use SO_REUSEPORT during availability checks
+
+    Returns:
+        True if port is available
+    """
+    if strict:
+        # Strict mode: don't use SO_REUSEPORT
+        family, addr = _get_socket_family(address)
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((addr, port))
+                sock.listen(1)
+                return True
+        except OSError:
+            return False
+    else:
+        sock = _try_bind_port(port, address)
+        if sock:
+            sock.close()
+            return True
+        return False
 
 
-def get_free_port(address: str = "", start_port: int = DEFAULT_START_PORT) -> int:
+def get_free_port(address: str = "", start_port: int = DEFAULT_START_PORT, strict: bool = False) -> int:
     """
     Find a free port starting from start_port using sequential allocation.
 
     Args:
         address: IP address to bind (empty for all interfaces)
         start_port: Starting port number (default: 15000)
+        strict: If True, don't use SO_REUSEPORT during availability checks
 
     Returns:
         Available port number
@@ -92,7 +115,7 @@ def get_free_port(address: str = "", start_port: int = DEFAULT_START_PORT) -> in
         RuntimeError: If no available port found
     """
     for port in range(start_port, MAX_PORT):
-        if is_port_available(port, address):
+        if is_port_available(port, address, strict=strict):
             return port
     raise RuntimeError(f"No available port in range [{start_port}, {MAX_PORT})")
 

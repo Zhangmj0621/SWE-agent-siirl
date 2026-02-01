@@ -309,9 +309,6 @@ class RolloutManager:
             )
 
         # Phase 1: Allocate ports sequentially and initialize engines
-        # Combines slime's sequential allocation with verl's socket holding:
-        # - Sequential port search from 15000 (avoids conflicts)
-        # - Socket held until launch_server (minimizes race window)
         start_port = 15000
         init_futures = []
         worker_info = []  # Store (worker, cfg, ip, port) for phase 2
@@ -319,10 +316,9 @@ class RolloutManager:
             worker = self.worker_handle[cfg["worker_idx"]]
             ip = ray.get(worker.get_ip.remote())
 
-            # Allocate ports with socket holding (verl-style)
-            # Each worker needs 2 ports: http port and nccl port
+            # Allocate ports: http port with socket holding, nccl port without
             port = ray.get(worker.find_free_port_with_hold.remote(start_port, slot="port"))
-            nccl_port = ray.get(worker.find_free_port_with_hold.remote(port + 1, slot="nccl"))
+            nccl_port = ray.get(worker.find_free_port.remote(port + 1, strict=True))
             start_port = nccl_port + 1  # Increment for next worker
 
             future = worker.init_engine.remote(

@@ -68,11 +68,10 @@ class RolloutWorker:
         self.port = None  # Network port for the worker
         self.executor = None  # Rollout executor instance
         self.rollout_thread = None  # Thread for running the async rollout executor
-        # Socket holders for port reservation (verl-style)
+        # Socket holder for HTTP port reservation
         self._port_sock = None
-        self._nccl_sock = None
 
-    def find_free_port(self, start_port: int = 15000) -> int:
+    def find_free_port(self, start_port: int = 15000, strict: bool = False) -> int:
         """
         Find a free port on this worker's node starting from start_port.
 
@@ -81,11 +80,12 @@ class RolloutWorker:
 
         Args:
             start_port: Starting port number for search
+            strict: If True, don't use SO_REUSEPORT during availability checks
 
         Returns:
             int: Available port number
         """
-        return get_free_port(get_net_interface_ip(), start_port=start_port)
+        return get_free_port(get_net_interface_ip(), start_port=start_port, strict=strict)
 
     def find_free_port_with_hold(self, start_port: int = 15000, slot: str = "port") -> int:
         """
@@ -94,9 +94,11 @@ class RolloutWorker:
         Combines slime's sequential allocation with verl's socket holding.
         The socket is held until launch_server() is called.
 
+        Note: Only use for HTTP port. nccl_port should use find_free_port().
+
         Args:
             start_port: Starting port number for search
-            slot: Which slot to store socket ("port" or "nccl")
+            slot: Which slot to store socket (only "port" is supported)
 
         Returns:
             int: Available port number
@@ -104,8 +106,6 @@ class RolloutWorker:
         port, sock = get_free_port_with_socket(get_net_interface_ip(), start_port=start_port)
         if slot == "port":
             self._port_sock = sock
-        elif slot == "nccl":
-            self._nccl_sock = sock
         return port
 
     def init_engine(
@@ -202,9 +202,6 @@ class RolloutWorker:
         if self._port_sock:
             self._port_sock.close()
             self._port_sock = None
-        if self._nccl_sock:
-            self._nccl_sock.close()
-            self._nccl_sock = None
 
     def launch_server(self, extra_server_args: dict = None):
         """
