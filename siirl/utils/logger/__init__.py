@@ -52,7 +52,7 @@ For distributed metrics collection, see siirl.utils.metrics module.
 
 from .backends import BackendConfig, BackendRegistry
 from .logging_utils import set_basic_config
-from .memory_profiler import MemoryProfiler, log_memory, log_tf_config, memory_trace
+from .memory_profiler import GPUMemoryLogger, MemoryProfiler, log_memory, log_tf_config, memory_trace
 from .tracker import GenerationSample, MetricTracker
 
 __all__ = [
@@ -65,6 +65,7 @@ __all__ = [
     "BackendRegistry",
     "BackendConfig",
     # Memory profiling
+    "GPUMemoryLogger",
     "MemoryProfiler",
     "log_memory",
     "log_tf_config",

@@ -6,26 +6,38 @@ Environment variables:
     SIIRL_MEMORY_PROFILE=1   Export memory snapshots
 
 Usage:
-    from siirl.utils.logger.memory_profiler import log_memory, memory_trace
+    # Decorator style (recommended)
+    from siirl.utils.logger.memory_profiler import GPUMemoryLogger
 
-    log_memory("Before forward", reset_peak=True)
+    @GPUMemoryLogger(role="actor")
+    def update_actor(self, batch):
+        # training logic
+        return result
+
+    # Context manager style
+    from siirl.utils.logger.memory_profiler import memory_trace
+
     with memory_trace("compute_log_prob"):
         output = model(...)
 
-    # Or analyze a snapshot file:
+    # Analyze a snapshot file:
     python -m siirl.utils.logger.memory_profiler snapshot.pickle
 """
 
+import functools
 import gc
 import os
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
 
 import torch
+import torch.distributed as dist
 from loguru import logger
 
 __all__ = [
+    "GPUMemoryLogger",
     "start_memory_recording",
     "stop_memory_recording_and_export",
     "get_memory_stats",
@@ -38,9 +50,104 @@ __all__ = [
 ]
 
 _MEMORY_DEBUG = os.environ.get("SIIRL_MEMORY_DEBUG", "0") == "1"
+_MEMORY_PROFILE = os.environ.get("SIIRL_MEMORY_PROFILE", "0") == "1"
 
 # Track logged configs to avoid duplicate logs
 _logged_configs: set = set()
+
+
+# ============================================================================
+# GPU Memory Logger Decorator
+# ============================================================================
+
+
+def _get_memory_info() -> dict:
+    """Get current GPU memory info in GB."""
+    if not torch.cuda.is_available():
+        return {"alloc": 0.0, "reserved": 0.0, "peak_alloc": 0.0, "peak_reserved": 0.0, "used": 0.0, "total": 0.0}
+
+    free, total = torch.cuda.mem_get_info()
+    return {
+        "alloc": torch.cuda.memory_allocated() / (1024**3),
+        "reserved": torch.cuda.memory_reserved() / (1024**3),
+        "peak_alloc": torch.cuda.max_memory_allocated() / (1024**3),
+        "peak_reserved": torch.cuda.max_memory_reserved() / (1024**3),
+        "used": (total - free) / (1024**3),
+        "total": total / (1024**3),
+    }
+
+
+class GPUMemoryLogger:
+    """A decorator to log GPU memory usage before and after function execution.
+
+    Controlled by SIIRL_MEMORY_PROFILE environment variable.
+
+    Example:
+        >>> from siirl.utils.logger.memory_profiler import GPUMemoryLogger
+        >>> @GPUMemoryLogger(role="actor")
+        ... def update_actor(self, batch):
+        ...     # training logic
+        ...     return result
+
+        >>> @GPUMemoryLogger("compute_log_prob", track_peak=True)
+        ... def compute_log_prob(self, data):
+        ...     pass
+    """
+
+    def __init__(self, role: str, log_only_rank_0: bool = True, track_peak: bool = True):
+        """
+        Args:
+            role: Identifier for the logged function (e.g., "actor", "critic")
+            log_only_rank_0: If True, only log on rank 0 in distributed setting
+            track_peak: If True, reset peak stats before and report peak after
+        """
+        self.role = role
+        self.log_only_rank_0 = log_only_rank_0
+        self.track_peak = track_peak
+        self._rank = self._get_rank()
+
+    @staticmethod
+    def _get_rank() -> int:
+        if dist.is_initialized():
+            return dist.get_rank()
+        return 0
+
+    def _should_log(self) -> bool:
+        if not _MEMORY_PROFILE:
+            return False
+        return not (self.log_only_rank_0 and self._rank != 0)
+
+    def __call__(self, func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if not self._should_log():
+                return func(*args, **kwargs)
+
+            name = func.__name__
+
+            # Reset peak stats if tracking
+            if self.track_peak and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+
+            m = _get_memory_info()
+            logger.info(
+                f"[{self.role}] Before {name}: "
+                f"alloc={m['alloc']:.2f}GB reserved={m['reserved']:.2f}GB "
+                f"device={m['used']:.2f}/{m['total']:.2f}GB"
+            )
+
+            result = func(*args, **kwargs)
+
+            m = _get_memory_info()
+            peak_info = f" peak={m['peak_alloc']:.2f}GB" if self.track_peak else ""
+            logger.info(
+                f"[{self.role}] After {name}: "
+                f"alloc={m['alloc']:.2f}GB reserved={m['reserved']:.2f}GB "
+                f"device={m['used']:.2f}/{m['total']:.2f}GB{peak_info}"
+            )
+            return result
+
+        return wrapper
 
 
 def log_tf_config(tf_config, tag: str = ""):

@@ -17,6 +17,7 @@ from siirl.engine.actor.utils import append_to_dict
 from siirl.params import SiiRLArguments
 from siirl.utils.backend.device import get_device_id, get_device_name, get_torch_device
 from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
+from siirl.utils.logger import GPUMemoryLogger
 from siirl.utils.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
@@ -229,32 +230,23 @@ class ActorWorker:
 
         get_torch_device().empty_cache()
 
+    @GPUMemoryLogger(role="ActorWorker")
     def update_actor(self, data: TensorDict):
-        # Import memory profiler for debugging
-        from siirl.utils.logger.memory_profiler import log_memory, memory_trace
-
-        log_memory("Before update_actor", reset_peak=True)
-
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
-            log_memory("After load_megatron_model_to_gpu")
 
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.actor_optimizer)
-            log_memory("After load_megatron_optimizer")
 
         data = data.to(get_device_name())
         micro_batch_size = self.actor_ref_config.actor.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
         data["temperature"] = NonTensorData(self.actor_ref_config.actor.temperature)
-        log_memory("Before update_policy (forward+backward)")
 
         # Time the update_policy call for MFU calculation
-        with Timer("update_policy") as timer, memory_trace("update_policy (forward+backward)"):
+        with Timer("update_policy") as timer:
             metrics = self.actor.update_policy(data=data)
         delta_time = timer.elapsed
-
-        log_memory("After update_policy")
 
         # Calculate MFU (Model FLOPs Utilization)
         # Note: flops_counter calculates FLOPs for the entire model, but with TP each GPU
@@ -284,22 +276,16 @@ class ActorWorker:
 
         return data
 
+    @GPUMemoryLogger(role="ActorWorker")
     def compute_log_prob(self, data: TensorDict):
-        from siirl.utils.logger.memory_profiler import log_memory, memory_trace
-
-        log_memory("Before compute_log_prob", reset_peak=True)
-
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
-            log_memory("After load model for log_prob")
 
         data["micro_batch_size"] = NonTensorData(self.actor_ref_config.actor.ppo_micro_batch_size_per_gpu)
         data["temperature"] = NonTensorData(self.actor_ref_config.actor.temperature)
         data = data.to(get_device_id())
-        log_memory("Before forward (compute_log_prob)")
 
-        with memory_trace("compute_log_prob forward"):
-            output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+        output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
 
         data["old_log_probs"] = output
         data["entropys"] = entropys
@@ -497,6 +483,7 @@ class ReferenceWorker:
 
         get_torch_device().empty_cache()
 
+    @GPUMemoryLogger(role="ReferenceWorker")
     def compute_ref_log_prob(self, data: TensorDict):
         if self._ref_is_offload_param:
             load_megatron_model_to_gpu(self.ref_module, load_grad=False)
@@ -707,6 +694,7 @@ class CriticWorker:
             lr_scheduler=self.critic_optimizer_scheduler,
         )
 
+    @GPUMemoryLogger(role="CriticWorker")
     def compute_values(self, data: TensorDict):
         micro_batch_size = self.critic_config.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
@@ -724,6 +712,7 @@ class CriticWorker:
 
         return data
 
+    @GPUMemoryLogger(role="CriticWorker")
     def update_critic(self, data: TensorDict):
         data = data.to(get_device_id())
 
