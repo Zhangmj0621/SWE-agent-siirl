@@ -250,11 +250,12 @@ class RolloutManager:
             first_gpu_idx = worker_idx * self.gpus_per_rollout
             base_gpu_id = res.local_ranks[first_gpu_idx]
 
-            # Handle dist_init_addr for cross-node TP
+            # Handle dist_init_addr for cross-node TP (use port range 20000+)
             if nnodes > 1:
                 if node_rank == 0:
                     # First actor in TP group: generate and cache dist_init_addr
-                    dist_init_addr = ray.get(self.worker_handle[worker_idx].get_ip_port.remote())
+                    dist_init_start_port = 20000 + tp_group_idx  # Unique start port per TP group
+                    dist_init_addr = ray.get(self.worker_handle[worker_idx].get_ip_port.remote(start_port=dist_init_start_port))
                     self._dist_init_addrs[tp_group_idx] = dist_init_addr
                     logger.info(f"TP Group {tp_group_idx}: Cross-node TP with {nnodes} nodes, " f"dist_init_addr={dist_init_addr}")
                 else:
@@ -307,33 +308,44 @@ class RolloutManager:
                 f"dist_init_addr={cfg['dist_init_addr']}"
             )
 
-        # Phase 1: Initialize engines (ports allocated with socket hold)
+        # Phase 1: Allocate ports sequentially and initialize engines
+        # Combines slime's sequential allocation with verl's socket holding:
+        # - Sequential port search from 15000 (avoids conflicts)
+        # - Socket held until launch_server (minimizes race window)
+        start_port = 15000
         init_futures = []
-        worker_info = []  # Store (worker, cfg, ip) for phase 2
+        worker_info = []  # Store (worker, cfg, ip, port) for phase 2
         for cfg in engine_configs:
             worker = self.worker_handle[cfg["worker_idx"]]
             ip = ray.get(worker.get_ip.remote())
+
+            # Allocate ports with socket holding (verl-style)
+            # Each worker needs 2 ports: http port and nccl port
+            port = ray.get(worker.find_free_port_with_hold.remote(start_port, slot="port"))
+            nccl_port = ray.get(worker.find_free_port_with_hold.remote(port + 1, slot="nccl"))
+            start_port = nccl_port + 1  # Increment for next worker
 
             future = worker.init_engine.remote(
                 rank=cfg["worker_idx"],
                 dist_init_addr=cfg["dist_init_addr"],
                 ip=ip,
+                port=port,
+                nccl_port=nccl_port,
                 base_gpu_id=cfg["base_gpu_id"],
                 node_rank=cfg["node_rank"],
                 nnodes=cfg["nnodes"],
             )
             init_futures.append(future)
-            worker_info.append({"worker": worker, "cfg": cfg, "ip": ip})
+            worker_info.append({"worker": worker, "cfg": cfg, "ip": ip, "port": port})
 
         ray.get(init_futures)
 
         # Phase 2: Collect worker URLs and launch servers
         launch_futures = []
         for info in worker_info:
-            worker, cfg, ip = info["worker"], info["cfg"], info["ip"]
+            worker, cfg, ip, port = info["worker"], info["cfg"], info["ip"], info["port"]
 
             if cfg["is_tp0"]:
-                port = ray.get(worker.get_port.remote())
                 self.worker_urls.append(f"http://{ip}:{port}")
 
             launch_futures.append(worker.launch_server.remote())
@@ -387,11 +399,8 @@ class RolloutManager:
         from siirl.engine.rollout.sglang_engine import wait_until_ok
 
         router_ip = self.config.rollout.router_ip or get_net_interface_ip()
-        if self.config.rollout.router_port:
-            router_port = self.config.rollout.router_port
-        else:
-            router_port, router_sock = get_free_port(router_ip)
-            router_sock.close()  # Release just before router starts
+        # Use sequential port allocation starting from 25000 for router
+        router_port = self.config.rollout.router_port or get_free_port(router_ip, start_port=25000)
         router_address = f"{router_ip}:{router_port}"
 
         router_args = RouterArgs(

@@ -21,7 +21,7 @@ from loguru import logger
 
 from siirl.engine.rollout.sglang_engine import SglangEngine
 from siirl.params.training_args import SiiRLArguments
-from siirl.utils.net_utils.net import get_free_port, get_net_interface_ip
+from siirl.utils.net_utils.net import get_free_port, get_free_port_with_socket, get_net_interface_ip
 from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
 
 
@@ -68,15 +68,53 @@ class RolloutWorker:
         self.port = None  # Network port for the worker
         self.executor = None  # Rollout executor instance
         self.rollout_thread = None  # Thread for running the async rollout executor
-        # Port sockets held until server launch to prevent port races
+        # Socket holders for port reservation (verl-style)
         self._port_sock = None
         self._nccl_sock = None
+
+    def find_free_port(self, start_port: int = 15000) -> int:
+        """
+        Find a free port on this worker's node starting from start_port.
+
+        This method is called remotely by RolloutManager to allocate ports
+        on the correct node where the worker runs.
+
+        Args:
+            start_port: Starting port number for search
+
+        Returns:
+            int: Available port number
+        """
+        return get_free_port(get_net_interface_ip(), start_port=start_port)
+
+    def find_free_port_with_hold(self, start_port: int = 15000, slot: str = "port") -> int:
+        """
+        Find a free port and hold the socket to prevent race conditions.
+
+        Combines slime's sequential allocation with verl's socket holding.
+        The socket is held until launch_server() is called.
+
+        Args:
+            start_port: Starting port number for search
+            slot: Which slot to store socket ("port" or "nccl")
+
+        Returns:
+            int: Available port number
+        """
+        port, sock = get_free_port_with_socket(get_net_interface_ip(), start_port=start_port)
+        if slot == "port":
+            self._port_sock = sock
+        elif slot == "nccl":
+            self._nccl_sock = sock
+        return port
 
     def init_engine(
         self,
         rank: int,
         dist_init_addr: str,
         ip: str,
+        port: int,
+        nccl_port: int,
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
@@ -84,14 +122,13 @@ class RolloutWorker:
         """
         Initialize the rollout engine with explicit GPU placement parameters.
 
-        Ports are allocated internally with socket holding to prevent port races.
-        Call launch_server() to release sockets and start the server.
-
         Args:
             rank: Global rank of this engine instance (TP0 rank within rollout workers).
             dist_init_addr: Initialization address for distributed communication.
                             Used for cross-node TP communication (ip:port format).
             ip: IP address for the engine HTTP server.
+            port: Port number for the engine HTTP server.
+            nccl_port: Port number for NCCL backend communication.
             base_gpu_id: Starting CUDA device ID for this TP group.
             node_rank: Rank of this node within the TP group.
             nnodes: Number of nodes participating in this TP group.
@@ -99,9 +136,6 @@ class RolloutWorker:
         Todo:
             Add support for vLLM engine
         """
-        # Allocate ports with socket hold to prevent port races
-        port, self._port_sock = get_free_port(ip)
-        nccl_port, self._nccl_sock = get_free_port(ip)
 
         # TODO: Support vLLM engine
         if self.config.rollout.name == "sglang":
@@ -177,6 +211,7 @@ class RolloutWorker:
         Launch the SGLang server, releasing held port sockets first.
 
         This method should be called after init_engine() to actually start the server.
+        Sockets are released just before SGLang binds (verl-style minimal race window).
 
         Args:
             extra_server_args: Optional extra arguments for the server
@@ -227,19 +262,18 @@ class RolloutWorker:
         """
         return get_net_interface_ip()
 
-    def get_ip_port(self):
+    def get_ip_port(self, start_port: int = 15000):
         """
         Get a formatted string of IP address and a free port for the worker.
 
-        Note: The port is immediately released after this call, so there's a small
-        race window. Use init_engine() for port allocation with socket holding.
+        Args:
+            start_port: Starting port number for search
 
         Returns:
             str: Formatted string in "ip:port" format with a free port
         """
         host = get_net_interface_ip()
-        port, sock = get_free_port(host)
-        sock.close()  # Release immediately for dist_init_addr use case
+        port = get_free_port(host, start_port=start_port)
         return f"{host}:{port}"
 
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
