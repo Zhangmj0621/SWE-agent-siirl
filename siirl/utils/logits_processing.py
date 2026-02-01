@@ -129,12 +129,12 @@ def collect_response_indices(
                 continue
 
         actual_resp_len = local_end - local_start
-        logits_start = sample_start + local_start - 1
-        label_start = sample_start + local_start
+        # logits[k] and label[k] must be aligned for vocab_parallel_cross_entropy
+        start_idx = sample_start + local_start
 
         for j in range(actual_resp_len):
-            all_logits_indices.append(logits_start + j)
-            all_label_indices.append(label_start + j)
+            all_logits_indices.append(start_idx + j)
+            all_label_indices.append(start_idx + j)
 
         sample_boundaries.append((i, output_pos, actual_resp_len))
         output_pos += actual_resp_len
@@ -190,12 +190,12 @@ def process_slice_mode(
                 continue
 
         actual_resp_len = local_end - local_start
-        logits_start = sample_start + local_start - 1
-        label_start = sample_start + local_start
+        # logits[k] and label[k] must be aligned for vocab_parallel_cross_entropy
+        start_idx = sample_start + local_start
         pad_len = response_length - actual_resp_len
 
-        logits_chunk = packed_logits[logits_start : logits_start + actual_resp_len]
-        labels_chunk = packed_label[label_start : label_start + actual_resp_len]
+        logits_chunk = packed_logits[start_idx : start_idx + actual_resp_len]
+        labels_chunk = packed_label[start_idx : start_idx + actual_resp_len]
 
         # Entropy first, then log_probs (clone logits for log_probs when computing entropy)
         if calculate_entropy:
