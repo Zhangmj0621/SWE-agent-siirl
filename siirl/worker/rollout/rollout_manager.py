@@ -288,6 +288,9 @@ class RolloutManager:
 
         Each actor starts one SGLang process. For cross-node TP,
         actors in the same TP group share dist_init_addr and coordinate via NCCL.
+
+        Port allocation is done inside each worker with socket holding to prevent
+        port races. worker_urls are collected after init_engine completes.
         """
         from loguru import logger
 
@@ -304,32 +307,39 @@ class RolloutManager:
                 f"dist_init_addr={cfg['dist_init_addr']}"
             )
 
-        futures = []
+        # Phase 1: Initialize engines (ports allocated with socket hold)
+        init_futures = []
+        worker_info = []  # Store (worker, cfg, ip) for phase 2
         for cfg in engine_configs:
             worker = self.worker_handle[cfg["worker_idx"]]
-
-            # Get network configuration from worker
             ip = ray.get(worker.get_ip.remote())
-            port = ray.get(worker.get_free_port.remote())
-            nccl_port = ray.get(worker.get_free_port.remote())
 
             future = worker.init_engine.remote(
                 rank=cfg["worker_idx"],
                 dist_init_addr=cfg["dist_init_addr"],
                 ip=ip,
-                port=port,
-                nccl_port=nccl_port,
                 base_gpu_id=cfg["base_gpu_id"],
                 node_rank=cfg["node_rank"],
                 nnodes=cfg["nnodes"],
             )
-            futures.append(future)
+            init_futures.append(future)
+            worker_info.append({"worker": worker, "cfg": cfg, "ip": ip})
 
-            # Only TP0 (node_rank=0) registers with router
+        ray.get(init_futures)
+
+        # Phase 2: Collect worker URLs and launch servers
+        launch_futures = []
+        for info in worker_info:
+            worker, cfg, ip = info["worker"], info["cfg"], info["ip"]
+
             if cfg["is_tp0"]:
+                port = ray.get(worker.get_port.remote())
                 self.worker_urls.append(f"http://{ip}:{port}")
 
-        ray.get(futures)
+            launch_futures.append(worker.launch_server.remote())
+
+        ray.get(launch_futures)
+
         logger.info(
             f"Initialized {self.num_workers} SGLang processes "
             f"({self.num_tp_groups} TP groups, {len(self.worker_urls)} router endpoints)"
@@ -377,7 +387,11 @@ class RolloutManager:
         from siirl.engine.rollout.sglang_engine import wait_until_ok
 
         router_ip = self.config.rollout.router_ip or get_net_interface_ip()
-        router_port = self.config.rollout.router_port or get_free_port(router_ip)
+        if self.config.rollout.router_port:
+            router_port = self.config.rollout.router_port
+        else:
+            router_port, router_sock = get_free_port(router_ip)
+            router_sock.close()  # Release just before router starts
         router_address = f"{router_ip}:{router_port}"
 
         router_args = RouterArgs(

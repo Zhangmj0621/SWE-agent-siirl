@@ -33,11 +33,26 @@ def get_net_interface_ip():
 
 def get_free_port(address: str) -> tuple[int, socket.socket]:
     """
-    Ask the OS for a free port (ephemeral range) and return
-    (port, bound_socket). The socket is reused by caller.
+    Get a free port and return (port, bound_socket).
+
+    The socket remains bound until caller explicitly closes it,
+    preventing port races between allocation and actual server binding.
+
+    Usage:
+        port, sock = get_free_port(address)
+        # ... configure server with port ...
+        sock.close()  # Close just before server starts
+        server.start(port=port)
+
+    Args:
+        address: IP address to bind (IPv4 or IPv6)
+
+    Returns:
+        tuple[int, socket.socket]: (port, socket) - caller must close socket
     """
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
-    with socket.socket(family, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((address, 0))
-        return s.getsockname()[1]
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    sock.bind((address, 0))
+    return sock.getsockname()[1], sock

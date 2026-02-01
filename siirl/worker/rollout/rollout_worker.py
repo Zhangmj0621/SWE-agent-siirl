@@ -68,15 +68,15 @@ class RolloutWorker:
         self.port = None  # Network port for the worker
         self.executor = None  # Rollout executor instance
         self.rollout_thread = None  # Thread for running the async rollout executor
-        # Initial worker
+        # Port sockets held until server launch to prevent port races
+        self._port_sock = None
+        self._nccl_sock = None
 
     def init_engine(
         self,
         rank: int,
         dist_init_addr: str,
         ip: str,
-        port: int,
-        nccl_port: int,
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
@@ -84,13 +84,14 @@ class RolloutWorker:
         """
         Initialize the rollout engine with explicit GPU placement parameters.
 
+        Ports are allocated internally with socket holding to prevent port races.
+        Call launch_server() to release sockets and start the server.
+
         Args:
             rank: Global rank of this engine instance (TP0 rank within rollout workers).
             dist_init_addr: Initialization address for distributed communication.
                             Used for cross-node TP communication (ip:port format).
             ip: IP address for the engine HTTP server.
-            port: Port number for the engine HTTP server.
-            nccl_port: Port for NCCL backend communication.
             base_gpu_id: Starting CUDA device ID for this TP group.
             node_rank: Rank of this node within the TP group.
             nnodes: Number of nodes participating in this TP group.
@@ -98,6 +99,10 @@ class RolloutWorker:
         Todo:
             Add support for vLLM engine
         """
+        # Allocate ports with socket hold to prevent port races
+        port, self._port_sock = get_free_port(ip)
+        nccl_port, self._nccl_sock = get_free_port(ip)
+
         # TODO: Support vLLM engine
         if self.config.rollout.name == "sglang":
             self.engine = SglangEngine(
@@ -158,6 +163,36 @@ class RolloutWorker:
         self.executor.stop()
         self.rollout_thread.join()
 
+    def _release_port_sockets(self):
+        """Release held port sockets just before server binds."""
+        if self._port_sock:
+            self._port_sock.close()
+            self._port_sock = None
+        if self._nccl_sock:
+            self._nccl_sock.close()
+            self._nccl_sock = None
+
+    def launch_server(self, extra_server_args: dict = None):
+        """
+        Launch the SGLang server, releasing held port sockets first.
+
+        This method should be called after init_engine() to actually start the server.
+
+        Args:
+            extra_server_args: Optional extra arguments for the server
+        """
+        self._release_port_sockets()
+        self.engine.launch_server(extra_server_args)
+
+    def get_port(self) -> int:
+        """
+        Get the allocated port number for this worker's engine.
+
+        Returns:
+            int: The allocated port number
+        """
+        return self.port
+
     def set_router(self, router_address):
         """
         Update the router address for the engine.
@@ -196,21 +231,16 @@ class RolloutWorker:
         """
         Get a formatted string of IP address and a free port for the worker.
 
+        Note: The port is immediately released after this call, so there's a small
+        race window. Use init_engine() for port allocation with socket holding.
+
         Returns:
             str: Formatted string in "ip:port" format with a free port
         """
         host = get_net_interface_ip()
-        return f"{host}:{get_free_port(host)}"
-
-    def get_free_port(self):
-        """
-        Get a free network port on the current worker's network interface.
-
-        Returns:
-            int: Available free port number
-        """
-        host = get_net_interface_ip()
-        return get_free_port(host)
+        port, sock = get_free_port(host)
+        sock.close()  # Release immediately for dist_init_addr use case
+        return f"{host}:{port}"
 
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         return self.engine.init_param_sync_group(master_address, master_port, rank_offset, world_size, group_name, backend)
