@@ -250,12 +250,20 @@ class SglangEngine:
         response.raise_for_status()
         return response.json()["weight_version"]
 
-    def _make_request(self, endpoint: str, payload: dict | None = None):
+    def _make_request(
+        self,
+        endpoint: str,
+        payload: dict | None = None,
+        max_retries: int = 1,
+        retry_delay: float = 1.0,
+    ):
         """Make a POST request to the specified endpoint with the given payload.
 
         Args:
             endpoint: The API endpoint to call
             payload: The JSON payload to send (default: empty dict)
+            max_retries: Maximum number of retry attempts (default: 1, no retry)
+            retry_delay: Delay between retries in seconds (default: 1.0)
 
         Returns:
             The JSON response from the server
@@ -264,15 +272,28 @@ class SglangEngine:
             return
 
         url = f"{self.sgl_args.url()}/{endpoint}"
-        response = requests.post(url, json=payload or {})
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError:
-            logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
-            raise
-        return response.json()
+        last_exception = None
+
+        for attempt in range(max_retries):
+            response = requests.post(url, json=payload or {})
+            try:
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.HTTPError as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"[RETRY {attempt + 1}/{max_retries}] HTTP {response.status_code} for {endpoint}: "
+                        f"{response.text[:200]}. Retrying in {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
+
+        raise last_exception
 
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+        # Use retry mechanism for NCCL group initialization to handle race conditions
         return self._make_request(
             "init_weights_update_group",
             {
@@ -283,6 +304,8 @@ class SglangEngine:
                 "group_name": group_name,
                 "backend": backend,
             },
+            max_retries=3,
+            retry_delay=2.0,
         )
 
     def param_sync_from_distributed(

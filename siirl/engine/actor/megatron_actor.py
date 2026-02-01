@@ -1036,94 +1036,24 @@ class MegatronPPOActor:
                 except Exception:
                     pass
 
-            # Create logits processor config from actor arguments
-            actor_cfg = self.actor_config
-            _logits_config = None
-            from siirl.utils.logits_processing import LogitsProcessorConfig
+            from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
 
-            _logits_config = LogitsProcessorConfig.from_actor_config(
-                chunk_size=getattr(actor_cfg, "logprob_chunk_size", 4096),
-                use_checkpoint=getattr(actor_cfg, "use_logprob_checkpoint", True),
-                use_fused=getattr(actor_cfg, "use_fused_logprob", False),
-            )
-
-            def logits_processor(
-                logits, label, label_mask, _cu_seqlens=None, _attention_mask=None, _forward_only=None, _response_length=None
-            ):
-                """Memory-optimized logits processor."""
-                from siirl.utils.logits_processing import process_batched_mode, process_fallback_mode, process_slice_mode
-
-                # Apply temperature scaling
+            def logits_processor(logits, label, label_mask):
+                """Compute log probabilities and optionally entropy from logits."""
                 logits.div_(temperature)
-                packed_logits = logits.squeeze(0)  # [packed_len, vocab_size]
-                packed_label = label.squeeze(0)  # [packed_len]
+                ret = {}
+                if calculate_entropy:
+                    logits_bak = logits.clone()
+                    entropy = vocab_parallel_entropy(logits)
+                    ret["entropy"] = entropy
+                else:
+                    logits_bak = logits
+                log_probs = vocab_parallel_log_probs_from_logits(logits_bak, label)
+                log_probs = log_probs.masked_fill(~label_mask, 0.0)
+                ret["log_probs"] = log_probs
+                return ret
 
-                # Use config from actor arguments (captured from outer scope)
-                config = _logits_config
-
-                # Disable dynamo for fused kernel compatibility
-                import torch._dynamo as _dynamo
-
-                orig_dynamo_disable = _dynamo.config.disable
-                if config.use_fused:
-                    _dynamo.config.disable = True
-                    _dynamo.reset()
-
-                try:
-                    # Check if we can use response-only optimization
-                    # Set SIIRL_LOGPROB_FALLBACK=1 to force fallback mode (useful for debugging)
-                    use_fallback = os.environ.get("SIIRL_LOGPROB_FALLBACK", "0") == "1"
-                    has_boundary_info = _cu_seqlens is not None and _attention_mask is not None and _response_length is not None
-
-                    if use_fallback or not has_boundary_info:
-                        # Fallback mode: Standard processing (matches original master)
-                        return process_fallback_mode(
-                            packed_logits=packed_logits,
-                            packed_label=packed_label,
-                            label_mask=label_mask,
-                            calculate_entropy=calculate_entropy,
-                            config=config,
-                        )
-                    elif _forward_only:
-                        # SLICE mode: Zero-copy tensor views (inference only)
-                        return process_slice_mode(
-                            packed_logits=packed_logits,
-                            packed_label=packed_label,
-                            attention_mask=_attention_mask,
-                            cu_seqlens=_cu_seqlens,
-                            label_mask=label_mask,
-                            response_length=_response_length,
-                            calculate_entropy=calculate_entropy,
-                            config=config,
-                        )
-                    else:
-                        # BATCHED mode: Chunked cross entropy with gradient checkpointing
-                        return process_batched_mode(
-                            packed_logits=packed_logits,
-                            packed_label=packed_label,
-                            attention_mask=_attention_mask,
-                            cu_seqlens=_cu_seqlens,
-                            label_mask=label_mask,
-                            response_length=_response_length,
-                            calculate_entropy=calculate_entropy,
-                            config=config,
-                        )
-                finally:
-                    _dynamo.config.disable = orig_dynamo_disable
-
-            try:
-                import torch._dynamo as _dynamo  # type: ignore
-
-                logits_processor = _dynamo.disable(logits_processor)
-            except Exception:
-                pass
-
-            logits_processor_args = {
-                "label": label,
-                "label_mask": label_mask,
-                "_forward_only": forward_only,
-                "_response_length": response_length,
-            }
+            logits_processor_args = {"label": label, "label_mask": label_mask}
             output = forward_fn(
                 model,
                 input_ids,
