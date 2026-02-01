@@ -6,14 +6,14 @@ Environment variables:
     SIIRL_MEMORY_PROFILE=1   Export memory snapshots
 
 Usage:
-    from siirl.utils.memory_profiler import log_memory, memory_trace
+    from siirl.utils.logger.memory_profiler import log_memory, memory_trace
 
     log_memory("Before forward", reset_peak=True)
     with memory_trace("compute_log_prob"):
         output = model(...)
 
     # Or analyze a snapshot file:
-    python -m siirl.utils.memory_profiler snapshot.pickle
+    python -m siirl.utils.logger.memory_profiler snapshot.pickle
 """
 
 import gc
@@ -34,6 +34,7 @@ __all__ = [
     "profile_with_memory",
     "log_tf_config",
     "log_batch_info",
+    "MemoryProfiler",
 ]
 
 _MEMORY_DEBUG = os.environ.get("SIIRL_MEMORY_DEBUG", "0") == "1"
@@ -306,6 +307,69 @@ def print_memory_summary():
     logger.info("[PyTorch CUDA Memory Summary]")
     logger.info("=" * 60)
     print(torch.cuda.memory_summary())
+
+
+# ============================================================================
+# Training Step Memory Profiler
+# ============================================================================
+
+
+class MemoryProfiler:
+    """Helper class for memory profiling during training.
+
+    Enabled via environment variables:
+        SIIRL_MEMORY_PROFILE=1      Export memory snapshot for first step
+        SIIRL_MEMORY_STEP_PROFILE=1 Log peak memory per step
+
+    Usage:
+        profiler = MemoryProfiler.create_if_enabled(step, rank)
+        # ... training step ...
+        if profiler:
+            profiler.export_snapshot()
+    """
+
+    def __init__(self, step: int, rank: int, profile_step: bool = False):
+        self.step = step
+        self.rank = rank
+        self.profile_step = profile_step
+
+    @classmethod
+    def create_if_enabled(cls, step: int, rank: int) -> "MemoryProfiler | None":
+        """Create profiler if environment variables are set."""
+        enable_profile = os.environ.get("SIIRL_MEMORY_PROFILE", "0") == "1"
+        enable_step_profile = os.environ.get("SIIRL_MEMORY_STEP_PROFILE", "0") == "1"
+
+        if not (enable_profile or enable_step_profile):
+            return None
+
+        profiler = cls(step, rank, profile_step=enable_step_profile)
+
+        if enable_step_profile:
+            torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
+
+        if enable_profile and step == 0:
+            start_memory_recording()
+
+        return profiler
+
+    def export_snapshot(self):
+        """Export memory snapshot and log peak memory."""
+        if not torch.cuda.is_available():
+            return
+
+        # Log peak memory stats
+        if self.profile_step:
+            max_alloc_gb = torch.cuda.max_memory_allocated() / (1024**3)
+            max_reserved_gb = torch.cuda.max_memory_reserved() / (1024**3)
+            logger.info(f"[Memory] step={self.step} peak_alloc={max_alloc_gb:.2f}GB peak_reserved={max_reserved_gb:.2f}GB")
+
+        # Export detailed snapshot for step 0
+        enable_profile = os.environ.get("SIIRL_MEMORY_PROFILE", "0") == "1"
+        if enable_profile and self.step == 0 and self.rank == 0:
+            log_memory("End of train_step 0")
+            output_dir = os.environ.get("SIIRL_PROFILE_OUTPUT_DIR", os.getcwd())
+            snapshot_path = os.path.join(output_dir, f"memory_snapshot_rank{self.rank}_step{self.step}.pickle")
+            stop_memory_recording_and_export(snapshot_path)
 
 
 # ============================================================================
