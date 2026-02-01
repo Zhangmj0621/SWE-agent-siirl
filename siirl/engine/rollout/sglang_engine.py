@@ -45,7 +45,6 @@ class SglangEngine:
         dist_init_addr: str,
         ip: str,
         port: int,
-        nccl_port: int,
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
@@ -54,6 +53,9 @@ class SglangEngine:
         """
         Initialize SGLang engine with explicit GPU placement parameters.
 
+        Note: nccl_port is not passed - SGLang will auto-allocate it internally,
+        eliminating port race conditions for NCCL communication.
+
         Args:
             rank: Global rank of this engine instance (TP0 rank within rollout workers).
             config: SiiRLArguments configuration object.
@@ -61,7 +63,6 @@ class SglangEngine:
                             Used for cross-node TP communication.
             ip: IP address to bind the SGLang HTTP server.
             port: Port number for the SGLang HTTP server.
-            nccl_port: Port number for NCCL backend communication.
             base_gpu_id: Starting CUDA device ID for this TP group (from GPUResources).
             node_rank: Rank of this node within the TP group (0 for single-node TP).
             nnodes: Number of nodes participating in this TP group (1 for single-node TP).
@@ -72,7 +73,6 @@ class SglangEngine:
         self.config = config
         self.dist_init_addr = dist_init_addr
         self.port = port
-        self.nccl_port = nccl_port
         self.ip = ip
         self.weight_version = 0
         # GPU placement parameters (directly passed, not calculated)
@@ -95,7 +95,8 @@ class SglangEngine:
             top_k=config.rollout.top_k,
             repetition_penalty=1.0,
         )
-        self.launch_server(extra_server_args)
+        self._extra_server_args = extra_server_args
+        self.process = None  # Server process, started by launch_server()
 
     def _build_server_args(self) -> dict:
         """
@@ -128,7 +129,7 @@ class SglangEngine:
             # Network configuration
             "host": self.ip,
             "port": self.port,
-            "nccl_port": self.nccl_port,
+            # nccl_port not passed - SGLang auto-allocates to avoid race conditions
             # Server settings
             "trust_remote_code": config.trust_remote_code,
             "max_running_requests": config.max_num_seqs,

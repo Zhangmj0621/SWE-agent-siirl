@@ -316,17 +316,16 @@ class RolloutManager:
             worker = self.worker_handle[cfg["worker_idx"]]
             ip = ray.get(worker.get_ip.remote())
 
-            # Allocate ports: http port with socket holding, nccl port without
-            port = ray.get(worker.find_free_port_with_hold.remote(start_port, slot="port"))
-            nccl_port = ray.get(worker.find_free_port.remote(port + 1, strict=True))
-            start_port = nccl_port + 1  # Increment for next worker
+            # Allocate http port (slime-style sequential allocation)
+            # nccl_port is not passed - SGLang auto-allocates it internally
+            port = ray.get(worker.find_free_port.remote(start_port))
+            start_port = port + 1  # Increment for next worker
 
             future = worker.init_engine.remote(
                 rank=cfg["worker_idx"],
                 dist_init_addr=cfg["dist_init_addr"],
                 ip=ip,
                 port=port,
-                nccl_port=nccl_port,
                 base_gpu_id=cfg["base_gpu_id"],
                 node_rank=cfg["node_rank"],
                 nnodes=cfg["nnodes"],

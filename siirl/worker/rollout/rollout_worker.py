@@ -21,7 +21,7 @@ from loguru import logger
 
 from siirl.engine.rollout.sglang_engine import SglangEngine
 from siirl.params.training_args import SiiRLArguments
-from siirl.utils.net_utils.net import get_free_port, get_free_port_with_socket, get_net_interface_ip
+from siirl.utils.net_utils.net import get_free_port, get_net_interface_ip
 from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
 
 
@@ -68,49 +68,22 @@ class RolloutWorker:
         self.port = None  # Network port for the worker
         self.executor = None  # Rollout executor instance
         self.rollout_thread = None  # Thread for running the async rollout executor
-        # Socket holder for HTTP port reservation
-        self._port_sock = None
+        self.engine = None  # SGLang engine instance
 
-    def find_free_port(self, start_port: int = 15000, strict: bool = False) -> int:
+    def find_free_port(self, start_port: int = 15000) -> int:
         """
         Find a free port on this worker's node starting from start_port.
 
         This method is called remotely by RolloutManager to allocate ports
-        on the correct node where the worker runs.
+        on the correct node where the worker runs (slime-style sequential allocation).
 
         Args:
             start_port: Starting port number for search
-            strict: If True, don't use SO_REUSEPORT during availability checks
 
         Returns:
             int: Available port number
         """
-        return get_free_port(get_net_interface_ip(), start_port=start_port, strict=strict)
-
-    def find_free_port_with_hold(self, start_port: int = 15000, slot: str = "port") -> int:
-        """
-        Find a free port and hold the socket to prevent race conditions.
-
-        Combines slime's sequential allocation with verl's socket holding.
-        The socket is held until launch_server() is called.
-
-        Note: Only use for HTTP port. nccl_port should use find_free_port().
-
-        Args:
-            start_port: Starting port number for search
-            slot: Which slot to store socket (only "port" is supported)
-
-        Returns:
-            int: Available port number
-        """
-        port, sock = get_free_port_with_socket(
-            get_net_interface_ip(),
-            start_port=start_port,
-            reuseport=False,
-        )
-        if slot == "port":
-            self._port_sock = sock
-        return port
+        return get_free_port(get_net_interface_ip(), start_port=start_port)
 
     def init_engine(
         self,
@@ -118,7 +91,6 @@ class RolloutWorker:
         dist_init_addr: str,
         ip: str,
         port: int,
-        nccl_port: int,
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
@@ -126,13 +98,15 @@ class RolloutWorker:
         """
         Initialize the rollout engine with explicit GPU placement parameters.
 
+        Note: nccl_port is not passed - SGLang will auto-allocate it internally,
+        eliminating port race conditions for NCCL communication.
+
         Args:
             rank: Global rank of this engine instance (TP0 rank within rollout workers).
             dist_init_addr: Initialization address for distributed communication.
                             Used for cross-node TP communication (ip:port format).
             ip: IP address for the engine HTTP server.
             port: Port number for the engine HTTP server.
-            nccl_port: Port number for NCCL backend communication.
             base_gpu_id: Starting CUDA device ID for this TP group.
             node_rank: Rank of this node within the TP group.
             nnodes: Number of nodes participating in this TP group.
@@ -140,7 +114,6 @@ class RolloutWorker:
         Todo:
             Add support for vLLM engine
         """
-
         # TODO: Support vLLM engine
         if self.config.rollout.name == "sglang":
             self.engine = SglangEngine(
@@ -149,13 +122,39 @@ class RolloutWorker:
                 dist_init_addr=dist_init_addr,
                 ip=ip,
                 port=port,
-                nccl_port=nccl_port,
                 base_gpu_id=base_gpu_id,
                 node_rank=node_rank,
                 nnodes=nnodes,
             )
             self.ip = ip
             self.port = port
+
+    def launch_server(self, max_retries: int = 3):
+        """
+        Launch the SGLang server with retry mechanism for port conflicts.
+
+        If the server fails to start (e.g., due to port conflict), it will
+        retry with a new port up to max_retries times.
+
+        Args:
+            max_retries: Maximum number of retry attempts (default: 3)
+        """
+        for attempt in range(max_retries):
+            try:
+                self.engine.launch_server()
+                return  # Success
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    # Get a new port and retry
+                    new_port = get_free_port(get_net_interface_ip(), start_port=self.port + 1)
+                    logger.warning(
+                        f"Port {self.port} conflict (attempt {attempt + 1}/{max_retries}), " f"retrying with port {new_port}: {e}"
+                    )
+                    self.port = new_port
+                    self.engine.port = new_port
+                else:
+                    logger.error(f"Failed to start server after {max_retries} attempts")
+                    raise
 
     def start_rollout(self, router_address, data_coordinator, num_engine):
         """
@@ -200,25 +199,6 @@ class RolloutWorker:
         """
         self.executor.stop()
         self.rollout_thread.join()
-
-    def _release_port_sockets(self):
-        """Release held port sockets just before server binds."""
-        if self._port_sock:
-            self._port_sock.close()
-            self._port_sock = None
-
-    def launch_server(self, extra_server_args: dict = None):
-        """
-        Launch the SGLang server, releasing held port sockets first.
-
-        This method should be called after init_engine() to actually start the server.
-        Sockets are released just before SGLang binds (verl-style minimal race window).
-
-        Args:
-            extra_server_args: Optional extra arguments for the server
-        """
-        self._release_port_sockets()
-        self.engine.launch_server(extra_server_args)
 
     def get_port(self) -> int:
         """
