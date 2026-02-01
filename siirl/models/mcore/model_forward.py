@@ -1,18 +1,11 @@
 """GPT model forward pass with memory optimization."""
 
-import os
-
 import torch
 
 from siirl.utils.megatron.megatron_utils import unwrap_model
 
 from .util import postprocess_packed_seqs, preprocess_packed_seqs, recover_left_padding, remove_left_padding
 from siirl.utils.backend.device import get_device_id, get_torch_device
-
-def _is_debug_enabled() -> bool:
-    """Check if memory debug mode is enabled."""
-    return os.environ.get("SIIRL_MEMORY_DEBUG", "0") == "1"
-
 
 def gptmodel_forward(
     model,

@@ -951,24 +951,9 @@ class MegatronPPOActor:
         micro_batch_size=None,
     ):
         """Execute forward-backward pass through pipeline parallel stages"""
-        debug = os.environ.get("SIIRL_MEMORY_DEBUG", "0") == "1"
+        from siirl.utils.memory_profiler import log_batch_info, log_tf_config
 
-        # Log TransformerConfig settings once
-        if debug and not hasattr(self, "_logged_tf_config"):
-            self._logged_tf_config = True
-            tf = self.tf_config
-            logger.warning("=" * 60)
-            logger.warning("[MemDebug] TransformerConfig Memory-Related Settings:")
-            logger.warning("  recompute_granularity: {}", getattr(tf, "recompute_granularity", "N/A"))
-            logger.warning("  recompute_method: {}", getattr(tf, "recompute_method", "N/A"))
-            logger.warning("  recompute_num_layers: {}", getattr(tf, "recompute_num_layers", "N/A"))
-            logger.warning("  sequence_parallel: {}", getattr(tf, "sequence_parallel", "N/A"))
-            logger.warning("  num_layers: {}", getattr(tf, "num_layers", "N/A"))
-            logger.warning("  hidden_size: {}", getattr(tf, "hidden_size", "N/A"))
-            logger.warning("  num_attention_heads: {}", getattr(tf, "num_attention_heads", "N/A"))
-            logger.warning("  context_parallel_size: {}", getattr(tf, "context_parallel_size", "N/A"))
-            logger.warning("  tensor_model_parallel_size: {}", getattr(tf, "tensor_model_parallel_size", "N/A"))
-            logger.warning("=" * 60)
+        log_tf_config(self.tf_config, tag="ActorWorker")
 
         # Broadcast data across pipeline ranks
         data.to(get_device_id())
@@ -986,17 +971,7 @@ class MegatronPPOActor:
         assert micro_batch_size is not None
         micro_batches = mini_batch.split(micro_batch_size)
 
-        if debug:
-            total_batch_size = data["input_ids"].shape[0]
-            seq_len = data["input_ids"].shape[1]
-            response_len = data["responses"].shape[1]
-            logger.warning("[MemDebug] Batch Info:")
-            logger.warning("  total_batch_size: {}", total_batch_size)
-            logger.warning("  micro_batch_size: {}", micro_batch_size)
-            logger.warning("  n_micro_batches: {}", len(micro_batches))
-            logger.warning("  seq_len: {}", seq_len)
-            logger.warning("  response_len: {}", response_len)
-            logger.warning("  forward_only: {}", forward_only)
+        log_batch_info(data, micro_batch_size, len(micro_batches), forward_only)
 
         n_micro_batch = len(micro_batches)
         forward_backward_func = get_forward_backward_func()

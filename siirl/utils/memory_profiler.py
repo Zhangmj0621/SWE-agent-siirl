@@ -32,7 +32,55 @@ __all__ = [
     "log_memory",
     "memory_trace",
     "profile_with_memory",
+    "log_tf_config",
+    "log_batch_info",
 ]
+
+_MEMORY_DEBUG = os.environ.get("SIIRL_MEMORY_DEBUG", "0") == "1"
+
+# Track logged configs to avoid duplicate logs
+_logged_configs: set = set()
+
+
+def log_tf_config(tf_config, tag: str = ""):
+    """Log TransformerConfig memory-related settings (only when SIIRL_MEMORY_DEBUG=1)."""
+    if not _MEMORY_DEBUG:
+        return
+    key = f"tf_config_{tag}"
+    if key in _logged_configs:
+        return
+    _logged_configs.add(key)
+
+    attrs = [
+        "recompute_granularity",
+        "recompute_method",
+        "recompute_num_layers",
+        "sequence_parallel",
+        "num_layers",
+        "hidden_size",
+        "num_attention_heads",
+        "context_parallel_size",
+        "tensor_model_parallel_size",
+    ]
+    logger.warning("=" * 60)
+    logger.warning("[MemDebug] TransformerConfig {}:", tag)
+    for attr in attrs:
+        logger.warning("  {}: {}", attr, getattr(tf_config, attr, "N/A"))
+    logger.warning("=" * 60)
+
+
+def log_batch_info(data, micro_batch_size: int, n_micro_batches: int, forward_only: bool):
+    """Log batch info (only when SIIRL_MEMORY_DEBUG=1)."""
+    if not _MEMORY_DEBUG:
+        return
+    logger.warning("[MemDebug] Batch Info:")
+    logger.warning("  total_batch_size: {}", data["input_ids"].shape[0])
+    logger.warning("  micro_batch_size: {}", micro_batch_size)
+    logger.warning("  n_micro_batches: {}", n_micro_batches)
+    logger.warning("  seq_len: {}", data["input_ids"].shape[1])
+    logger.warning("  response_len: {}", data["responses"].shape[1])
+    logger.warning("  forward_only: {}", forward_only)
+
 
 # ============================================================================
 # Memory Recording (Detailed memory allocation tracking)
