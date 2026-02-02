@@ -1,7 +1,7 @@
 from siirl.utils.megatron.megatron_utils import unwrap_model
 
 from .util import postprocess_packed_seqs, preprocess_packed_seqs, recover_left_padding, remove_left_padding
-
+from siirl.utils.backend.device import get_device_id, get_torch_device
 
 def gptmodel_forward(
     model,
@@ -18,6 +18,7 @@ def gptmodel_forward(
     """Default forward pass for GPT models with optional sequence packing."""
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
+    get_torch_device().empty_cache()
     if pack_seqs:
         batch_size, seq_len = attention_mask.shape[:2]
         input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=pre_process)
