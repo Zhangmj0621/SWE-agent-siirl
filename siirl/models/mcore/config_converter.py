@@ -63,6 +63,7 @@ def _get_base_transformer_config(
         "variable_seq_lengths": True,
         "masked_softmax_fusion": True,
         "moe_token_dispatcher_type": "alltoall",
+        "deallocate_pipeline_outputs": True,
     }
 
     # Update with any provided overrides
