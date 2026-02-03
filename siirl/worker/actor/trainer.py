@@ -33,6 +33,8 @@ from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.params import SiiRLArguments, TrainingArguments
 from siirl.utils.backend.device import get_nccl_backend, get_torch_device
 from siirl.utils.distributed_utils import init_gloo_group
+from siirl.utils.logger.memory_profiler import MemoryProfiler
+from siirl.utils.megatron.megatron_utils import offload_megatron_model_to_cpu
 from siirl.utils.timer import Timer, TimerCollection
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
 
@@ -64,6 +66,33 @@ def global_initialize_model_parallel(config: TrainingArguments):
             expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
             nccl_communicator_config_path=None,
         )
+
+        # Set Megatron global args for recompute (activation checkpointing)
+        # This is required because Megatron's forward_backward_func reads from global args
+        try:
+            from argparse import Namespace
+
+            from megatron.training.global_vars import get_args, set_args
+
+            # Try to get existing args, or create new one
+            try:
+                megatron_args = get_args()
+                if megatron_args is None:
+                    megatron_args = Namespace()
+            except Exception:
+                megatron_args = Namespace()
+
+            # Set recompute parameters for memory optimization
+            megatron_args.recompute_granularity = "full"
+            megatron_args.recompute_method = "uniform"
+            megatron_args.recompute_num_layers = 1
+            megatron_args.distribute_saved_activations = False
+
+            set_args(megatron_args)
+            logger.debug("[Memory] Enabled Megatron activation recompute: granularity=full, method=uniform")
+        except ImportError:
+            pass  # Megatron global_vars not available, skip recompute config
+
         set_random_seed(seed=megatron_config.seed)
 
 
@@ -263,12 +292,24 @@ class Trainer:
     # @timer
     def update_rollout_weight(self):
         assert self.param_sync is not None, "must setup param sync first"
+
+        # Load actor model to GPU before weight sync (needed when param_offload=True)
+        if self.actor_worker._is_offload_param:
+            from siirl.utils.megatron.megatron_utils import load_megatron_model_to_gpu
+
+            load_megatron_model_to_gpu(self.actor_worker.actor_module, load_grad=False)
+
         if isinstance(self.param_sync, ParamSyncDistributed):
             # TODO support elastic rollout connection
             rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
             if any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
                 self.param_sync.setup_param_sync_group(rollout_workers)
         self.param_sync.update_weights()
+
+        # Offload actor model back to CPU after weight sync
+        if self.actor_worker._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_worker.actor_module)
+            get_torch_device().empty_cache()
 
     def has_critic(self):
         return self.critic_worker is not None
@@ -390,6 +431,9 @@ class Trainer:
     def train_step(self, batch_data):
         timers = TimerCollection()
 
+        # Optional memory profiling (enabled via SIIRL_MEMORY_PROFILE=1)
+        memory_profiler = MemoryProfiler.create_if_enabled(self.global_step, self.rank)
+
         with timers["step"]:
             data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
 
@@ -402,6 +446,12 @@ class Trainer:
                 response_mask = data_with_logprobs["response_mask"]
                 loss_agg_mode = self.config.actor_ref.actor.loss_agg_mode
                 entropy_loss = agg_loss(entropys, response_mask.to(entropys.device), loss_agg_mode)
+
+            # Memory optimization: offload actor before ref inference to avoid peak memory
+            # when both actor and ref models are on GPU simultaneously
+            if self.actor_worker._is_offload_param:
+                offload_megatron_model_to_cpu(self.actor_worker.actor_module)
+                get_torch_device().empty_cache()
 
             with timers["ref"]:
                 data_with_ref = self.ref_worker.compute_ref_log_prob(data_with_logprobs)
@@ -507,6 +557,10 @@ class Trainer:
 
             except Exception as e:
                 logger.warning(f"[Trainer rank={self.rank}] Failed to submit metrics: {e}")
+
+        # Export memory snapshot if profiling enabled
+        if memory_profiler:
+            memory_profiler.export_snapshot()
 
         logger.success(
             f"[Trainer.train_step] rank={self.rank} dp_rank={self.dp_rank} step={self.global_step} completed in {timers['step'].formatted}"

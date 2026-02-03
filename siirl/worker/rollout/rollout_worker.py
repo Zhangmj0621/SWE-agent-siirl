@@ -68,7 +68,22 @@ class RolloutWorker:
         self.port = None  # Network port for the worker
         self.executor = None  # Rollout executor instance
         self.rollout_thread = None  # Thread for running the async rollout executor
-        # Initial worker
+        self.engine = None  # SGLang engine instance
+
+    def find_free_port(self, start_port: int = 15000) -> int:
+        """
+        Find a free port on this worker's node starting from start_port.
+
+        This method is called remotely by RolloutManager to allocate ports
+        on the correct node where the worker runs (slime-style sequential allocation).
+
+        Args:
+            start_port: Starting port number for search
+
+        Returns:
+            int: Available port number
+        """
+        return get_free_port(get_net_interface_ip(), start_port=start_port)
 
     def init_engine(
         self,
@@ -76,7 +91,6 @@ class RolloutWorker:
         dist_init_addr: str,
         ip: str,
         port: int,
-        nccl_port: int,
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
@@ -84,13 +98,15 @@ class RolloutWorker:
         """
         Initialize the rollout engine with explicit GPU placement parameters.
 
+        Note: nccl_port is not passed - SGLang will auto-allocate it internally,
+        eliminating port race conditions for NCCL communication.
+
         Args:
             rank: Global rank of this engine instance (TP0 rank within rollout workers).
             dist_init_addr: Initialization address for distributed communication.
                             Used for cross-node TP communication (ip:port format).
             ip: IP address for the engine HTTP server.
             port: Port number for the engine HTTP server.
-            nccl_port: Port for NCCL backend communication.
             base_gpu_id: Starting CUDA device ID for this TP group.
             node_rank: Rank of this node within the TP group.
             nnodes: Number of nodes participating in this TP group.
@@ -106,13 +122,39 @@ class RolloutWorker:
                 dist_init_addr=dist_init_addr,
                 ip=ip,
                 port=port,
-                nccl_port=nccl_port,
                 base_gpu_id=base_gpu_id,
                 node_rank=node_rank,
                 nnodes=nnodes,
             )
             self.ip = ip
             self.port = port
+
+    def launch_server(self, max_retries: int = 3):
+        """
+        Launch the SGLang server with retry mechanism for port conflicts.
+
+        If the server fails to start (e.g., due to port conflict), it will
+        retry with a new port up to max_retries times.
+
+        Args:
+            max_retries: Maximum number of retry attempts (default: 3)
+        """
+        for attempt in range(max_retries):
+            try:
+                self.engine.launch_server()
+                return  # Success
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    # Get a new port and retry
+                    new_port = get_free_port(get_net_interface_ip(), start_port=self.port + 1)
+                    logger.warning(
+                        f"Port {self.port} conflict (attempt {attempt + 1}/{max_retries}), " f"retrying with port {new_port}: {e}"
+                    )
+                    self.port = new_port
+                    self.engine.port = new_port
+                else:
+                    logger.error(f"Failed to start server after {max_retries} attempts")
+                    raise
 
     def start_rollout(self, router_address, data_coordinator, num_engine):
         """
@@ -158,6 +200,15 @@ class RolloutWorker:
         self.executor.stop()
         self.rollout_thread.join()
 
+    def get_port(self) -> int:
+        """
+        Get the allocated port number for this worker's engine.
+
+        Returns:
+            int: The allocated port number
+        """
+        return self.port
+
     def set_router(self, router_address):
         """
         Update the router address for the engine.
@@ -192,25 +243,19 @@ class RolloutWorker:
         """
         return get_net_interface_ip()
 
-    def get_ip_port(self):
+    def get_ip_port(self, start_port: int = 15000):
         """
         Get a formatted string of IP address and a free port for the worker.
+
+        Args:
+            start_port: Starting port number for search
 
         Returns:
             str: Formatted string in "ip:port" format with a free port
         """
         host = get_net_interface_ip()
-        return f"{host}:{get_free_port(host)}"
-
-    def get_free_port(self):
-        """
-        Get a free network port on the current worker's network interface.
-
-        Returns:
-            int: Available free port number
-        """
-        host = get_net_interface_ip()
-        return get_free_port(host)
+        port = get_free_port(host, start_port=start_port)
+        return f"{host}:{port}"
 
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         return self.engine.init_param_sync_group(master_address, master_port, rank_offset, world_size, group_name, backend)

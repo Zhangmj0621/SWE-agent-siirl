@@ -1,3 +1,7 @@
+"""GPT model forward pass with memory optimization."""
+
+import torch
+
 from siirl.utils.megatron.megatron_utils import unwrap_model
 
 from .util import postprocess_packed_seqs, preprocess_packed_seqs, recover_left_padding, remove_left_padding
@@ -15,10 +19,11 @@ def gptmodel_forward(
     logits_processor_args: dict = None,
     **kwargs,
 ):
-    """Default forward pass for GPT models with optional sequence packing."""
+    """Forward pass for GPT models with optional sequence packing."""
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
     get_torch_device().empty_cache()
+
     if pack_seqs:
         batch_size, seq_len = attention_mask.shape[:2]
         input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=pre_process)
@@ -32,6 +37,11 @@ def gptmodel_forward(
         if post_process and logits_processor is not None:
             args = {k: preprocess_packed_seqs(v, attention_mask, pre_process=True)[0] for k, v in logits_processor_args.items()}
             output_dict = logits_processor(output_orig, **args)
+
+            # Memory optimization: release logits immediately after processing
+            del output_orig
+            torch.cuda.empty_cache()
+
             output = {
                 k: postprocess_packed_seqs(
                     v,
@@ -74,6 +84,8 @@ def gptmodel_forward(
             sequence_length,
             post_process=post_process,
         )
+
     if value_model and post_process:
         output = output[..., 0]
+
     return output

@@ -45,7 +45,6 @@ class SglangEngine:
         dist_init_addr: str,
         ip: str,
         port: int,
-        nccl_port: int,
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
@@ -54,6 +53,9 @@ class SglangEngine:
         """
         Initialize SGLang engine with explicit GPU placement parameters.
 
+        Note: nccl_port is not passed - SGLang will auto-allocate it internally,
+        eliminating port race conditions for NCCL communication.
+
         Args:
             rank: Global rank of this engine instance (TP0 rank within rollout workers).
             config: SiiRLArguments configuration object.
@@ -61,7 +63,6 @@ class SglangEngine:
                             Used for cross-node TP communication.
             ip: IP address to bind the SGLang HTTP server.
             port: Port number for the SGLang HTTP server.
-            nccl_port: Port number for NCCL backend communication.
             base_gpu_id: Starting CUDA device ID for this TP group (from GPUResources).
             node_rank: Rank of this node within the TP group (0 for single-node TP).
             nnodes: Number of nodes participating in this TP group (1 for single-node TP).
@@ -72,7 +73,6 @@ class SglangEngine:
         self.config = config
         self.dist_init_addr = dist_init_addr
         self.port = port
-        self.nccl_port = nccl_port
         self.ip = ip
         self.weight_version = 0
         # GPU placement parameters (directly passed, not calculated)
@@ -95,7 +95,8 @@ class SglangEngine:
             top_k=config.rollout.top_k,
             repetition_penalty=1.0,
         )
-        self.launch_server(extra_server_args)
+        self._extra_server_args = extra_server_args
+        self.process = None  # Server process, started by launch_server()
 
     def _build_server_args(self) -> dict:
         """
@@ -128,7 +129,7 @@ class SglangEngine:
             # Network configuration
             "host": self.ip,
             "port": self.port,
-            "nccl_port": self.nccl_port,
+            # nccl_port not passed - SGLang auto-allocates to avoid race conditions
             # Server settings
             "trust_remote_code": config.trust_remote_code,
             "max_running_requests": config.max_num_seqs,
@@ -250,12 +251,20 @@ class SglangEngine:
         response.raise_for_status()
         return response.json()["weight_version"]
 
-    def _make_request(self, endpoint: str, payload: dict | None = None):
+    def _make_request(
+        self,
+        endpoint: str,
+        payload: dict | None = None,
+        max_retries: int = 1,
+        retry_delay: float = 1.0,
+    ):
         """Make a POST request to the specified endpoint with the given payload.
 
         Args:
             endpoint: The API endpoint to call
             payload: The JSON payload to send (default: empty dict)
+            max_retries: Maximum number of retry attempts (default: 1, no retry)
+            retry_delay: Delay between retries in seconds (default: 1.0)
 
         Returns:
             The JSON response from the server
@@ -264,15 +273,28 @@ class SglangEngine:
             return
 
         url = f"{self.sgl_args.url()}/{endpoint}"
-        response = requests.post(url, json=payload or {})
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError:
-            logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
-            raise
-        return response.json()
+        last_exception = None
+
+        for attempt in range(max_retries):
+            response = requests.post(url, json=payload or {})
+            try:
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.HTTPError as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"[RETRY {attempt + 1}/{max_retries}] HTTP {response.status_code} for {endpoint}: "
+                        f"{response.text[:200]}. Retrying in {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
+
+        raise last_exception
 
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+        # Use retry mechanism for NCCL group initialization to handle race conditions
         return self._make_request(
             "init_weights_update_group",
             {
@@ -283,6 +305,8 @@ class SglangEngine:
                 "group_name": group_name,
                 "backend": backend,
             },
+            max_retries=3,
+            retry_delay=2.0,
         )
 
     def param_sync_from_distributed(

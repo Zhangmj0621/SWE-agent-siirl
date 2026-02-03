@@ -1,12 +1,8 @@
-import os
 from functools import partial
-
-# Disable Transformer Engine to avoid ABI compatibility issues
-# This is needed when transformer_engine is compiled for a different PyTorch version
-os.environ.setdefault("NVTE_FRAMEWORK", "none")
 
 import torch
 import torch.distributed
+from loguru import logger
 from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
@@ -14,12 +10,14 @@ from omegaconf import OmegaConf
 from tensordict import NonTensorData, TensorDict
 from torch import nn
 
+import siirl.engine.actor._env_setup  # noqa: F401 - sets NVTE_FRAMEWORK before torch import
 from siirl.algorithm.kl_penalty import kl_penalty
 from siirl.algorithm.loss import agg_loss, compute_value_loss, get_policy_loss_fn
 from siirl.engine.actor.utils import append_to_dict
 from siirl.params import SiiRLArguments
 from siirl.utils.backend.device import get_device_id, get_device_name, get_torch_device
 from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
+from siirl.utils.logger import GPUMemoryLogger
 from siirl.utils.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
@@ -27,7 +25,6 @@ from siirl.utils.megatron.megatron_utils import (
     offload_megatron_optimizer,
 )
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
-from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
 from siirl.utils.model_utils.flops_counter import FlopsCounter
 from siirl.utils.model_utils.model import get_hf_model_path, load_megatron_gptmodel_weights
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
@@ -106,7 +103,16 @@ class ActorWorker:
                 print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
-            bridge.set_extra_args(**override_transformer_config)
+            # Default activation recomputation config for memory optimization
+            # These can be overridden by override_transformer_config
+            recompute_defaults = {
+                "recompute_granularity": "full",
+                "recompute_method": "uniform",
+                "recompute_num_layers": 1,
+            }
+            # Merge defaults with user overrides (user overrides take precedence)
+            merged_config = {**recompute_defaults, **override_transformer_config}
+            bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
             self.bridge = bridge
         else:
@@ -224,9 +230,11 @@ class ActorWorker:
 
         get_torch_device().empty_cache()
 
+    @GPUMemoryLogger(role="ActorWorker")
     def update_actor(self, data: TensorDict):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
+
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.actor_optimizer)
 
@@ -268,6 +276,7 @@ class ActorWorker:
 
         return data
 
+    @GPUMemoryLogger(role="ActorWorker")
     def compute_log_prob(self, data: TensorDict):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
@@ -385,10 +394,17 @@ class ReferenceWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
+                logger.warning("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
-            bridge.set_extra_args(**override_transformer_config)
+            # Default activation recomputation config for memory optimization (ReferenceWorker)
+            recompute_defaults = {
+                "recompute_granularity": "full",
+                "recompute_method": "uniform",
+                "recompute_num_layers": 1,
+            }
+            merged_config = {**recompute_defaults, **override_transformer_config}
+            bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
             self.bridge = bridge
         else:
@@ -467,6 +483,7 @@ class ReferenceWorker:
 
         get_torch_device().empty_cache()
 
+    @GPUMemoryLogger(role="ReferenceWorker")
     def compute_ref_log_prob(self, data: TensorDict):
         if self._ref_is_offload_param:
             load_megatron_model_to_gpu(self.ref_module, load_grad=False)
@@ -550,10 +567,17 @@ class CriticWorker:
             try:
                 from mbridge import AutoBridge
             except ImportError:
-                print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
+                logger.warning("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
 
             bridge = AutoBridge.from_config(hf_config)
-            bridge.set_extra_args(**override_transformer_config)
+            # Default activation recomputation config for memory optimization (CriticWorker)
+            recompute_defaults = {
+                "recompute_granularity": "full",
+                "recompute_method": "uniform",
+                "recompute_num_layers": 1,
+            }
+            merged_config = {**recompute_defaults, **override_transformer_config}
+            bridge.set_extra_args(**merged_config)
             tf_config = bridge.config
             self.bridge = bridge
         else:
@@ -670,6 +694,7 @@ class CriticWorker:
             lr_scheduler=self.critic_optimizer_scheduler,
         )
 
+    @GPUMemoryLogger(role="CriticWorker")
     def compute_values(self, data: TensorDict):
         micro_batch_size = self.critic_config.ppo_micro_batch_size_per_gpu
         data["micro_batch_size"] = NonTensorData(micro_batch_size)
@@ -687,6 +712,7 @@ class CriticWorker:
 
         return data
 
+    @GPUMemoryLogger(role="CriticWorker")
     def update_critic(self, data: TensorDict):
         data = data.to(get_device_id())
 
@@ -752,6 +778,17 @@ class CriticWorker:
 class MegatronPPOActor:
     """Core PPO Actor implementation with Megatron backend"""
 
+    @staticmethod
+    def _unwrap_output_item(item):
+        """Unwrap output item from forward_backward_batch result."""
+        if isinstance(item, dict):
+            return item
+        if isinstance(item, tuple):
+            for elem in item:
+                if isinstance(elem, dict):
+                    return elem
+        raise TypeError(f"Unexpected output item type: {type(item)}")
+
     def __init__(
         self,
         config: SiiRLArguments,
@@ -792,11 +829,12 @@ class MegatronPPOActor:
             )
 
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                log_probs = [o["log_probs"] for o in output["output"]]
+                output_items = [self._unwrap_output_item(o) for o in output["output"]]
+                log_probs = [o["log_probs"] for o in output_items]
                 log_probs = torch.cat(log_probs, dim=0).to(torch.float32)
 
                 if calculate_entropy:
-                    entropys = torch.cat([o["entropy"] for o in output["output"]], dim=0).to(torch.float32)
+                    entropys = torch.cat([o["entropy"] for o in output_items], dim=0).to(torch.float32)
 
             else:
                 log_probs = torch.empty(
@@ -900,6 +938,10 @@ class MegatronPPOActor:
         micro_batch_size=None,
     ):
         """Execute forward-backward pass through pipeline parallel stages"""
+        from siirl.utils.logger.memory_profiler import log_batch_info, log_tf_config
+
+        log_tf_config(self.tf_config, tag="ActorWorker")
+
         # Broadcast data across pipeline ranks
         data.to(get_device_id())
         data = data.contiguous()
@@ -916,22 +958,38 @@ class MegatronPPOActor:
         assert micro_batch_size is not None
         micro_batches = mini_batch.split(micro_batch_size)
 
+        log_batch_info(data, micro_batch_size, len(micro_batches), forward_only)
+
         n_micro_batch = len(micro_batches)
         forward_backward_func = get_forward_backward_func()
 
-        def loss_func(output, data):
+        def loss_func(output, data, non_loss_data=False):
             device = output["log_probs"].device
             responses = data["responses"]
             response_length = responses.size(1)
 
-            log_prob = output["log_probs"][:, -response_length - 1 : -1].contiguous()
+            # Check output format:
+            # - Response-only: shape is [batch, response_length], use directly
+            # - Packed/full: shape is [batch, seq_len], extract response part
+            log_probs_shape = output["log_probs"].shape
+            if log_probs_shape[-1] == response_length:
+                # Response-only format: already [batch, response_length]
+                log_prob = output["log_probs"].contiguous()
+            else:
+                # Full sequence format: [batch, seq_len], extract response part
+                log_prob = output["log_probs"][:, -response_length - 1 : -1].contiguous()
+
             model_output = {"log_probs": log_prob}
 
             if calculate_entropy:
-                entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
+                entropy_shape = output["entropy"].shape
+                if entropy_shape[-1] == response_length:
+                    entropy = output["entropy"].contiguous()
+                else:
+                    entropy = output["entropy"][:, -response_length - 1 : -1].contiguous()
                 model_output["entropy"] = entropy
 
-            if forward_only:
+            if forward_only or non_loss_data:
                 return torch.tensor(1.0, device=device), model_output
 
             policy_loss, metrics = self.compute_ppo_loss(model_output, data)
@@ -957,8 +1015,18 @@ class MegatronPPOActor:
             from siirl.models.mcore import get_mcore_forward_fn
 
             forward_fn = get_mcore_forward_fn(self.hf_config)
+            if forward_only:
+                try:
+                    import torch._dynamo as _dynamo  # type: ignore
+
+                    forward_fn = _dynamo.disable(forward_fn)
+                except Exception:
+                    pass
+
+            from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
 
             def logits_processor(logits, label, label_mask):
+                """Compute log probabilities and optionally entropy from logits."""
                 logits.div_(temperature)
                 ret = {}
                 if calculate_entropy:
@@ -987,6 +1055,11 @@ class MegatronPPOActor:
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
+        # Set model to eval mode for forward_only to disable dropout
+        if forward_only:
+            for model_chunk in self.actor_module:
+                model_chunk.eval()
+
         losses_reduced = forward_backward_func(
             forward_step_func=forward_step,
             data_iterator=batch_generator,
@@ -995,7 +1068,13 @@ class MegatronPPOActor:
             seq_length=1,
             micro_batch_size=1,
             forward_only=forward_only,
+            collect_non_loss_data=forward_only,  # Collect outputs without computing gradients
         )
+
+        # Restore train mode after forward_only
+        if forward_only:
+            for model_chunk in self.actor_module:
+                model_chunk.train()
 
         losses_reduced = {"output": losses_reduced}
 
@@ -1092,7 +1171,8 @@ class MegatronPPOCritic:
             output = self.forward_backward_batch(data=data, forward_only=True, micro_batch_size=micro_batch_size)
 
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                values = [o["vpreds"] for o in output["output"]]
+                output_items = [self._unwrap_output_item(o) for o in output["output"]]
+                values = [o["vpreds"] for o in output_items]
                 values = torch.cat(values, dim=0).to(torch.float32)
             else:
                 attention_mask = data["attention_mask"]
@@ -1133,8 +1213,8 @@ class MegatronPPOCritic:
         n_micro_batch = len(micro_batches)
         forward_backward_func = get_forward_backward_func()
 
-        def loss_func(output, data):
-            if forward_only:
+        def loss_func(output, data, non_loss_data=False):
+            if forward_only or non_loss_data:
                 return torch.tensor(1.0, device=output.device), {"vpreds": output}
 
             responses = data["responses"]
@@ -1186,6 +1266,11 @@ class MegatronPPOCritic:
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.critic_module))
 
+        # Set model to eval mode for forward_only to disable dropout
+        if forward_only:
+            for model_chunk in self.critic_module:
+                model_chunk.eval()
+
         losses_reduced = forward_backward_func(
             forward_step_func=forward_step,
             data_iterator=batch_generator,
@@ -1194,7 +1279,13 @@ class MegatronPPOCritic:
             seq_length=total_seqlen,
             micro_batch_size=1,
             forward_only=forward_only,
+            collect_non_loss_data=forward_only,  # Collect outputs without computing gradients
         )
+
+        # Restore train mode after forward_only
+        if forward_only:
+            for model_chunk in self.critic_module:
+                model_chunk.train()
 
         losses_reduced = {"output": losses_reduced}
 

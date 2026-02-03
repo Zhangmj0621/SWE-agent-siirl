@@ -250,11 +250,12 @@ class RolloutManager:
             first_gpu_idx = worker_idx * self.gpus_per_rollout
             base_gpu_id = res.local_ranks[first_gpu_idx]
 
-            # Handle dist_init_addr for cross-node TP
+            # Handle dist_init_addr for cross-node TP (use port range 20000+)
             if nnodes > 1:
                 if node_rank == 0:
                     # First actor in TP group: generate and cache dist_init_addr
-                    dist_init_addr = ray.get(self.worker_handle[worker_idx].get_ip_port.remote())
+                    dist_init_start_port = 20000 + tp_group_idx  # Unique start port per TP group
+                    dist_init_addr = ray.get(self.worker_handle[worker_idx].get_ip_port.remote(start_port=dist_init_start_port))
                     self._dist_init_addrs[tp_group_idx] = dist_init_addr
                     logger.info(f"TP Group {tp_group_idx}: Cross-node TP with {nnodes} nodes, " f"dist_init_addr={dist_init_addr}")
                 else:
@@ -288,6 +289,9 @@ class RolloutManager:
 
         Each actor starts one SGLang process. For cross-node TP,
         actors in the same TP group share dist_init_addr and coordinate via NCCL.
+
+        Port allocation is done inside each worker with socket holding to prevent
+        port races. worker_urls are collected after init_engine completes.
         """
         from loguru import logger
 
@@ -304,32 +308,45 @@ class RolloutManager:
                 f"dist_init_addr={cfg['dist_init_addr']}"
             )
 
-        futures = []
+        # Phase 1: Allocate ports sequentially and initialize engines
+        start_port = 15000
+        init_futures = []
+        worker_info = []  # Store (worker, cfg, ip, port) for phase 2
         for cfg in engine_configs:
             worker = self.worker_handle[cfg["worker_idx"]]
-
-            # Get network configuration from worker
             ip = ray.get(worker.get_ip.remote())
-            port = ray.get(worker.get_free_port.remote())
-            nccl_port = ray.get(worker.get_free_port.remote())
+
+            # Allocate http port (slime-style sequential allocation)
+            # nccl_port is not passed - SGLang auto-allocates it internally
+            port = ray.get(worker.find_free_port.remote(start_port))
+            start_port = port + 1  # Increment for next worker
 
             future = worker.init_engine.remote(
                 rank=cfg["worker_idx"],
                 dist_init_addr=cfg["dist_init_addr"],
                 ip=ip,
                 port=port,
-                nccl_port=nccl_port,
                 base_gpu_id=cfg["base_gpu_id"],
                 node_rank=cfg["node_rank"],
                 nnodes=cfg["nnodes"],
             )
-            futures.append(future)
+            init_futures.append(future)
+            worker_info.append({"worker": worker, "cfg": cfg, "ip": ip, "port": port})
 
-            # Only TP0 (node_rank=0) registers with router
+        ray.get(init_futures)
+
+        # Phase 2: Collect worker URLs and launch servers
+        launch_futures = []
+        for info in worker_info:
+            worker, cfg, ip, port = info["worker"], info["cfg"], info["ip"], info["port"]
+
             if cfg["is_tp0"]:
                 self.worker_urls.append(f"http://{ip}:{port}")
 
-        ray.get(futures)
+            launch_futures.append(worker.launch_server.remote())
+
+        ray.get(launch_futures)
+
         logger.info(
             f"Initialized {self.num_workers} SGLang processes "
             f"({self.num_tp_groups} TP groups, {len(self.worker_urls)} router endpoints)"
@@ -377,7 +394,8 @@ class RolloutManager:
         from siirl.engine.rollout.sglang_engine import wait_until_ok
 
         router_ip = self.config.rollout.router_ip or get_net_interface_ip()
-        router_port = self.config.rollout.router_port or get_free_port(router_ip)
+        # Use sequential port allocation starting from 25000 for router
+        router_port = self.config.rollout.router_port or get_free_port(router_ip, start_port=25000)
         router_address = f"{router_ip}:{router_port}"
 
         router_args = RouterArgs(
