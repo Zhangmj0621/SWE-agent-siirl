@@ -1040,7 +1040,7 @@ class RolloutManager:
         while putted_samples < total_remain_steps:
             async with self.staleness_lock:
                 if self.staleness_sample_cnt >= self.config.trainer.async_factor * self.config.data.train_batch_size:
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.001)
                     continue
                 await self.data_coordinator.run_dataloader_single_sample.remote()
                 self.staleness_sample_cnt += 1
