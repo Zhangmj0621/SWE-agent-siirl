@@ -119,10 +119,11 @@ class NaiveExecutor:
             return []
         # Request new samples from data coordinator (Ray remote call)
         if len(self.pending_queue) < need_replenish:
-            diff = need_replenish - len(self.pending_queue)
-            pull_size = (diff + self.rollout_n - 1) // self.rollout_n
+            #diff = need_replenish - len(self.pending_queue)
+            #pull_size = (diff + self.rollout_n - 1) // self.rollout_n
 
-            pull_samples = await self.data_coordinator.get_dataloader.remote(pull_size)
+            # Only get one sample each time to ensure load balancing among rollout workers
+            pull_samples = await self.data_coordinator.get_dataloader.remote(1)
 
             for sample in pull_samples:
                 samples = [copy.deepcopy(sample) for _ in range(self.rollout_n)]
