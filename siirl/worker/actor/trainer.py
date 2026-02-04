@@ -603,15 +603,14 @@ class Trainer:
         """
         logger.info(f"[Trainer rank={self.rank}] Starting training loop, batch_size={batch_size}")
 
-        # Track step interval for accurate throughput calculation
-        last_step_end_time = None
-
         try:
             while True:
                 # Check stop signal
                 if self._check_should_stop():
                     logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
                     break
+
+                train_e2e_start_time = time.time()
 
                 # Update rollout weights and record timing
                 with Timer("weight_sync") as weight_sync_timer:
@@ -629,13 +628,6 @@ class Trainer:
                 # compare
                 self.train_step(batch_data)
 
-                # Calculate step_interval (time between consecutive step completions)
-                current_step_end_time = time.time()
-                step_interval = None
-                if last_step_end_time is not None:
-                    step_interval = current_step_end_time - last_step_end_time
-                last_step_end_time = current_step_end_time
-
                 # Wait for all metric submissions and aggregate (rank=0 does the logging)
                 # Only TP rank 0 and PP rank 0 submit metrics, so only they need to wait
                 if self.metric_client is not None and self.should_submit_metrics:
@@ -647,6 +639,16 @@ class Trainer:
                 # Barrier sync to ensure all ranks are synchronized
                 dist.barrier()
 
+                train_e2e_end_time = time.time()
+                train_e2e = train_e2e_end_time - train_e2e_start_time
+                val_time = 0.0
+                if self.rollout_manager is not None:
+                    try:
+                        val_time = ray.get(self.rollout_manager.pop_validation_time.remote())
+                    except Exception as e:
+                        logger.warning(f"[Trainer rank={self.rank}] Failed to fetch validation time: {e}")
+                train_e2e_without_val = max(train_e2e - val_time, 0.0)
+
                 # Only rank=0 (global rank) aggregates and logs to tracker
                 if self.rank == 0 and self.tracker is not None and self.metric_client is not None:
                     try:
@@ -657,15 +659,12 @@ class Trainer:
 
                         # Compute throughput after aggregation to avoid per-rank bias
                         total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
-                        # time_per_step = aggregated_metrics.get("perf/time_per_step_max") or aggregated_metrics.get("perf/time_per_step")
-
-                        # Throughput based on end-to-end step interval (per-GPU effective)
-                        if step_interval is not None:
-                            aggregated_metrics["perf/delta_time/step_interval"] = step_interval
-                            if step_interval > 0 and total_tokens > 0:
-                                # Backward-compatible alias (step-interval based)
-                                total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
-                                aggregated_metrics["perf/throughput"] = total_tokens / (step_interval * total_gpus)
+                        # Use train end-to-end time (excluding validation) for throughput and time_per_step
+                        aggregated_metrics["perf/delta_time/step_interval"] = train_e2e_without_val
+                        aggregated_metrics["perf/time_per_step"] = train_e2e_without_val
+                        if train_e2e_without_val > 0 and total_tokens > 0:
+                            total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
+                            aggregated_metrics["perf/throughput"] = total_tokens / (train_e2e_without_val * total_gpus)
                         self.tracker.log(aggregated_metrics, step=self.global_step)
 
                         # get rollout validate metrics

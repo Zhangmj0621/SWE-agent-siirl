@@ -101,6 +101,11 @@ class ActorArguments:
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
     ppo_micro_batch_size_per_gpu: int | None = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     loss_mode: str = field(default="vanilla", metadata={"help": "loss_mode for loss compute"})
+
+    # Dynamic batching config
+    use_dynamic_batch: bool = field(default=False, metadata={"help": "Enable dynamic batching (token-based instead of fixed batch size)"})
+    max_tokens_per_gpu: int = field(default=4096, metadata={"help": "Max tokens per GPU when dynamic batching is enabled"})
+    use_workload_balance: bool = field(default=True, metadata={"help": "Use FLOPs-based balancing (otherwise sequence length based)"})
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
     clip_ratio_c: float = field(

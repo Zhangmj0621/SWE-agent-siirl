@@ -115,6 +115,7 @@ class RolloutManager:
         self.batches_to_skip = 0
         self.event = asyncio.Event()
         self.global_steps = 0  # will be reset by actor checkpoint, but maybe not correct in fully async mode
+        self._val_time_acc = 0.0
 
         # Initialize workers, engines, router and start rollout
         self.message_queue = deque()
@@ -463,15 +464,21 @@ class RolloutManager:
         """
         from loguru import logger
 
-        for _ in range(val_num_batch):
-            await self.data_coordinator.run_dataloader.remote(is_validate=True)
-        logger.info("Starting validate rollout...")
-        rollout_workers = self.get_rollout_worker_on_tp0()
-        futures = [rollout_worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for rollout_worker in rollout_workers]
-        await asyncio.gather(*futures)
-        val_metrics = await self.metric_worker.wait_final_res.remote()
-        logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
-        self.message_queue.append((val_metrics, self.global_steps))
+        val_start = time.time()
+        try:
+            for _ in range(val_num_batch):
+                await self.data_coordinator.run_dataloader.remote(is_validate=True)
+            logger.info("Starting validate rollout...")
+            rollout_workers = self.get_rollout_worker_on_tp0()
+            futures = [
+                rollout_worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for rollout_worker in rollout_workers
+            ]
+            await asyncio.gather(*futures)
+            val_metrics = await self.metric_worker.wait_final_res.remote()
+            logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
+            self.message_queue.append((val_metrics, self.global_steps))
+        finally:
+            self._val_time_acc += time.time() - val_start
         return
 
     async def get_metrics(self):
@@ -481,6 +488,15 @@ class RolloutManager:
         result = list(self.message_queue)
         self.message_queue.clear()
         return result
+
+    def pop_validation_time(self) -> float:
+        """
+        Return and reset accumulated validation time.
+        Used by trainer to exclude validation from train throughput metrics.
+        """
+        val_time = self._val_time_acc
+        self._val_time_acc = 0.0
+        return val_time
 
     def should_stop(self) -> bool:
         """

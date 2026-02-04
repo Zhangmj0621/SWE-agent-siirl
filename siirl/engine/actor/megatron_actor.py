@@ -955,8 +955,22 @@ class MegatronPPOActor:
 
         mini_batch["attention_mask"] = mini_batch["attention_mask"].to(bool)
 
-        assert micro_batch_size is not None
-        micro_batches = mini_batch.split(micro_batch_size)
+        # Dynamic batching vs fixed split
+        partitions = None
+        if getattr(self.actor_config, "use_dynamic_batch", False):
+            from siirl.utils.dynamic_batch import rearrange_micro_batches
+
+            micro_batches, partitions = rearrange_micro_batches(
+                batch=mini_batch,
+                max_token_len=self.actor_config.max_tokens_per_gpu,
+                dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
+                vpp_size=len(self.actor_module),
+                sync_micro_num=True,
+                optimize_bubble=self.actor_config.use_workload_balance,
+            )
+        else:
+            assert micro_batch_size is not None
+            micro_batches = mini_batch.split(micro_batch_size)
 
         log_batch_info(data, micro_batch_size, len(micro_batches), forward_only)
 
@@ -1077,6 +1091,10 @@ class MegatronPPOActor:
                 model_chunk.train()
 
         losses_reduced = {"output": losses_reduced}
+
+        # Store partitions for caller to restore original order (forward_only only)
+        if forward_only and partitions is not None:
+            losses_reduced["_partitions"] = partitions
 
         return losses_reduced
 
