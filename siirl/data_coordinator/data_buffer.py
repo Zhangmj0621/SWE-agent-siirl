@@ -412,11 +412,9 @@ class DataCoordinator:
     # # dataloader function
     @ray.method(concurrency_group="dataloader")
     def init_dataloader(self, config: SiiRLArguments):
-        # set async factor
-        async_config = copy.deepcopy(config)
-        async_config.data.train_batch_size *= async_config.trainer.async_factor
+        # Not set async factor here since we control in rolloutManager prefetch_thread
         self.dataloader = DataLoaderNode(
-            global_config=async_config,
+            global_config=config,
             config={
                 "group_world_size": 1,
                 "group_rank": 0,
@@ -433,6 +431,25 @@ class DataCoordinator:
     @ray.method(concurrency_group="dataloader")
     def val_info(self):
         return self.dataloader.num_val_batches, self.dataloader.val_batch_size
+    
+    @ray.method(concurrency_group="dataloader")
+    async def run_dataloader_single_sample(self, is_validate=False):
+        batch = self.dataloader.run_single_sample(is_validation_step=is_validate)
+        tensor_dict = preprocess_dataloader(batch)
+        samples = await Dict2Samples(tensor_dict, True)
+        if is_validate:
+            async with self.dataloader_lock:
+                self.dataloader_val_queue.extend(samples)
+        else:
+            async with self.dataloader_lock:
+                self.dataloader_queue.extend(samples)
+        return True
+                
+    @ray.method(concurrency_group="dataloader")
+    async def get_dataloader_size(self):
+        data_queue = self.dataloader_queue
+        async with self.dataloader_lock:
+            return len(data_queue)
 
     @ray.method(concurrency_group="dataloader")
     async def run_dataloader(self, epoch=0, is_validate=False):
@@ -451,6 +468,12 @@ class DataCoordinator:
             async with self.dataloader_lock:
                 self.dataloader_queue.extend(samples)
         return True
+                
+    @ray.method(concurrency_group="dataloader")
+    async def get_dataloader_size(self):
+        data_queue = self.dataloader_queue
+        async with self.dataloader_lock:
+            return len(data_queue)
 
     @ray.method(concurrency_group="dataloader")
     async def get_dataloader(self, batch_size, is_validate=False):
