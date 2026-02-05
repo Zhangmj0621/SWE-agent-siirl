@@ -828,6 +828,9 @@ class MegatronPPOActor:
                 micro_batch_size=micro_batch_size,
             )
 
+            # Get partitions for order restoration (if dynamic batch was used)
+            partitions = output.get("_partitions")
+
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 output_items = [self._unwrap_output_item(o) for o in output["output"]]
                 log_probs = [o["log_probs"] for o in output_items]
@@ -835,6 +838,14 @@ class MegatronPPOActor:
 
                 if calculate_entropy:
                     entropys = torch.cat([o["entropy"] for o in output_items], dim=0).to(torch.float32)
+
+                # Restore original order if dynamic batch shuffled the samples
+                if partitions is not None:
+                    from siirl.utils.dynamic_batch import restore_batch_order
+
+                    log_probs = restore_batch_order(log_probs, partitions)
+                    if calculate_entropy:
+                        entropys = restore_batch_order(entropys, partitions)
 
             else:
                 log_probs = torch.empty(
