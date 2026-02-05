@@ -47,10 +47,10 @@ class SglangEngine:
         dist_init_addr: str,
         ip: str,
         port: int,
-        nccl_port: int,
         base_gpu_id: int,
         node_rank: int,
         nnodes: int,
+        nccl_port: int | None = None,
         extra_server_args: dict | None = None,
     ):
         """
@@ -63,10 +63,10 @@ class SglangEngine:
                             Used for cross-node TP communication.
             ip: IP address to bind the SGLang HTTP server.
             port: Port number for the SGLang HTTP server.
-            nccl_port: Port number for NCCL backend communication.
             base_gpu_id: Starting CUDA device ID for this TP group (from GPUResources).
             node_rank: Rank of this node within the TP group (0 for single-node TP).
             nnodes: Number of nodes participating in this TP group (1 for single-node TP).
+            nccl_port: Port for NCCL communication. If None, SGLang auto-allocates.
         """
         if extra_server_args is None:
             extra_server_args = {}
@@ -130,7 +130,6 @@ class SglangEngine:
             # Network configuration
             "host": self.ip,
             "port": self.port,
-            "nccl_port": self.nccl_port,
             # Server settings
             "trust_remote_code": config.trust_remote_code,
             "max_running_requests": config.max_num_seqs,
@@ -140,6 +139,10 @@ class SglangEngine:
             "skip_tokenizer_init": False,
             "dist_timeout": 1800,
         }
+
+        # Only set nccl_port if explicitly provided (None = SGLang auto-allocates)
+        if self.nccl_port is not None:
+            args["nccl_port"] = self.nccl_port
 
         # Only set max_total_tokens if explicitly configured (None = auto-calculate)
         if config.max_num_batched_tokens is not None:
