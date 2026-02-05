@@ -17,7 +17,7 @@ import os
 import re
 import time
 import traceback
-from collections import deque
+from collections import defaultdict, deque
 
 import ray
 
@@ -309,18 +309,30 @@ class RolloutManager:
                 f"dist_init_addr={cfg['dist_init_addr']}"
             )
 
-        # Phase 1: Allocate ports sequentially and initialize engines
-        start_port = 15000
-        init_futures = []
-        worker_info = []  # Store (worker, cfg, ip, port) for phase 2
+        # Phase 1: Allocate ports by node (avoids race conditions)
+        # Group workers by node IP, allocate all ports for each node in one call
+        node_workers = defaultdict(list)
         for cfg in engine_configs:
             worker = self.worker_handle[cfg["worker_idx"]]
             ip = ray.get(worker.get_ip.remote())
+            node_workers[ip].append((worker, cfg))
 
-            # Allocate http port (slime-style sequential allocation)
-            # nccl_port is not passed - SGLang auto-allocates it internally
-            port = ray.get(worker.find_free_port.remote(start_port))
-            start_port = port + 1  # Increment for next worker
+        # Allocate ports per node using first worker on each node
+        worker_ports = {}  # worker_idx -> port
+        for _, workers_on_node in node_workers.items():
+            first_worker = workers_on_node[0][0]
+            num_ports = len(workers_on_node)
+            ports = ray.get(first_worker.allocate_ports.remote(start_port=15000, count=num_ports))
+            for i, (_, cfg) in enumerate(workers_on_node):
+                worker_ports[cfg["worker_idx"]] = ports[i]
+
+        # Initialize engines with allocated ports
+        init_futures = []
+        worker_info = []
+        for cfg in engine_configs:
+            worker = self.worker_handle[cfg["worker_idx"]]
+            ip = ray.get(worker.get_ip.remote())
+            port = worker_ports[cfg["worker_idx"]]
 
             future = worker.init_engine.remote(
                 rank=cfg["worker_idx"],
