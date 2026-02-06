@@ -97,7 +97,8 @@ class SglangEngine:
             top_k=config.rollout.top_k,
             repetition_penalty=1.0,
         )
-        self.launch_server(extra_server_args)
+        self._extra_server_args = extra_server_args
+        self.process = None  # Server process, started by launch_server()
 
     def _build_server_args(self) -> dict:
         """
@@ -144,10 +145,6 @@ class SglangEngine:
         if self.nccl_port is not None:
             args["nccl_port"] = self.nccl_port
 
-        # Only set max_total_tokens if explicitly configured (None = auto-calculate)
-        if config.max_num_batched_tokens is not None:
-            args["max_total_tokens"] = config.max_num_batched_tokens
-
         return args
 
     def launch_server(self, extra_server_args: dict | None = None):
@@ -159,7 +156,7 @@ class SglangEngine:
         in complex multi-node and cross-node TP scenarios.
         """
         if extra_server_args is None:
-            extra_server_args = {}
+            extra_server_args = getattr(self, "_extra_server_args", None) or {}
         args = self._build_server_args()
         args.update(extra_server_args)
         self.sgl_args = ServerArgs(**args)
