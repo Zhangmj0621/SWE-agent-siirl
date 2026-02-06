@@ -29,8 +29,6 @@ from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient, wait_until_ok
 from siirl.utils.net_utils.net import get_net_interface_ip
 
-global_engine_process = None
-
 
 class SglangEngine:
     """
@@ -76,7 +74,7 @@ class SglangEngine:
         self.port = port
         self.nccl_port = nccl_port
         self.ip = ip
-        self.weight_version = 0
+        self._weight_version = 0
         # GPU placement parameters (directly passed, not calculated)
         self.base_gpu_id = base_gpu_id
         self.node_rank = node_rank
@@ -156,13 +154,13 @@ class SglangEngine:
         in complex multi-node and cross-node TP scenarios.
         """
         if extra_server_args is None:
-            extra_server_args = getattr(self, "_extra_server_args", None) or {}
+            extra_server_args = self._extra_server_args
         args = self._build_server_args()
         args.update(extra_server_args)
         self.sgl_args = ServerArgs(**args)
-        print(f"Launch SglangHttpServer at: {get_net_interface_ip()}:{self.port}")
-        multiprocessing.set_start_method("spawn", force=True)
-        self.process = multiprocessing.Process(target=launch_server, args=(self.sgl_args,))
+        logger.info(f"Launch SglangHttpServer at: {get_net_interface_ip()}:{self.port}")
+        ctx = multiprocessing.get_context("spawn")
+        self.process = ctx.Process(target=launch_server, args=(self.sgl_args,))
         self.process.start()
         base_url = self.sgl_args.url()
         wait_until_ok(
@@ -196,6 +194,17 @@ class SglangEngine:
             time.sleep(2)
 
         raise RuntimeError(f"SGLang server at {base_url} not ready after {timeout}s.")
+
+    def shutdown(self):
+        """Terminate the SGLang server process gracefully."""
+        if self.process and self.process.is_alive():
+            self.process.terminate()
+            self.process.join(timeout=10)
+            if self.process.is_alive():
+                self.process.kill()
+                self.process.join(timeout=5)
+            logger.info(f"SGLang server process at {self.ip}:{self.port} terminated.")
+        self.process = None
 
     def set_router(self, router_address):
         self.router_address = router_address
@@ -395,14 +404,6 @@ class SglangEngine:
         response.raise_for_status()
         return response
 
-    def weight_version(self):
-        if self.node_rank != 0:
-            return
-        url = f"http://{self.ip}:{self.port}/get_weight_version"
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()["weight_version"]
-
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request to the specified endpoint with the given payload.
 
@@ -461,9 +462,9 @@ class SglangEngine:
             payload,
         )
         if weight_version:
-            self.weight_version = int(weight_version)
+            self._weight_version = int(weight_version)
         else:
-            self.weight_version += 1
+            self._weight_version += 1
         return result
 
     def destroy_weights_update_group(self, group_name):

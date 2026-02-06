@@ -209,6 +209,11 @@ class RolloutWorker:
         self.executor.stop()
         self.rollout_thread.join()
 
+    def shutdown_engine(self):
+        """Shutdown the SGLang engine process."""
+        if self.engine:
+            self.engine.shutdown()
+
     def get_port(self) -> int:
         """
         Get the allocated port number for this worker's engine.
@@ -293,4 +298,4 @@ class RolloutWorker:
         return self.engine.continue_generation()
 
     def weight_version(self):
-        return self.engine.weight_version
+        return self.engine._weight_version
