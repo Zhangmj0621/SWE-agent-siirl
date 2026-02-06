@@ -662,6 +662,7 @@ class Trainer:
                         # Use train end-to-end time (excluding validation) for throughput and time_per_step
                         aggregated_metrics["perf/delta_time/step_interval"] = train_e2e_without_val
                         aggregated_metrics["perf/time_per_step"] = train_e2e_without_val
+                        aggregated_metrics["perf/time_per_step_max"] = train_e2e_without_val
                         if train_e2e_without_val > 0 and total_tokens > 0:
                             total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
                             aggregated_metrics["perf/throughput"] = total_tokens / (train_e2e_without_val * total_gpus)
