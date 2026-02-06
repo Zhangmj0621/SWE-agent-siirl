@@ -195,6 +195,7 @@ class RolloutWorker:
             data_coordinator,
             self.engine,
             self.config.data.train_batch_size // num_engine,
+            dp_rank=self.rank,
         )
         self.executor = executor
         self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(executor,), daemon=True)

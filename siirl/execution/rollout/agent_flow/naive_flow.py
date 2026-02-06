@@ -45,6 +45,7 @@ class NaiveFlow:
         self.max_assistant_turns = self.multiturn_config.max_assistant_turns
         self.env_response_truncate_side = self.multiturn_config.env_response_truncate_side
         self.env = None
+        self.use_router = False  # Set True during validate to use router load balancing
         self.init_env()
 
     def init_env(self):
@@ -222,7 +223,7 @@ class NaiveFlow:
         return env_response
 
     async def _handle_generating_state(self, agent_data: AgentData, is_validate=False):
-        _, response_ids, rollout_log_prob = await self.engine.generate(agent_data.prompts_ids, is_validate)
+        _, response_ids, rollout_log_prob = await self.engine.generate(agent_data.prompts_ids, is_validate, use_router=self.use_router)
         agent_data.response_ids = response_ids
         agent_data.rollout_log_prob += rollout_log_prob
         agent_data.prompts_ids += response_ids
