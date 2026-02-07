@@ -468,13 +468,13 @@ class SglangEngine:
         return result
 
     def destroy_weights_update_group(self, group_name):
-        try:
-            return self._make_request(
-                "destroy_weights_update_group",
-                {
-                    "group_name": group_name,
-                },
-            )
-        except requests.exceptions.RequestException:
-            # catch the case there the engine is just created and does not have the group.
-            pass
+        if self.sgl_args.node_rank != 0:
+            return
+
+        url = f"{self.sgl_args.url()}/destroy_weights_update_group"
+        response = requests.post(url, json={"group_name": group_name})
+        if response.status_code < 400:
+            return response.json()
+        if "does not exist" in response.text:
+            return
+        response.raise_for_status()

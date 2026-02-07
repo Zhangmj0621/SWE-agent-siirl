@@ -502,8 +502,13 @@ class RolloutManager:
 
         from siirl.worker.rollout.rollout_worker import RolloutWorker
 
+        reserved_bundle = self.train_gpu_resources.indices[0] if self.train_gpu_resources.indices else None
+        train_pairs = list(zip(self.train_gpu_resources.indices, self.train_gpu_resources.local_ranks, strict=False))
+        if reserved_bundle is not None:
+            train_pairs = [(idx, lr) for idx, lr in train_pairs if idx != reserved_bundle]
+
         topology = compute_validate_reuse_topology(
-            self.train_gpu_resources.num_gpus,
+            len(train_pairs),
             self.tp_size,
             self.n_gpus_per_node,
         )
@@ -518,9 +523,9 @@ class RolloutManager:
         gpus_per_rollout = topology["gpus_per_rollout"]
         rollout_per_tp_group = topology["rollout_per_tp_group"]
 
-        res = self.train_gpu_resources
-        indices = res.indices[:use_gpus]
-        local_ranks = res.local_ranks[:use_gpus]
+        selected_pairs = train_pairs[:use_gpus]
+        indices = [idx for idx, _ in selected_pairs]
+        local_ranks = [lr for _, lr in selected_pairs]
 
         reuse_prefix = f"{self.name_prefix}_valreuse"
         reuse_ray_class = RayClassWithInitArgs(ray.remote(RolloutWorker), self.config, num_tp_groups, self.metric_worker)
@@ -609,6 +614,8 @@ class RolloutManager:
         ray.get([w.init_validate_executor.remote(self.data_coordinator, num_tp_groups) for w in tp0_workers])
 
         logger.info(f"[RolloutManager] Validate GPU reuse enabled: {use_gpus} train GPUs, " f"{len(tp0_workers)} extra TP0 workers")
+        if reserved_bundle is not None:
+            logger.info(f"[RolloutManager] Reserved training bundle {reserved_bundle} for param-sync source rank")
         self._validate_reuse_workers = workers
         self._validate_reuse_tp0_workers = tp0_workers
         return tp0_workers
