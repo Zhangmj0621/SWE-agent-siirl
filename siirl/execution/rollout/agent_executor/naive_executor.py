@@ -17,6 +17,7 @@ import importlib
 import os
 import time
 from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -422,7 +423,12 @@ class NaiveExecutor:
             ground_truth=sample.reward_model["ground_truth"],
         )
 
-    async def _validate_single_turn(self, samples: list[Sample], use_router: bool = True) -> list[Sample]:
+    async def _validate_single_turn(
+        self,
+        samples: list[Sample],
+        use_router: bool = True,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> list[Sample]:
         """
         Optimized validation for single-turn scenarios.
         Uses batch generation with router load balancing and sort-by-length.
@@ -444,8 +450,9 @@ class NaiveExecutor:
                 batch_input_ids,
                 is_validate=True,
                 use_router=use_router,
-                show_progress=(self._dp_rank == 0),
+                show_progress=False,
                 progress_desc="Validate",
+                progress_callback=progress_callback,
             )
 
         # 3. Reward + postprocess (direct loop, millisecond-level)
@@ -473,7 +480,12 @@ class NaiveExecutor:
         result = await self.generate(sample, is_validate=True)
         return idx, result
 
-    async def _validate_multi_turn(self, samples: list[Sample], use_router: bool = True) -> list[Sample]:
+    async def _validate_multi_turn(
+        self,
+        samples: list[Sample],
+        use_router: bool = True,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> list[Sample]:
         """
         Validation for multi-turn scenarios.
         Uses high concurrency with router load balancing.
@@ -485,28 +497,11 @@ class NaiveExecutor:
             results = [None] * len(samples)
             tasks = [self._indexed_generate(i, s) for i, s in enumerate(samples)]
 
-            if self._dp_rank == 0:
-                from tqdm import tqdm
-
-                pbar = tqdm(
-                    total=len(samples),
-                    desc="Validate",
-                    unit="sample",
-                    dynamic_ncols=True,
-                    mininterval=2.0,
-                    miniters=50,
-                )
-                try:
-                    for coro in asyncio.as_completed(tasks):
-                        idx, result = await coro
-                        results[idx] = result
-                        pbar.update(1)
-                finally:
-                    pbar.close()
-            else:
-                for coro in asyncio.as_completed(tasks):
-                    idx, result = await coro
-                    results[idx] = result
+            for coro in asyncio.as_completed(tasks):
+                idx, result = await coro
+                results[idx] = result
+                if progress_callback is not None:
+                    progress_callback(1)
 
             return results
         finally:
@@ -527,6 +522,7 @@ class NaiveExecutor:
         val_samples: list[Sample],
         val_get_time: float = 0.0,
         use_router: bool = True,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> tuple[list[Sample], dict]:
         logger.info(
             f"RANK_{self._rank} start validate, batch_size:{len(val_samples)}, "
@@ -538,9 +534,17 @@ class NaiveExecutor:
 
         with Timer("val_generate") as val_generate_time:
             if self._is_single_turn():
-                result = await self._validate_single_turn(val_samples, use_router=use_router)
+                result = await self._validate_single_turn(
+                    val_samples,
+                    use_router=use_router,
+                    progress_callback=progress_callback,
+                )
             else:
-                result = await self._validate_multi_turn(val_samples, use_router=use_router)
+                result = await self._validate_multi_turn(
+                    val_samples,
+                    use_router=use_router,
+                    progress_callback=progress_callback,
+                )
 
         val_get_time_sec = val_get_time.elapsed if hasattr(val_get_time, "elapsed") else float(val_get_time)
         metrics = {

@@ -16,6 +16,7 @@ import asyncio
 import importlib
 import os
 import threading
+import time
 
 from loguru import logger
 
@@ -68,6 +69,13 @@ class RolloutWorker:
         self.executor = None  # Rollout executor instance
         self.rollout_thread = None  # Thread for running the async rollout executor
         self.engine = None  # SGLang engine instance
+        self._validate_progress = {
+            "total": 0,
+            "done": 0,
+            "active": False,
+            "start_time": 0.0,
+            "updated_at": 0.0,
+        }
 
     def _build_executor(self, data_coordinator, num_engine):
         executor_path = self.config.rollout.executor_module
@@ -242,6 +250,33 @@ class RolloutWorker:
             validate_samples.append(sample)
         return validate_samples
 
+    def _start_validate_progress(self, total: int):
+        now = time.time()
+        self._validate_progress = {
+            "total": int(total),
+            "done": 0,
+            "active": True,
+            "start_time": now,
+            "updated_at": now,
+        }
+
+    def _update_validate_progress(self, delta: int = 1):
+        self._validate_progress["done"] += int(delta)
+        self._validate_progress["updated_at"] = time.time()
+
+    def _finish_validate_progress(self):
+        total = int(self._validate_progress.get("total", 0))
+        done = int(self._validate_progress.get("done", 0))
+        self._validate_progress["done"] = max(done, total)
+        self._validate_progress["active"] = False
+        self._validate_progress["updated_at"] = time.time()
+
+    def get_validate_progress(self) -> dict:
+        progress = dict(self._validate_progress)
+        start_time = float(progress.get("start_time", 0.0))
+        progress["elapsed"] = max(time.time() - start_time, 0.0) if start_time > 0 else 0.0
+        return progress
+
     async def validate(self, val_batch_size, global_step):
         rank = int(os.environ.get("RANK"))
         if rank == 0:
@@ -257,7 +292,17 @@ class RolloutWorker:
             logger.info("=" * 60)
             logger.info(f"Starting Validation @ Global Step {global_step}...")
             logger.info("=" * 60)
-        samples, val_time_metrics = await self.executor.validate_samples(val_samples, use_router=False)
+        self._start_validate_progress(len(val_samples))
+        samples = []
+        val_time_metrics = {}
+        try:
+            samples, val_time_metrics = await self.executor.validate_samples(
+                val_samples,
+                use_router=False,
+                progress_callback=self._update_validate_progress,
+            )
+        finally:
+            self._finish_validate_progress()
         return self._filter_validate_samples(samples), val_time_metrics
 
     def get_ip(self):

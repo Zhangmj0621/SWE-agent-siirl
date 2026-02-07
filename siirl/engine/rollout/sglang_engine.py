@@ -17,6 +17,7 @@ import copy
 import multiprocessing
 import os
 import time
+from collections.abc import Callable
 
 import requests
 from loguru import logger
@@ -254,6 +255,7 @@ class SglangEngine:
         show_progress: bool = True,
         progress_desc: str = "Validate",
         sort_by_length: bool = True,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> list[tuple[str, list[int], list[float]]]:
         """
         Batch generation for single-turn scenarios (no multi-turn/tool calls).
@@ -315,6 +317,8 @@ class SglangEngine:
                 output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
             responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
             log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
+            if progress_callback is not None:
+                progress_callback(1)
             return output["text"], responses, log_probs
 
         # SGLang handles continuous batching internally

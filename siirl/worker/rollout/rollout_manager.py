@@ -35,6 +35,9 @@ from siirl.worker.ray_utils import GPUResources, RayClassWithInitArgs, get_rando
 
 VALIDATE_REUSE_SYNC_TIMEOUT_S = 120
 VALIDATE_REUSE_SYNC_LOG_INTERVAL_S = 5.0
+VALIDATE_PROGRESS_POLL_INTERVAL_S = 2.0
+VALIDATE_PROGRESS_LOG_INTERVAL_S = 5.0
+VALIDATE_PROGRESS_MIN_DELTA_RATIO = 0.02
 
 
 def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
@@ -82,6 +85,10 @@ def split_validate_reuse_sync_workers(worker_infos: list[dict], trainer_node_ip:
         else:
             distributed_workers.append(worker)
     return distributed_workers, tensor_workers
+
+
+def rollout_to_train_step(rollout_step: int) -> int:
+    return max(rollout_step - 1, 0)
 
 
 @ray.remote
@@ -788,12 +795,57 @@ class RolloutManager:
                 self.global_steps += 1
                 if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     await self.validate(val_num_batch, dp_val_batch)
-                logger.info(f"Start Rollout Step {self.global_steps}")
+                logger.info(f"Start Rollout Step {rollout_to_train_step(self.global_steps)} " f"(rollout_index={self.global_steps})")
                 await self.data_coordinator.run_dataloader.remote(epoch)
 
     def next_rollout(self):
         self.event.set()
         return self.router_address
+
+    async def _monitor_validate_progress(self, assigned_workers: list[tuple], total_samples: int):
+        from loguru import logger
+
+        if total_samples <= 0 or not assigned_workers:
+            return
+
+        start_time = time.time()
+        last_log_time = 0.0
+        last_log_ratio = 0.0
+
+        while True:
+            progress_refs = [worker.get_validate_progress.remote() for worker, _ in assigned_workers]
+            progresses = await asyncio.gather(*progress_refs)
+
+            done_samples = 0
+            workers_active = 0
+            for progress, (_, expected_total) in zip(progresses, assigned_workers, strict=False):
+                done = int(progress.get("done", 0))
+                done_samples += min(max(done, 0), expected_total)
+                if progress.get("active", False):
+                    workers_active += 1
+
+            done_samples = min(done_samples, total_samples)
+            ratio = done_samples / total_samples if total_samples > 0 else 1.0
+            now = time.time()
+
+            should_log = (
+                done_samples >= total_samples
+                or ratio - last_log_ratio >= VALIDATE_PROGRESS_MIN_DELTA_RATIO
+                or now - last_log_time >= VALIDATE_PROGRESS_LOG_INTERVAL_S
+            )
+            if should_log:
+                logger.info(
+                    "[RolloutManager] Validate progress "
+                    f"samples={done_samples}/{total_samples} "
+                    f"workers_active={workers_active}/{len(assigned_workers)} "
+                    f"elapsed={now - start_time:.1f}s"
+                )
+                last_log_time = now
+                last_log_ratio = ratio
+
+            if done_samples >= total_samples:
+                return
+            await asyncio.sleep(VALIDATE_PROGRESS_POLL_INTERVAL_S)
 
     async def validate(self, val_num_batch, val_batch_size):
         """
@@ -850,12 +902,23 @@ class RolloutManager:
                 f"Validate dispatch: workers={len(validate_workers)}, "
                 f"samples={len(all_val_samples)}, shard_sizes={[len(shard) for shard in shards]}"
             )
+            assigned_workers = [(worker, len(shards[idx])) for idx, worker in enumerate(validate_workers) if shards[idx]]
             futures = [
                 worker.validate_assigned.remote(shards[idx], self.global_steps)
                 for idx, worker in enumerate(validate_workers)
                 if shards[idx]
             ]
-            results = await asyncio.gather(*futures) if futures else []
+            progress_task = None
+            if assigned_workers:
+                progress_task = asyncio.create_task(self._monitor_validate_progress(assigned_workers, len(all_val_samples)))
+            try:
+                results = await asyncio.gather(*futures) if futures else []
+            finally:
+                if progress_task is not None:
+                    if not progress_task.done():
+                        progress_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await progress_task
             all_samples = []
             for samples, _ in results:
                 all_samples.extend(samples)
