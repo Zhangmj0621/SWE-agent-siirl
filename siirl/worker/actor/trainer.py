@@ -155,6 +155,8 @@ class Trainer:
 
         # Training state
         self.global_step = 0
+        # Subtract prior checkpoint save overhead from next-step perf accounting.
+        self._pending_ckpt_excluded_time = 0.0
 
         # Local batch cache for handling async data fetch race conditions
         # When some dp_ranks get data while others don't, the ones with data
@@ -517,8 +519,7 @@ class Trainer:
                 data_metrics = compute_data_metric(data_for_update)
                 self.metric_client.submit_metric(data_metrics, self.dp_world_size)
 
-                # Compute and submit throughput metrics
-                # Note: throughput will be recalculated in train() with correct step_interval
+                # Throughput is recalculated in train() with corrected step_interval.
                 n_gpus = self.world_size
                 throughput_metrics = compute_throughput_metrics(data_for_update, timing_raw, n_gpus)
                 self.metric_client.submit_metric(throughput_metrics, self.dp_world_size)
@@ -535,9 +536,7 @@ class Trainer:
                     if rollout_timing:
                         self.metric_client.submit_metric(rollout_timing, self.dp_world_size)
 
-                # Submit actor/critic update metrics
-                # Note: metrics from megatron_actor.py already have proper prefixes (e.g. "actor/pg_loss", "perf/mfu/actor")
-                # so we just merge them directly without adding another prefix
+                # Metrics from megatron_actor.py already include prefixes.
                 flat_metrics = {}
                 for _, result_dict in metrics.items():
                     if isinstance(result_dict, dict):
@@ -648,6 +647,8 @@ class Trainer:
                     except Exception as e:
                         logger.warning(f"[Trainer rank={self.rank}] Failed to fetch validation time: {e}")
                 train_e2e_without_val = max(train_e2e - val_time, 0.0)
+                ckpt_excluded_time = min(self._pending_ckpt_excluded_time, train_e2e_without_val)
+                train_e2e_effective = max(train_e2e_without_val - ckpt_excluded_time, 0.0)
 
                 # Only rank=0 (global rank) aggregates and logs to tracker
                 if self.rank == 0 and self.tracker is not None and self.metric_client is not None:
@@ -657,15 +658,17 @@ class Trainer:
                         aggregated_metrics["perf/delta_time/weight_sync"] = weight_sync_timer.elapsed
                         aggregated_metrics["perf/delta_time/get_batch"] = get_batch_timer.elapsed
 
-                        # Compute throughput after aggregation to avoid per-rank bias
+                        # Recompute throughput after aggregation to avoid per-rank bias.
                         total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
-                        # Use train end-to-end time (excluding validation) for throughput and time_per_step
-                        aggregated_metrics["perf/delta_time/step_interval"] = train_e2e_without_val
-                        aggregated_metrics["perf/time_per_step"] = train_e2e_without_val
-                        aggregated_metrics["perf/time_per_step_max"] = train_e2e_without_val
-                        if train_e2e_without_val > 0 and total_tokens > 0:
+                        # Exclude validation time and prior checkpoint save time.
+                        aggregated_metrics["perf/delta_time/step_interval_raw"] = train_e2e_without_val
+                        aggregated_metrics["perf/delta_time/checkpoint_save_excluded"] = ckpt_excluded_time
+                        aggregated_metrics["perf/delta_time/step_interval"] = train_e2e_effective
+                        aggregated_metrics["perf/time_per_step"] = train_e2e_effective
+                        aggregated_metrics["perf/time_per_step_max"] = train_e2e_effective
+                        if train_e2e_effective > 0 and total_tokens > 0:
                             total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
-                            aggregated_metrics["perf/throughput"] = total_tokens / (train_e2e_without_val * total_gpus)
+                            aggregated_metrics["perf/throughput"] = total_tokens / (train_e2e_effective * total_gpus)
                         self.tracker.log(aggregated_metrics, step=self.global_step)
 
                         # get rollout validate metrics
@@ -678,9 +681,15 @@ class Trainer:
 
                 self.global_step += 1
 
+                checkpoint_save_time = 0.0
                 if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
                     logger.info(f"[Trainer rank={self.rank}] Saving checkpoint at step {self.global_step}")
-                    self.checkpoint_manager.save_checkpoint(self.global_step)
+                    with Timer("save_checkpoint") as save_checkpoint_timer:
+                        self.checkpoint_manager.save_checkpoint(self.global_step)
+                    checkpoint_save_time = save_checkpoint_timer.elapsed
+
+                # Carry save time into next-step exclusion.
+                self._pending_ckpt_excluded_time = checkpoint_save_time
 
                 time.sleep(0.01)
 
