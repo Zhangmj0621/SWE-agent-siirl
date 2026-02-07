@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import contextlib
 import multiprocessing
 import os
 import re
@@ -31,6 +32,33 @@ from siirl.utils.net_utils.net import (
     get_net_interface_ip,
 )
 from siirl.worker.ray_utils import GPUResources, RayClassWithInitArgs, get_random_string
+
+VALIDATE_REUSE_SYNC_TIMEOUT_S = 120
+
+
+def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
+    if train_gpus <= 0 or tp_size <= 0 or n_gpus_per_node <= 0:
+        return None
+
+    gpus_per_rollout = min(tp_size, n_gpus_per_node)
+    if tp_size % gpus_per_rollout != 0:
+        return None
+
+    num_tp_groups = train_gpus // tp_size
+    if num_tp_groups == 0:
+        return None
+
+    usable_gpus = num_tp_groups * tp_size
+    num_workers = usable_gpus // gpus_per_rollout
+    rollout_per_tp_group = tp_size // gpus_per_rollout
+
+    return {
+        "usable_gpus": usable_gpus,
+        "num_workers": num_workers,
+        "num_tp_groups": num_tp_groups,
+        "gpus_per_rollout": gpus_per_rollout,
+        "rollout_per_tp_group": rollout_per_tp_group,
+    }
 
 
 @ray.remote
@@ -57,6 +85,7 @@ class RolloutManager:
         config: SiiRLArguments,
         gpu_resources: GPUResources,
         data_coordinator_handle,
+        train_gpu_resources: GPUResources | None = None,
         coordinator=None,
         metric_worker=None,
     ):
@@ -85,6 +114,7 @@ class RolloutManager:
 
         # Store GPUResources for centralized access
         self.gpu_resources = gpu_resources
+        self.train_gpu_resources = train_gpu_resources
         self.pg = gpu_resources.pg
         self.rollout_gpu = gpu_resources.num_gpus
 
@@ -110,6 +140,15 @@ class RolloutManager:
         self.router_process = None
         self.worker_handle = []
         self.worker_urls = []
+        self._validate_reuse_workers = []
+        self._validate_reuse_tp0_workers = []
+        self._validate_reuse_sync_required = False
+        self._validate_reuse_synced_ranks: set[int] = set()
+        self._validate_reuse_topology = None
+        self._validate_reuse_enabled = bool(
+            getattr(config.trainer, "validate_reuse_train_gpus", False) and self.train_gpu_resources is not None
+        )
+        self._trainer_world_size = self.train_gpu_resources.num_gpus if self.train_gpu_resources is not None else 0
 
         # Cache for dist_init_addr (used in cross-node TP)
         self._dist_init_addrs = {}
@@ -173,7 +212,17 @@ class RolloutManager:
                 f"local_rank={local_rank}, manages GPUs [{first_gpu_idx}:{first_gpu_idx + self.gpus_per_rollout}]"
             )
 
-    def _create_worker(self, rank, local_rank, bundle_idx, num_gpus, device_name):
+    def _create_worker(
+        self,
+        rank,
+        local_rank,
+        bundle_idx,
+        num_gpus,
+        device_name,
+        world_size: int | None = None,
+        worker_prefix: str | None = None,
+        rollout_ray_class: RayClassWithInitArgs | None = None,
+    ):
         """
         Create a single RolloutWorker Ray actor.
 
@@ -189,22 +238,23 @@ class RolloutManager:
         """
         # Set distributed environment variables
         env_vars = {
-            DistributedEnv.WORLD_SIZE.value: str(self.num_workers),
+            DistributedEnv.WORLD_SIZE.value: str(world_size if world_size is not None else self.num_workers),
             DistributedEnv.RANK.value: str(rank),
             DistributedEnv.LOCAL_RANK.value: str(local_rank),
-            DistributedEnv.WG_PREFIX.value: self.name_prefix,
+            DistributedEnv.WG_PREFIX.value: worker_prefix or self.name_prefix,
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
         }
         if os.getenv("GLOO_SOCKET_IFNAME"):
             env_vars["GLOO_SOCKET_IFNAME"] = os.getenv("GLOO_SOCKET_IFNAME")
 
         # Generate unique actor name
-        base_class_repr = type(self.rollout_ray_class.cls).__name__
+        target_rollout_ray_class = rollout_ray_class or self.rollout_ray_class
+        base_class_repr = type(target_rollout_ray_class.cls).__name__
         match = re.search(r"ActorClass\(([^)]+)\)", base_class_repr)
         actor_class_name = match.group(1) if match else base_class_repr
-        actor_name = f"{self.name_prefix}_{actor_class_name}_actor{rank}_bundle{bundle_idx}"
+        actor_name = f"{worker_prefix or self.name_prefix}_{actor_class_name}_actor{rank}_bundle{bundle_idx}"
 
-        self.rollout_ray_class.update_options(
+        target_rollout_ray_class.update_options(
             {
                 "runtime_env": {"env_vars": env_vars},
                 "name": actor_name,
@@ -215,7 +265,7 @@ class RolloutManager:
 
         logger.debug(f"Creating actor '{actor_name}'")
 
-        worker = self.rollout_ray_class(
+        worker = target_rollout_ray_class(
             placement_group=self.pg,
             placement_group_bundle_idx=bundle_idx,
             num_gpus=num_gpus,
@@ -395,6 +445,171 @@ class RolloutManager:
                 result.append(self.worker_handle[worker_idx])
         return result
 
+    def get_validate_reuse_sync_workers(self, trainer_rank: int):
+        if not self._validate_reuse_sync_required:
+            return []
+        if trainer_rank in self._validate_reuse_synced_ranks:
+            return []
+        return self._validate_reuse_tp0_workers
+
+    def mark_validate_reuse_synced(self, trainer_rank: int):
+        if self._validate_reuse_sync_required:
+            self._validate_reuse_synced_ranks.add(trainer_rank)
+
+    async def _wait_validate_reuse_synced(self, timeout_s: int = VALIDATE_REUSE_SYNC_TIMEOUT_S) -> bool:
+        if not self._validate_reuse_sync_required:
+            return True
+        if self._trainer_world_size <= 0:
+            return False
+
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if len(self._validate_reuse_synced_ranks) >= self._trainer_world_size:
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
+    def _destroy_validate_reuse_pool(self):
+        if not self._validate_reuse_workers:
+            self._validate_reuse_tp0_workers = []
+            self._validate_reuse_topology = None
+            return
+
+        from loguru import logger
+
+        shutdown_futures = [w.shutdown_engine.remote() for w in self._validate_reuse_workers]
+        try:
+            ray.get(shutdown_futures, timeout=30)
+        except Exception as e:
+            logger.warning(f"[RolloutManager] Validate reuse engine shutdown failed: {e}")
+
+        for i, worker in enumerate(self._validate_reuse_workers):
+            with contextlib.suppress(Exception):
+                ray.kill(worker)
+                logger.debug(f"[RolloutManager] Killed validate reuse worker {i}")
+
+        self._validate_reuse_workers = []
+        self._validate_reuse_tp0_workers = []
+        self._validate_reuse_topology = None
+
+    def _init_validate_reuse_pool(self) -> list:
+        if not self._validate_reuse_enabled or self.train_gpu_resources is None:
+            return []
+
+        from loguru import logger
+
+        from siirl.worker.rollout.rollout_worker import RolloutWorker
+
+        topology = compute_validate_reuse_topology(
+            self.train_gpu_resources.num_gpus,
+            self.tp_size,
+            self.n_gpus_per_node,
+        )
+        if topology is None:
+            logger.info("[RolloutManager] Validate GPU reuse disabled: no full TP group available on training GPUs")
+            return []
+
+        self._validate_reuse_topology = topology
+        use_gpus = topology["usable_gpus"]
+        num_workers = topology["num_workers"]
+        num_tp_groups = topology["num_tp_groups"]
+        gpus_per_rollout = topology["gpus_per_rollout"]
+        rollout_per_tp_group = topology["rollout_per_tp_group"]
+
+        res = self.train_gpu_resources
+        indices = res.indices[:use_gpus]
+        local_ranks = res.local_ranks[:use_gpus]
+
+        reuse_prefix = f"{self.name_prefix}_valreuse"
+        reuse_ray_class = RayClassWithInitArgs(ray.remote(RolloutWorker), self.config, num_tp_groups, self.metric_worker)
+
+        workers = []
+        for worker_idx in range(num_workers):
+            first_gpu_idx = worker_idx * gpus_per_rollout
+            bundle_idx = indices[first_gpu_idx]
+            local_rank = local_ranks[first_gpu_idx]
+            worker = self._create_worker(
+                rank=worker_idx,
+                local_rank=local_rank,
+                bundle_idx=bundle_idx,
+                num_gpus=0.2,
+                device_name=self.device_name,
+                world_size=num_workers,
+                worker_prefix=reuse_prefix,
+                rollout_ray_class=reuse_ray_class,
+            )
+            workers.append(worker)
+
+        dist_init_addrs = {}
+        configs = []
+        for worker_idx in range(num_workers):
+            tp_group_idx = worker_idx // rollout_per_tp_group
+            node_rank = worker_idx % rollout_per_tp_group
+            first_gpu_idx = worker_idx * gpus_per_rollout
+            base_gpu_id = local_ranks[first_gpu_idx]
+            if rollout_per_tp_group > 1:
+                if node_rank == 0:
+                    dist_init_start_port = SGLANG_DIST_INIT_START_PORT + 1000 + tp_group_idx
+                    dist_init_addr = ray.get(workers[worker_idx].get_ip_port.remote(start_port=dist_init_start_port))
+                    dist_init_addrs[tp_group_idx] = dist_init_addr
+                else:
+                    dist_init_addr = dist_init_addrs[tp_group_idx]
+            else:
+                dist_init_addr = None
+            configs.append(
+                {
+                    "worker_idx": worker_idx,
+                    "base_gpu_id": base_gpu_id,
+                    "node_rank": node_rank,
+                    "nnodes": rollout_per_tp_group,
+                    "dist_init_addr": dist_init_addr,
+                    "is_tp0": node_rank == 0,
+                }
+            )
+
+        worker_ips = {}
+        node_workers = defaultdict(list)
+        for cfg in configs:
+            worker = workers[cfg["worker_idx"]]
+            ip = ray.get(worker.get_ip.remote())
+            worker_ips[cfg["worker_idx"]] = ip
+            node_workers[ip].append((worker, cfg))
+
+        worker_ports = {}
+        for _, workers_on_node in node_workers.items():
+            first_worker = workers_on_node[0][0]
+            ports = ray.get(first_worker.allocate_ports.remote(start_port=SGLANG_HTTP_START_PORT + 2000, count=len(workers_on_node)))
+            for i, (_, cfg) in enumerate(workers_on_node):
+                worker_ports[cfg["worker_idx"]] = ports[i]
+
+        init_futures = []
+        for cfg in configs:
+            worker = workers[cfg["worker_idx"]]
+            init_futures.append(
+                worker.init_engine.remote(
+                    rank=cfg["worker_idx"],
+                    dist_init_addr=cfg["dist_init_addr"],
+                    ip=worker_ips[cfg["worker_idx"]],
+                    port=worker_ports[cfg["worker_idx"]],
+                    base_gpu_id=cfg["base_gpu_id"],
+                    node_rank=cfg["node_rank"],
+                    nnodes=cfg["nnodes"],
+                )
+            )
+        ray.get(init_futures)
+        ray.get([w.launch_server.remote() for w in workers])
+
+        tp0_workers = []
+        for cfg in configs:
+            if cfg["is_tp0"]:
+                tp0_workers.append(workers[cfg["worker_idx"]])
+        ray.get([w.init_validate_executor.remote(self.data_coordinator, num_tp_groups) for w in tp0_workers])
+
+        logger.info(f"[RolloutManager] Validate GPU reuse enabled: {use_gpus} train GPUs, " f"{len(tp0_workers)} extra TP0 workers")
+        self._validate_reuse_workers = workers
+        self._validate_reuse_tp0_workers = tp0_workers
+        return tp0_workers
+
     def start_rollout(self):
         """
         Start the rollout process on TP0 RolloutWorker actors.
@@ -486,20 +701,44 @@ class RolloutManager:
         """
         from loguru import logger
 
+        from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
+
         val_start = time.time()
         try:
             for _ in range(val_num_batch):
                 await self.data_coordinator.run_dataloader.remote(is_validate=True)
+
+            if self._validate_reuse_enabled:
+                try:
+                    self._init_validate_reuse_pool()
+                except Exception as e:
+                    logger.warning(f"[RolloutManager] Validate GPU reuse init failed, fallback to rollout-only: {e}")
+                    self._destroy_validate_reuse_pool()
+
+                if self._validate_reuse_tp0_workers:
+                    self._validate_reuse_sync_required = True
+                    self._validate_reuse_synced_ranks.clear()
+                    synced = await self._wait_validate_reuse_synced()
+                    if not synced:
+                        logger.warning("[RolloutManager] Validate GPU reuse sync timeout, fallback to rollout-only")
+                        self._validate_reuse_sync_required = False
+                        self._validate_reuse_synced_ranks.clear()
+                        self._destroy_validate_reuse_pool()
+
             logger.info("Starting validate rollout...")
-            rollout_workers = self.get_rollout_worker_on_tp0()
-            futures = [
-                rollout_worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for rollout_worker in rollout_workers
-            ]
-            await asyncio.gather(*futures)
-            val_metrics = await self.metric_worker.wait_final_res.remote()
+            validate_workers = self.get_rollout_worker_on_tp0() + self._validate_reuse_tp0_workers
+            futures = [worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for worker in validate_workers]
+            results = await asyncio.gather(*futures)
+            all_samples = []
+            for samples, _ in results:
+                all_samples.extend(samples)
+            val_metrics = aggregate_and_log_validation_metrics(all_samples)
             logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
             self.message_queue.append((val_metrics, self.global_steps))
         finally:
+            self._validate_reuse_sync_required = False
+            self._validate_reuse_synced_ranks.clear()
+            self._destroy_validate_reuse_pool()
             self._val_time_acc += time.time() - val_start
         return
 
@@ -565,6 +804,8 @@ class RolloutManager:
         from loguru import logger
 
         logger.info("[RolloutManager] Starting cleanup...")
+
+        self._destroy_validate_reuse_pool()
 
         # Gracefully shutdown engine processes first
         shutdown_futures = [w.shutdown_engine.remote() for w in self.worker_handle]

@@ -293,6 +293,10 @@ class Trainer:
 
     # @timer
     def update_rollout_weight(self):
+        rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
+        self._sync_rollout_workers(rollout_workers)
+
+    def _sync_rollout_workers(self, rollout_workers):
         assert self.param_sync is not None, "must setup param sync first"
 
         # Load actor model to GPU before weight sync (needed when param_offload=True)
@@ -301,17 +305,26 @@ class Trainer:
 
             load_megatron_model_to_gpu(self.actor_worker.actor_module, load_grad=False)
 
-        if isinstance(self.param_sync, ParamSyncDistributed):
-            # TODO support elastic rollout connection
-            rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
-            if any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
-                self.param_sync.setup_param_sync_group(rollout_workers)
+        if isinstance(self.param_sync, ParamSyncDistributed) and any(
+            not self.param_sync.has_connected_to_actor(x) for x in rollout_workers
+        ):
+            self.param_sync.setup_param_sync_group(rollout_workers)
         self.param_sync.update_weights()
 
         # Offload actor model back to CPU after weight sync
         if self.actor_worker._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_worker.actor_module)
             get_torch_device().empty_cache()
+
+    def _try_sync_validate_reuse_workers(self) -> bool:
+        if self.rollout_manager is None:
+            return False
+        workers = ray.get(self.rollout_manager.get_validate_reuse_sync_workers.remote(self.rank))
+        if not workers:
+            return False
+        self._sync_rollout_workers(workers)
+        ray.get(self.rollout_manager.mark_validate_reuse_synced.remote(self.rank))
+        return True
 
     def has_critic(self):
         return self.critic_worker is not None
@@ -624,6 +637,7 @@ class Trainer:
                 # Record get_batch timing
                 with Timer("get_batch") as get_batch_timer:
                     while (batch_data := self.get_batch(batch_size)) is None:
+                        self._try_sync_validate_reuse_workers()
                         time.sleep(0.1)
 
                 # compare

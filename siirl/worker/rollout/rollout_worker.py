@@ -22,7 +22,6 @@ from loguru import logger
 from siirl.engine.rollout.sglang_engine import SglangEngine
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.net import get_free_port, get_net_interface_ip
-from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
 
 
 def async_run_wrapper(executor):
@@ -69,6 +68,24 @@ class RolloutWorker:
         self.executor = None  # Rollout executor instance
         self.rollout_thread = None  # Thread for running the async rollout executor
         self.engine = None  # SGLang engine instance
+
+    def _build_executor(self, data_coordinator, num_engine):
+        executor_path = self.config.rollout.executor_module
+        if executor_path == "naive":
+            from siirl.execution.rollout.agent_executor.naive_executor import NaiveExecutor
+
+            Executor = NaiveExecutor
+        else:
+            module_path, name = executor_path.rsplit(".", 1)
+            mod = importlib.import_module(module_path)
+            Executor = getattr(mod, name)
+        return Executor(
+            self.config,
+            data_coordinator,
+            self.engine,
+            self.config.data.train_batch_size // num_engine,
+            dp_rank=self.rank,
+        )
 
     def allocate_ports(self, start_port: int, count: int) -> list[int]:
         """
@@ -178,28 +195,13 @@ class RolloutWorker:
             data_coordinator: Data coordinator instance for data management
             num_engine: Number of engine instances to use
         """
-        # create executor thread
-        # 1. init executor
-        executor_path = self.config.rollout.executor_module
-        if executor_path == "naive":
-            from siirl.execution.rollout.agent_executor.naive_executor import NaiveExecutor
-
-            Executor = NaiveExecutor
-        else:
-            # Dynamically import custom executor module
-            module_path, name = executor_path.rsplit(".", 1)
-            mod = importlib.import_module(module_path)
-            Executor = getattr(mod, name)
-        executor = Executor(
-            self.config,
-            data_coordinator,
-            self.engine,
-            self.config.data.train_batch_size // num_engine,
-            dp_rank=self.rank,
-        )
-        self.executor = executor
-        self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(executor,), daemon=True)
+        self.executor = self._build_executor(data_coordinator, num_engine)
+        self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(self.executor,), daemon=True)
         self.rollout_thread.start()
+
+    def init_validate_executor(self, data_coordinator, num_engine):
+        if self.executor is None:
+            self.executor = self._build_executor(data_coordinator, num_engine)
 
     def stop_rollout(self):
         """
@@ -234,7 +236,6 @@ class RolloutWorker:
 
     async def validate(self, val_batch_size, global_step):
         rank = int(os.environ.get("RANK"))
-        # start_time = time.perf_counter()
         if rank == 0:
             logger.info("=" * 60)
             logger.info(f"Starting Validation @ Global Step {global_step}...")
@@ -245,8 +246,7 @@ class RolloutWorker:
             if sample.extra_info and isinstance(sample.extra_info, dict) and sample.extra_info.get("padded_duplicate", None):
                 continue
             validate_samples.append(sample)
-        val_metrics = aggregate_and_log_validation_metrics(validate_samples)
-        await self.metric_worker.submit_metric.remote(val_metrics, self.global_dp_size)
+        return validate_samples, val_time_metrics
 
     def get_ip(self):
         """

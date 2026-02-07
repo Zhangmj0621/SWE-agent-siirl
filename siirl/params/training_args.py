@@ -92,6 +92,10 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Share GPUs between training and rollout (colocated mode)"},
     )
+    validate_reuse_train_gpus: bool = field(
+        default=False,
+        metadata={"help": "Reuse training GPUs to scale validation in separated mode"},
+    )
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
     pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
     context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})
