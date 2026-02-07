@@ -328,10 +328,20 @@ class Trainer:
         tensor_workers = sync_plan.get("tensor_workers", [])
         if not distributed_workers and not tensor_workers:
             return False
+        start = time.time()
+        logger.info(
+            f"[Trainer rank={self.rank}] Validate reuse sync start: "
+            f"distributed_workers={len(distributed_workers)} tensor_workers={len(tensor_workers)} "
+            f"weight_version={self.get_current_weight_version()}"
+        )
         self._sync_rollout_workers(distributed_workers, tensor_workers)
         regular_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
         self._sync_rollout_workers(regular_workers)
         ray.get(self.rollout_manager.mark_validate_reuse_synced.remote(self.rank))
+        logger.info(
+            f"[Trainer rank={self.rank}] Validate reuse sync done in {time.time() - start:.2f}s "
+            f"weight_version={self.get_current_weight_version()}"
+        )
         return True
 
     def has_critic(self):

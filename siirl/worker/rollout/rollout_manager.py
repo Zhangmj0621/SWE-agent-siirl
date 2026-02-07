@@ -34,6 +34,7 @@ from siirl.utils.net_utils.net import (
 from siirl.worker.ray_utils import GPUResources, RayClassWithInitArgs, get_random_string
 
 VALIDATE_REUSE_SYNC_TIMEOUT_S = 120
+VALIDATE_REUSE_SYNC_LOG_INTERVAL_S = 5.0
 
 
 def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
@@ -167,6 +168,7 @@ class RolloutManager:
         self._validate_reuse_tp0_worker_infos = []
         self._validate_reuse_sync_required = False
         self._validate_reuse_synced_ranks: set[int] = set()
+        self._validate_reuse_sync_plan_logged_ranks: set[int] = set()
         self._validate_reuse_topology = None
         self._validate_reuse_enabled = bool(
             getattr(config.trainer, "validate_reuse_train_gpus", False) and self.train_gpu_resources is not None
@@ -485,6 +487,8 @@ class RolloutManager:
         if self.train_gpu_resources is None or trainer_rank < 0 or trainer_rank >= self.train_gpu_resources.num_gpus:
             return {"distributed_workers": self._validate_reuse_tp0_workers, "tensor_workers": []}
 
+        from loguru import logger
+
         trainer_node_ip = self.train_gpu_resources.node_ips[trainer_rank]
         trainer_local_rank = self.train_gpu_resources.local_ranks[trainer_rank]
         distributed_workers, tensor_workers = split_validate_reuse_sync_workers(
@@ -492,6 +496,13 @@ class RolloutManager:
             trainer_node_ip,
             trainer_local_rank,
         )
+        if trainer_rank not in self._validate_reuse_sync_plan_logged_ranks:
+            self._validate_reuse_sync_plan_logged_ranks.add(trainer_rank)
+            logger.info(
+                "[RolloutManager] Validate reuse sync plan "
+                f"trainer_rank={trainer_rank} trainer_node={trainer_node_ip} trainer_local_rank={trainer_local_rank} "
+                f"distributed_workers={len(distributed_workers)} tensor_workers={len(tensor_workers)}"
+            )
         return {
             "distributed_workers": distributed_workers,
             "tensor_workers": tensor_workers,
@@ -499,7 +510,15 @@ class RolloutManager:
 
     def mark_validate_reuse_synced(self, trainer_rank: int):
         if self._validate_reuse_sync_required:
+            from loguru import logger
+
             self._validate_reuse_synced_ranks.add(trainer_rank)
+            synced = len(self._validate_reuse_synced_ranks)
+            missing = sorted(set(range(self._trainer_world_size)) - self._validate_reuse_synced_ranks)
+            logger.info(
+                "[RolloutManager] Validate reuse synced "
+                f"trainer_rank={trainer_rank} synced={synced}/{self._trainer_world_size} missing={missing}"
+            )
 
     async def _wait_validate_reuse_synced(self, timeout_s: int = VALIDATE_REUSE_SYNC_TIMEOUT_S) -> bool:
         if not self._validate_reuse_sync_required:
@@ -507,10 +526,27 @@ class RolloutManager:
         if self._trainer_world_size <= 0:
             return False
 
+        from loguru import logger
+
+        start = time.time()
+        next_log_at = start + VALIDATE_REUSE_SYNC_LOG_INTERVAL_S
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             if len(self._validate_reuse_synced_ranks) >= self._trainer_world_size:
+                logger.info(
+                    "[RolloutManager] Validate reuse sync completed "
+                    f"in {time.time() - start:.2f}s synced={len(self._validate_reuse_synced_ranks)}/{self._trainer_world_size}"
+                )
                 return True
+            now = time.time()
+            if now >= next_log_at:
+                missing = sorted(set(range(self._trainer_world_size)) - self._validate_reuse_synced_ranks)
+                logger.info(
+                    "[RolloutManager] Waiting validate reuse sync "
+                    f"elapsed={now - start:.2f}s synced={len(self._validate_reuse_synced_ranks)}/{self._trainer_world_size} "
+                    f"missing={missing}"
+                )
+                next_log_at = now + VALIDATE_REUSE_SYNC_LOG_INTERVAL_S
             await asyncio.sleep(0.05)
         return False
 
@@ -519,6 +555,7 @@ class RolloutManager:
             self._validate_reuse_tp0_workers = []
             self._validate_reuse_tp0_worker_infos = []
             self._validate_reuse_topology = None
+            self._validate_reuse_sync_plan_logged_ranks.clear()
             return
 
         from loguru import logger
@@ -538,6 +575,7 @@ class RolloutManager:
         self._validate_reuse_tp0_workers = []
         self._validate_reuse_tp0_worker_infos = []
         self._validate_reuse_topology = None
+        self._validate_reuse_sync_plan_logged_ranks.clear()
 
     def _init_validate_reuse_pool(self) -> list:
         if not self._validate_reuse_enabled or self.train_gpu_resources is None:
@@ -777,15 +815,25 @@ class RolloutManager:
                     logger.warning(f"[RolloutManager] Validate GPU reuse init failed, fallback to rollout-only: {e}")
                     self._destroy_validate_reuse_pool()
 
-                if self._validate_reuse_tp0_workers:
-                    self._validate_reuse_sync_required = True
+            if self._validate_reuse_tp0_workers:
+                self._validate_reuse_sync_required = True
+                self._validate_reuse_synced_ranks.clear()
+                self._validate_reuse_sync_plan_logged_ranks.clear()
+                logger.info(
+                    "[RolloutManager] Start validate reuse sync wait "
+                    f"trainer_world_size={self._trainer_world_size} reuse_tp0_workers={len(self._validate_reuse_tp0_workers)}"
+                )
+                synced = await self._wait_validate_reuse_synced()
+                if not synced:
+                    missing = sorted(set(range(self._trainer_world_size)) - self._validate_reuse_synced_ranks)
+                    logger.warning(
+                        "[RolloutManager] Validate GPU reuse sync timeout, fallback to rollout-only "
+                        f"synced={len(self._validate_reuse_synced_ranks)}/{self._trainer_world_size} missing={missing}"
+                    )
+                    self._validate_reuse_sync_required = False
                     self._validate_reuse_synced_ranks.clear()
-                    synced = await self._wait_validate_reuse_synced()
-                    if not synced:
-                        logger.warning("[RolloutManager] Validate GPU reuse sync timeout, fallback to rollout-only")
-                        self._validate_reuse_sync_required = False
-                        self._validate_reuse_synced_ranks.clear()
-                        self._destroy_validate_reuse_pool()
+                    self._validate_reuse_sync_plan_logged_ranks.clear()
+                    self._destroy_validate_reuse_pool()
 
             logger.info("Starting validate rollout...")
             validate_workers = self.get_rollout_worker_on_tp0() + self._validate_reuse_tp0_workers
@@ -817,6 +865,7 @@ class RolloutManager:
         finally:
             self._validate_reuse_sync_required = False
             self._validate_reuse_synced_ranks.clear()
+            self._validate_reuse_sync_plan_logged_ranks.clear()
             self._destroy_validate_reuse_pool()
             self._val_time_acc += time.time() - val_start
         return
