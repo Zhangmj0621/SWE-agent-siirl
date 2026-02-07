@@ -129,9 +129,9 @@ class GlobalAsyncHTTPClient:
             Optional[Dict[str, Any]]: The JSON response parsed as a dictionary if the request succeeds.
 
         Raises:
-            httpx.HTTPStatusError: If the HTTP request returns a 4xx or 5xx status code.
-            RuntimeError: If all retry attempts are exhausted.
-            Exception: For other unexpected errors (only raised on the final attempt).
+            httpx.HTTPStatusError: For non-transient HTTP status errors.
+            RuntimeError: If retries are exhausted.
+            asyncio.CancelledError: If the request task is cancelled.
         """
         client = await cls._get_client()
 
@@ -140,46 +140,51 @@ class GlobalAsyncHTTPClient:
         use_retry_delay = retry_delay or DEFAULT_RETRY_DELAY
         use_timeout = httpx.Timeout(
             connect=timeout or cls._connect_timeout,
-            read=None,  # Maintain disabled read timeout for long-running operations
+            read=None,  # No read timeout for long generation.
             write=None,
             pool=None,
         )
 
-        # Execute request with retries
         for attempt in range(use_max_attempts):
             attempt_num = attempt + 1
             try:
                 response = await client.request(method=method, url=url, json=payload or {}, timeout=use_timeout)
-                response.raise_for_status()  # Raise exception for HTTP errors (4xx/5xx)
+                response.raise_for_status()
                 logger.debug(f"Request to {url} succeeded (attempt {attempt_num}/{use_max_attempts})")
                 return response.json()
 
-            # Handle specific HTTP exceptions
             except httpx.HTTPStatusError as e:
-                logger.error(f"HTTP error for {url} (attempt {attempt_num}/{use_max_attempts}): {e}")
-                raise  # Do not retry on HTTP status errors
+                status_code = e.response.status_code if e.response is not None else None
+                if status_code in {408, 425, 429, 500, 502, 503, 504}:
+                    logger.warning(
+                        f"Transient HTTP error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"status={status_code}, detail={e!r}"
+                    )
+                else:
+                    logger.error(f"HTTP error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"status={status_code}, detail={e!r}")
+                    raise
 
             except (
                 httpx.ReadTimeout,
                 httpx.ConnectTimeout,
                 httpx.ConnectError,
                 httpx.TimeoutException,
+                httpx.RequestError,
             ) as e:
-                logger.warning(f"Request error for {url} (attempt {attempt_num}/{use_max_attempts}): {e}")
+                logger.warning(f"Request error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"{type(e).__name__}, detail={e!r}")
 
-            # Handle unexpected exceptions
+            except asyncio.CancelledError:
+                raise
+
             except Exception as e:
-                logger.error(f"Unknown error for {url} (attempt {attempt_num}/{use_max_attempts}): {e}")
+                logger.error(f"Unknown error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"{type(e).__name__}, detail={e!r}")
                 if attempt == use_max_attempts - 1:
-                    raise  # Raise on the final attempt
+                    raise
 
-            # Exponential backoff for retries
             if attempt < use_max_attempts - 1:
                 sleep_time = use_retry_delay * (2**attempt)
                 logger.debug(f"Retrying request to {url} in {sleep_time:.2f} seconds (attempt {attempt_num + 1}/{use_max_attempts})")
                 await asyncio.sleep(sleep_time)
 
-        # All retry attempts failed
         raise RuntimeError(f"Request to {url} failed after {use_max_attempts} attempts")
 
     @classmethod

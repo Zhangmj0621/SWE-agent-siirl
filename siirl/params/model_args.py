@@ -171,6 +171,10 @@ class RolloutArguments:
     max_num_batched_tokens: int = field(default=8192, metadata={"help": "Max batched tokens"})
     max_model_len: int | None = field(default=None, metadata={"help": "Max model length"})
     max_num_seqs: int = field(default=1024, metadata={"help": "Max concurrent sequences"})
+    server_concurrency: int = field(
+        default=512,
+        metadata={"help": "Max concurrent client requests per rollout engine during batch generation"},
+    )
     do_sample: bool = field(default=True, metadata={"help": "Enable sampling"})
     n: int = field(default=1, metadata={"help": "Number of responses"})
     enable_chunked_prefill: bool = field(default=True, metadata={"help": "Whether or not enable chunked prefill"})

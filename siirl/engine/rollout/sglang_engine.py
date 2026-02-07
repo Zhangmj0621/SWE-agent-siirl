@@ -295,7 +295,7 @@ class SglangEngine:
 
         # Use semaphore to control concurrency (prevent overwhelming the server)
         # Same as slime: Semaphore(concurrency * num_engines)
-        base_concurrency = getattr(self.config.rollout, "server_concurrency", 512)
+        base_concurrency = self.config.rollout.server_concurrency
         rollout_gpus = getattr(self.config.trainer, "rollout_gpus", 1)
         tp_size = getattr(self.config.rollout, "tensor_model_parallel_size", 1)
         num_engines = max(1, rollout_gpus // tp_size)

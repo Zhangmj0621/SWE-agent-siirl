@@ -920,6 +920,7 @@ class MegatronPPOActor:
         if entropy is not None:
             entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
             policy_loss -= self.actor_config.entropy_coeff * entropy_loss
+            metrics["actor/entropy_loss"] = entropy_loss.detach().item()
 
         # KL loss
         if self.actor_config.use_kl_loss:
@@ -966,9 +967,11 @@ class MegatronPPOActor:
 
         mini_batch["attention_mask"] = mini_batch["attention_mask"].to(bool)
 
-        # Dynamic batching vs fixed split
+        # Use dynamic batching when enabled; restore order in forward-only path via partitions.
         partitions = None
-        if getattr(self.actor_config, "use_dynamic_batch", False):
+        metric_weights = None
+        use_dynamic_batch = getattr(self.actor_config, "use_dynamic_batch", False)
+        if use_dynamic_batch:
             from siirl.utils.dynamic_batch import rearrange_micro_batches
 
             micro_batches, partitions = rearrange_micro_batches(
@@ -982,6 +985,12 @@ class MegatronPPOActor:
         else:
             assert micro_batch_size is not None
             micro_batches = mini_batch.split(micro_batch_size)
+
+        if not forward_only and all("response_mask" in mb for mb in micro_batches):
+            if self.actor_config.loss_agg_mode == "token-mean":
+                metric_weights = [float(mb["response_mask"].sum().item()) for mb in micro_batches]
+            else:
+                metric_weights = [float(mb["response_mask"].shape[0]) for mb in micro_batches]
 
         log_batch_info(data, micro_batch_size, len(micro_batches), forward_only)
 
@@ -1106,6 +1115,8 @@ class MegatronPPOActor:
         # Store partitions for caller to restore original order (forward_only only)
         if forward_only and partitions is not None:
             losses_reduced["_partitions"] = partitions
+        if (not forward_only) and metric_weights is not None:
+            losses_reduced["_metric_weights"] = metric_weights
 
         return losses_reduced
 
@@ -1113,6 +1124,9 @@ class MegatronPPOActor:
         """Update policy using PPO algorithm"""
         metrics = {}
         temperature = data["temperature"]
+        weighted_metric_keys = {"actor/entropy_loss", "actor/kl_loss"}
+        weighted_metric_num = {k: 0.0 for k in weighted_metric_keys}
+        weighted_metric_den = {k: 0.0 for k in weighted_metric_keys}
 
         select_keys = [
             "responses",
@@ -1147,10 +1161,22 @@ class MegatronPPOActor:
                 calculate_entropy=calculate_entropy,
                 micro_batch_size=micro_batch_size,
             )
-
+            metric_weights = metric_micro_batch.get("_metric_weights")
             metric_micro_batch = metric_micro_batch["output"]
-            for metric in metric_micro_batch:
-                append_to_dict(metrics, metric)
+            for idx, metric in enumerate(metric_micro_batch):
+                weight = 1.0
+                if metric_weights is not None and idx < len(metric_weights):
+                    weight = float(metric_weights[idx])
+                non_weighted_metric = {}
+                for key, val in metric.items():
+                    if key in weighted_metric_keys:
+                        v = val.item() if torch.is_tensor(val) else float(val)
+                        weighted_metric_num[key] += v * weight
+                        weighted_metric_den[key] += weight
+                    else:
+                        non_weighted_metric[key] = val
+                if non_weighted_metric:
+                    append_to_dict(metrics, non_weighted_metric)
 
             update_successful, grad_norm, num_zeros_in_grad = self.actor_optimizer.step()
             learning_rate = self.actor_optimizer.param_groups[-1]["lr"]
@@ -1161,6 +1187,12 @@ class MegatronPPOActor:
                 raise NotImplementedError
 
         get_torch_device().empty_cache()
+        for key in weighted_metric_keys:
+            if weighted_metric_den[key] > 0:
+                metrics[key] = weighted_metric_num[key] / weighted_metric_den[key]
+                # Expose numerator/denominator for cross-rank weighted mean.
+                metrics[f"{key}_weighted_sum"] = weighted_metric_num[key]
+                metrics[f"{key}_weight_sum"] = weighted_metric_den[key]
         return metrics
 
 
