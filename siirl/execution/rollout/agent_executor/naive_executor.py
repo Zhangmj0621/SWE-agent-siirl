@@ -524,7 +524,7 @@ class NaiveExecutor:
         use_router: bool = True,
         progress_callback: Callable[[int], None] | None = None,
     ) -> tuple[list[Sample], dict]:
-        logger.info(
+        logger.debug(
             f"RANK_{self._rank} start validate, batch_size:{len(val_samples)}, "
             f"mode:{'single-turn' if self._is_single_turn() else 'multi-turn'}"
         )

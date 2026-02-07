@@ -38,6 +38,17 @@ VALIDATE_REUSE_SYNC_LOG_INTERVAL_S = 5.0
 VALIDATE_PROGRESS_POLL_INTERVAL_S = 2.0
 
 
+def get_validate_tqdm():
+    try:
+        from ray.experimental.tqdm_ray import tqdm as ray_tqdm
+
+        return ray_tqdm
+    except Exception:
+        from tqdm import tqdm
+
+        return tqdm
+
+
 def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
     if train_gpus <= 0 or tp_size <= 0 or n_gpus_per_node <= 0:
         return None
@@ -801,12 +812,11 @@ class RolloutManager:
         return self.router_address
 
     async def _monitor_validate_progress(self, assigned_workers: list[tuple], total_samples: int):
-        from tqdm import tqdm
-
         if total_samples <= 0 or not assigned_workers:
             return
 
-        pbar = tqdm(
+        tqdm_cls = get_validate_tqdm()
+        pbar = tqdm_cls(
             total=total_samples,
             desc="Validate",
             unit="sample",
@@ -815,6 +825,7 @@ class RolloutManager:
             leave=True,
         )
         last_done = 0
+        last_active = -1
 
         try:
             while True:
@@ -831,10 +842,14 @@ class RolloutManager:
 
                 done_samples = min(done_samples, total_samples)
                 delta = done_samples - last_done
-                if delta > 0:
-                    pbar.update(delta)
-                    last_done = done_samples
-                pbar.set_postfix_str(f"active={workers_active}/{len(assigned_workers)}", refresh=False)
+                active_changed = workers_active != last_active
+                if delta > 0 or active_changed:
+                    if delta > 0:
+                        pbar.update(delta)
+                        last_done = done_samples
+                    pbar.set_postfix_str(f"active={workers_active}/{len(assigned_workers)}", refresh=False)
+                    pbar.refresh()
+                    last_active = workers_active
 
                 if done_samples >= total_samples:
                     return

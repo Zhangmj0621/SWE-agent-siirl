@@ -278,20 +278,12 @@ class RolloutWorker:
         return progress
 
     async def validate(self, val_batch_size, global_step):
-        rank = int(os.environ.get("RANK"))
-        if rank == 0:
-            logger.info("=" * 60)
-            logger.info(f"Starting Validation @ Global Step {global_step}...")
-            logger.info("=" * 60)
+        logger.debug(f"[RolloutWorker rank={self.rank}] Starting validation @ global step {global_step}")
         samples, val_time_metrics = await self.executor.validate(val_batch_size)
         return self._filter_validate_samples(samples), val_time_metrics
 
     async def validate_assigned(self, val_samples, global_step):
-        rank = int(os.environ.get("RANK"))
-        if rank == 0:
-            logger.info("=" * 60)
-            logger.info(f"Starting Validation @ Global Step {global_step}...")
-            logger.info("=" * 60)
+        logger.debug(f"[RolloutWorker rank={self.rank}] Starting assigned validation @ global step {global_step}")
         self._start_validate_progress(len(val_samples))
         samples = []
         val_time_metrics = {}
