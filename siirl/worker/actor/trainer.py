@@ -296,8 +296,11 @@ class Trainer:
         rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
         self._sync_rollout_workers(rollout_workers)
 
-    def _sync_rollout_workers(self, rollout_workers):
+    def _sync_rollout_workers(self, rollout_workers, tensor_workers=None):
         assert self.param_sync is not None, "must setup param sync first"
+        tensor_workers = tensor_workers or []
+        if not rollout_workers and not tensor_workers:
+            return
 
         # Load actor model to GPU before weight sync (needed when param_offload=True)
         if self.actor_worker._is_offload_param:
@@ -305,11 +308,12 @@ class Trainer:
 
             load_megatron_model_to_gpu(self.actor_worker.actor_module, load_grad=False)
 
-        if isinstance(self.param_sync, ParamSyncDistributed) and any(
-            not self.param_sync.has_connected_to_actor(x) for x in rollout_workers
-        ):
-            self.param_sync.setup_param_sync_group(rollout_workers)
-        self.param_sync.update_weights()
+        if isinstance(self.param_sync, ParamSyncDistributed):
+            if rollout_workers and any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
+                self.param_sync.setup_param_sync_group(rollout_workers)
+            self.param_sync.update_weights_mixed(rollout_workers, tensor_workers)
+        else:
+            self.param_sync.update_weights()
 
         # Offload actor model back to CPU after weight sync
         if self.actor_worker._is_offload_param:
@@ -319,12 +323,12 @@ class Trainer:
     def _try_sync_validate_reuse_workers(self) -> bool:
         if self.rollout_manager is None:
             return False
-        workers = ray.get(self.rollout_manager.get_validate_reuse_sync_workers.remote(self.rank))
-        if not workers:
+        sync_plan = ray.get(self.rollout_manager.get_validate_reuse_sync_plan.remote(self.rank))
+        distributed_workers = sync_plan.get("distributed_workers", [])
+        tensor_workers = sync_plan.get("tensor_workers", [])
+        if not distributed_workers and not tensor_workers:
             return False
-        self._sync_rollout_workers(workers)
-        # Keep regular rollout workers on the latest synced version so off-policy
-        # filtering does not discard all post-validate rollout samples.
+        self._sync_rollout_workers(distributed_workers, tensor_workers)
         regular_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
         self._sync_rollout_workers(regular_workers)
         ray.get(self.rollout_manager.mark_validate_reuse_synced.remote(self.rank))

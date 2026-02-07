@@ -468,6 +468,25 @@ class SglangEngine:
             self._weight_version += 1
         return result
 
+    def param_sync_from_tensor(
+        self,
+        serialized_named_tensors,
+        flush_cache=True,
+        weight_version: str | None = None,
+    ):
+        payload = {
+            "serialized_named_tensors": serialized_named_tensors,
+            "flush_cache": flush_cache,
+        }
+        if weight_version is not None:
+            payload["weight_version"] = weight_version
+        result = self._make_request("update_weights_from_tensor", payload)
+        if weight_version:
+            self._weight_version = int(weight_version)
+        else:
+            self._weight_version += 1
+        return result
+
     def destroy_weights_update_group(self, group_name):
         if self.sgl_args.node_rank != 0:
             return

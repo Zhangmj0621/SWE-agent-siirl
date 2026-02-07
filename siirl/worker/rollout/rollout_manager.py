@@ -70,6 +70,19 @@ def split_validate_samples(samples: list, num_workers: int) -> list[list]:
     return shards
 
 
+def split_validate_reuse_sync_workers(worker_infos: list[dict], trainer_node_ip: str, trainer_local_rank: int) -> tuple[list, list]:
+    distributed_workers = []
+    tensor_workers = []
+    for info in worker_infos:
+        worker = info["worker"]
+        local_ranks = info.get("local_ranks") or []
+        if info.get("node_ip") == trainer_node_ip and trainer_local_rank in local_ranks:
+            tensor_workers.append(worker)
+        else:
+            distributed_workers.append(worker)
+    return distributed_workers, tensor_workers
+
+
 @ray.remote
 class RolloutManager:
     """
@@ -151,6 +164,7 @@ class RolloutManager:
         self.worker_urls = []
         self._validate_reuse_workers = []
         self._validate_reuse_tp0_workers = []
+        self._validate_reuse_tp0_worker_infos = []
         self._validate_reuse_sync_required = False
         self._validate_reuse_synced_ranks: set[int] = set()
         self._validate_reuse_topology = None
@@ -463,6 +477,26 @@ class RolloutManager:
             return []
         return self._validate_reuse_tp0_workers
 
+    def get_validate_reuse_sync_plan(self, trainer_rank: int):
+        if not self._validate_reuse_sync_required:
+            return {"distributed_workers": [], "tensor_workers": []}
+        if trainer_rank in self._validate_reuse_synced_ranks:
+            return {"distributed_workers": [], "tensor_workers": []}
+        if self.train_gpu_resources is None or trainer_rank < 0 or trainer_rank >= self.train_gpu_resources.num_gpus:
+            return {"distributed_workers": self._validate_reuse_tp0_workers, "tensor_workers": []}
+
+        trainer_node_ip = self.train_gpu_resources.node_ips[trainer_rank]
+        trainer_local_rank = self.train_gpu_resources.local_ranks[trainer_rank]
+        distributed_workers, tensor_workers = split_validate_reuse_sync_workers(
+            self._validate_reuse_tp0_worker_infos,
+            trainer_node_ip,
+            trainer_local_rank,
+        )
+        return {
+            "distributed_workers": distributed_workers,
+            "tensor_workers": tensor_workers,
+        }
+
     def mark_validate_reuse_synced(self, trainer_rank: int):
         if self._validate_reuse_sync_required:
             self._validate_reuse_synced_ranks.add(trainer_rank)
@@ -483,6 +517,7 @@ class RolloutManager:
     def _destroy_validate_reuse_pool(self):
         if not self._validate_reuse_workers:
             self._validate_reuse_tp0_workers = []
+            self._validate_reuse_tp0_worker_infos = []
             self._validate_reuse_topology = None
             return
 
@@ -501,6 +536,7 @@ class RolloutManager:
 
         self._validate_reuse_workers = []
         self._validate_reuse_tp0_workers = []
+        self._validate_reuse_tp0_worker_infos = []
         self._validate_reuse_topology = None
 
     def _init_validate_reuse_pool(self) -> list:
@@ -511,10 +547,7 @@ class RolloutManager:
 
         from siirl.worker.rollout.rollout_worker import RolloutWorker
 
-        reserved_bundle = self.train_gpu_resources.indices[0] if self.train_gpu_resources.indices else None
         train_pairs = list(zip(self.train_gpu_resources.indices, self.train_gpu_resources.local_ranks, strict=False))
-        if reserved_bundle is not None:
-            train_pairs = [(idx, lr) for idx, lr in train_pairs if idx != reserved_bundle]
 
         topology = compute_validate_reuse_topology(
             len(train_pairs),
@@ -564,6 +597,7 @@ class RolloutManager:
             node_rank = worker_idx % rollout_per_tp_group
             first_gpu_idx = worker_idx * gpus_per_rollout
             base_gpu_id = local_ranks[first_gpu_idx]
+            worker_local_ranks = local_ranks[first_gpu_idx : first_gpu_idx + gpus_per_rollout]
             if rollout_per_tp_group > 1:
                 if node_rank == 0:
                     dist_init_start_port = SGLANG_DIST_INIT_START_PORT + 1000 + tp_group_idx
@@ -581,6 +615,7 @@ class RolloutManager:
                     "nnodes": rollout_per_tp_group,
                     "dist_init_addr": dist_init_addr,
                     "is_tp0": node_rank == 0,
+                    "worker_local_ranks": worker_local_ranks,
                 }
             )
 
@@ -617,16 +652,24 @@ class RolloutManager:
         ray.get([w.launch_server.remote() for w in workers])
 
         tp0_workers = []
+        tp0_infos = []
         for cfg in configs:
             if cfg["is_tp0"]:
-                tp0_workers.append(workers[cfg["worker_idx"]])
+                worker = workers[cfg["worker_idx"]]
+                tp0_workers.append(worker)
+                tp0_infos.append(
+                    {
+                        "worker": worker,
+                        "node_ip": worker_ips[cfg["worker_idx"]],
+                        "local_ranks": cfg["worker_local_ranks"],
+                    }
+                )
         ray.get([w.init_validate_executor.remote(self.data_coordinator, num_tp_groups) for w in tp0_workers])
 
         logger.info(f"[RolloutManager] Validate GPU reuse enabled: {use_gpus} train GPUs, " f"{len(tp0_workers)} extra TP0 workers")
-        if reserved_bundle is not None:
-            logger.info(f"[RolloutManager] Reserved training bundle {reserved_bundle} for param-sync source rank")
         self._validate_reuse_workers = workers
         self._validate_reuse_tp0_workers = tp0_workers
+        self._validate_reuse_tp0_worker_infos = tp0_infos
         return tp0_workers
 
     def start_rollout(self):
