@@ -323,6 +323,10 @@ class Trainer:
         if not workers:
             return False
         self._sync_rollout_workers(workers)
+        # Keep regular rollout workers on the latest synced version so off-policy
+        # filtering does not discard all post-validate rollout samples.
+        regular_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
+        self._sync_rollout_workers(regular_workers)
         ray.get(self.rollout_manager.mark_validate_reuse_synced.remote(self.rank))
         return True
 

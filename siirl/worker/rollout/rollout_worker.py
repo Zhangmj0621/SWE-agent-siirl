@@ -234,6 +234,14 @@ class RolloutWorker:
         """
         self.engine.set_router(router_address)
 
+    def _filter_validate_samples(self, samples):
+        validate_samples = []
+        for sample in samples:
+            if sample.extra_info and isinstance(sample.extra_info, dict) and sample.extra_info.get("padded_duplicate", None):
+                continue
+            validate_samples.append(sample)
+        return validate_samples
+
     async def validate(self, val_batch_size, global_step):
         rank = int(os.environ.get("RANK"))
         if rank == 0:
@@ -241,12 +249,16 @@ class RolloutWorker:
             logger.info(f"Starting Validation @ Global Step {global_step}...")
             logger.info("=" * 60)
         samples, val_time_metrics = await self.executor.validate(val_batch_size)
-        validate_samples = []
-        for sample in samples:
-            if sample.extra_info and isinstance(sample.extra_info, dict) and sample.extra_info.get("padded_duplicate", None):
-                continue
-            validate_samples.append(sample)
-        return validate_samples, val_time_metrics
+        return self._filter_validate_samples(samples), val_time_metrics
+
+    async def validate_assigned(self, val_samples, global_step):
+        rank = int(os.environ.get("RANK"))
+        if rank == 0:
+            logger.info("=" * 60)
+            logger.info(f"Starting Validation @ Global Step {global_step}...")
+            logger.info("=" * 60)
+        samples, val_time_metrics = await self.executor.validate_samples(val_samples)
+        return self._filter_validate_samples(samples), val_time_metrics
 
     def get_ip(self):
         """

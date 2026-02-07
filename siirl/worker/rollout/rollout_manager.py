@@ -61,6 +61,15 @@ def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_no
     }
 
 
+def split_validate_samples(samples: list, num_workers: int) -> list[list]:
+    if num_workers <= 0:
+        return []
+    shards = [[] for _ in range(num_workers)]
+    for idx, sample in enumerate(samples):
+        shards[idx % num_workers].append(sample)
+    return shards
+
+
 @ray.remote
 class RolloutManager:
     """
@@ -737,8 +746,25 @@ class RolloutManager:
 
             logger.info("Starting validate rollout...")
             validate_workers = self.get_rollout_worker_on_tp0() + self._validate_reuse_tp0_workers
-            futures = [worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for worker in validate_workers]
-            results = await asyncio.gather(*futures)
+            all_val_samples = []
+            drain_batch_size = max(val_batch_size * val_num_batch, len(validate_workers))
+            while True:
+                val_batch = await self.data_coordinator.get_dataloader.remote(batch_size=drain_batch_size, is_validate=True)
+                if not val_batch:
+                    break
+                all_val_samples.extend(val_batch)
+
+            shards = split_validate_samples(all_val_samples, len(validate_workers))
+            logger.info(
+                f"Validate dispatch: workers={len(validate_workers)}, "
+                f"samples={len(all_val_samples)}, shard_sizes={[len(shard) for shard in shards]}"
+            )
+            futures = [
+                worker.validate_assigned.remote(shards[idx], self.global_steps)
+                for idx, worker in enumerate(validate_workers)
+                if shards[idx]
+            ]
+            results = await asyncio.gather(*futures) if futures else []
             all_samples = []
             for samples, _ in results:
                 all_samples.extend(samples)

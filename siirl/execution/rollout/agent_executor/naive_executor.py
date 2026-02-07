@@ -518,16 +518,19 @@ class NaiveExecutor:
         - Single-turn: batch generation + router load balancing
         - Multi-turn: high concurrency + router load balancing
         """
-        # 1. Load validation data (async optimized)
         with Timer("get_val_data") as val_get_time:
             val_samples = await self._load_val_data(val_batch_size)
+        return await self.validate_samples(val_samples, val_get_time=val_get_time.elapsed)
 
+    async def validate_samples(self, val_samples: list[Sample], val_get_time: float = 0.0) -> tuple[list[Sample], dict]:
         logger.info(
             f"RANK_{self._rank} start validate, batch_size:{len(val_samples)}, "
             f"mode:{'single-turn' if self._is_single_turn() else 'multi-turn'}"
         )
 
-        # 2. Generate based on mode
+        if not val_samples:
+            return [], {"val_get_time": val_get_time, "val_generate_time": 0.0}
+
         with Timer("val_generate") as val_generate_time:
             if self._is_single_turn():
                 result = await self._validate_single_turn(val_samples)
