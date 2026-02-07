@@ -219,6 +219,7 @@ class RolloutManager:
         bundle_idx,
         num_gpus,
         device_name,
+        num_cpus: float | None = None,
         world_size: int | None = None,
         worker_prefix: str | None = None,
         rollout_ray_class: RayClassWithInitArgs | None = None,
@@ -254,12 +255,13 @@ class RolloutManager:
         actor_class_name = match.group(1) if match else base_class_repr
         actor_name = f"{worker_prefix or self.name_prefix}_{actor_class_name}_actor{rank}_bundle{bundle_idx}"
 
-        target_rollout_ray_class.update_options(
-            {
-                "runtime_env": {"env_vars": env_vars},
-                "name": actor_name,
-            }
-        )
+        actor_options = {
+            "runtime_env": {"env_vars": env_vars},
+            "name": actor_name,
+        }
+        if num_cpus is not None:
+            actor_options["num_cpus"] = num_cpus
+        target_rollout_ray_class.update_options(actor_options)
 
         from loguru import logger
 
@@ -532,8 +534,9 @@ class RolloutManager:
                 rank=worker_idx,
                 local_rank=local_rank,
                 bundle_idx=bundle_idx,
-                num_gpus=0.2,
+                num_gpus=0,
                 device_name=self.device_name,
+                num_cpus=0,
                 world_size=num_workers,
                 worker_prefix=reuse_prefix,
                 rollout_ray_class=reuse_ray_class,
