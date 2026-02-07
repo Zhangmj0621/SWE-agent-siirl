@@ -485,8 +485,10 @@ class Trainer:
             if hasattr(actor_metrics, "data"):  # NonTensorData wrapper
                 actor_metrics = actor_metrics.data
 
-            # Preserve forward-only entropy for debugging.
+            # Keep forward-only entropy for debugging and backfill actor/entropy_loss
+            # when the training path does not compute entropy (e.g., entropy_coeff=0).
             if entropy_loss is not None:
+                actor_metrics.setdefault("actor/entropy_loss", entropy_loss.item())
                 actor_metrics["actor/entropy_loss_forward_only"] = entropy_loss.item()
 
             if self.use_critic:
