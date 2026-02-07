@@ -36,9 +36,6 @@ from siirl.worker.ray_utils import GPUResources, RayClassWithInitArgs, get_rando
 VALIDATE_REUSE_SYNC_TIMEOUT_S = 120
 VALIDATE_REUSE_SYNC_LOG_INTERVAL_S = 5.0
 VALIDATE_PROGRESS_POLL_INTERVAL_S = 2.0
-VALIDATE_PROGRESS_LOG_INTERVAL_S = 5.0
-VALIDATE_PROGRESS_MIN_DELTA_RATIO = 0.05
-VALIDATE_PROGRESS_BAR_WIDTH = 24
 
 
 def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
@@ -90,25 +87,6 @@ def split_validate_reuse_sync_workers(worker_infos: list[dict], trainer_node_ip:
 
 def rollout_to_train_step(rollout_step: int) -> int:
     return max(rollout_step - 1, 0)
-
-
-def _format_duration(seconds: float) -> str:
-    total = max(int(seconds), 0)
-    minutes, secs = divmod(total, 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours > 0:
-        return f"{hours}h{minutes:02d}m{secs:02d}s"
-    if minutes > 0:
-        return f"{minutes}m{secs:02d}s"
-    return f"{secs}s"
-
-
-def _format_progress_bar(done: int, total: int, width: int = VALIDATE_PROGRESS_BAR_WIDTH) -> str:
-    if total <= 0:
-        return "░" * width
-    ratio = max(0.0, min(done / total, 1.0))
-    fill = int(ratio * width)
-    return "█" * fill + "░" * (width - fill)
 
 
 @ray.remote
@@ -823,55 +801,48 @@ class RolloutManager:
         return self.router_address
 
     async def _monitor_validate_progress(self, assigned_workers: list[tuple], total_samples: int):
-        from loguru import logger
+        from tqdm import tqdm
 
         if total_samples <= 0 or not assigned_workers:
             return
 
-        start_time = time.time()
-        last_log_time = 0.0
-        last_log_ratio = 0.0
+        pbar = tqdm(
+            total=total_samples,
+            desc="Validate",
+            unit="sample",
+            dynamic_ncols=True,
+            mininterval=0.5,
+            leave=True,
+        )
+        last_done = 0
 
-        while True:
-            progress_refs = [worker.get_validate_progress.remote() for worker, _ in assigned_workers]
-            progresses = await asyncio.gather(*progress_refs)
+        try:
+            while True:
+                progress_refs = [worker.get_validate_progress.remote() for worker, _ in assigned_workers]
+                progresses = await asyncio.gather(*progress_refs)
 
-            done_samples = 0
-            workers_active = 0
-            for progress, (_, expected_total) in zip(progresses, assigned_workers, strict=False):
-                done = int(progress.get("done", 0))
-                done_samples += min(max(done, 0), expected_total)
-                if progress.get("active", False):
-                    workers_active += 1
+                done_samples = 0
+                workers_active = 0
+                for progress, (_, expected_total) in zip(progresses, assigned_workers, strict=False):
+                    done = int(progress.get("done", 0))
+                    done_samples += min(max(done, 0), expected_total)
+                    if progress.get("active", False):
+                        workers_active += 1
 
-            done_samples = min(done_samples, total_samples)
-            ratio = done_samples / total_samples if total_samples > 0 else 1.0
-            now = time.time()
+                done_samples = min(done_samples, total_samples)
+                delta = done_samples - last_done
+                if delta > 0:
+                    pbar.update(delta)
+                    last_done = done_samples
+                pbar.set_postfix_str(f"active={workers_active}/{len(assigned_workers)}", refresh=False)
 
-            should_log = (
-                done_samples >= total_samples
-                or ratio - last_log_ratio >= VALIDATE_PROGRESS_MIN_DELTA_RATIO
-                or now - last_log_time >= VALIDATE_PROGRESS_LOG_INTERVAL_S
-            )
-            if should_log:
-                elapsed = max(now - start_time, 1e-6)
-                rate = done_samples / elapsed
-                eta = (total_samples - done_samples) / rate if done_samples > 0 and rate > 0 else None
-                bar = _format_progress_bar(done_samples, total_samples)
-                pct = ratio * 100.0
-                eta_text = _format_duration(eta) if eta is not None else "--"
-                logger.info(
-                    "[RolloutManager] Validate progress "
-                    f"[{bar}] {pct:5.1f}% ({done_samples}/{total_samples}) "
-                    f"active={workers_active}/{len(assigned_workers)} "
-                    f"rate={rate:.1f}/s elapsed={_format_duration(elapsed)} eta={eta_text}"
-                )
-                last_log_time = now
-                last_log_ratio = ratio
-
-            if done_samples >= total_samples:
-                return
-            await asyncio.sleep(VALIDATE_PROGRESS_POLL_INTERVAL_S)
+                if done_samples >= total_samples:
+                    return
+                await asyncio.sleep(VALIDATE_PROGRESS_POLL_INTERVAL_S)
+        finally:
+            if last_done < total_samples:
+                pbar.update(total_samples - last_done)
+            pbar.close()
 
     async def validate(self, val_num_batch, val_batch_size):
         """
