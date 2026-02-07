@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import contextlib
+import inspect
 import multiprocessing
 import os
 import re
@@ -39,6 +40,30 @@ VALIDATE_PROGRESS_POLL_INTERVAL_S = 2.0
 
 
 def get_validate_tqdm():
+    backend = os.environ.get("SIIRL_VALIDATE_PROGRESS_BACKEND", "local").strip().lower()
+    if backend in {"none", "off", "disable", "disabled"}:
+        return None
+
+    if backend == "ray":
+        try:
+            from ray.experimental.tqdm_ray import tqdm as ray_tqdm
+
+            return ray_tqdm
+        except Exception:
+            pass
+
+    if backend == "local":
+        from tqdm import tqdm
+
+        return tqdm
+
+    # auto mode:
+    # In Ray actor processes, local tqdm is easier to observe from actor logs.
+    if os.environ.get("RAY_WORKER_ID"):
+        from tqdm import tqdm
+
+        return tqdm
+
     try:
         from ray.experimental.tqdm_ray import tqdm as ray_tqdm
 
@@ -47,6 +72,15 @@ def get_validate_tqdm():
         from tqdm import tqdm
 
         return tqdm
+
+
+def _instantiate_tqdm(tqdm_cls, **kwargs):
+    signature = inspect.signature(tqdm_cls)
+    accepts_var_kwargs = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+    if accepts_var_kwargs:
+        return tqdm_cls(**kwargs)
+    supported = {k: v for k, v in kwargs.items() if k in signature.parameters}
+    return tqdm_cls(**supported)
 
 
 def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
@@ -812,18 +846,29 @@ class RolloutManager:
         return self.router_address
 
     async def _monitor_validate_progress(self, assigned_workers: list[tuple], total_samples: int):
+        from loguru import logger
+
         if total_samples <= 0 or not assigned_workers:
             return
 
         tqdm_cls = get_validate_tqdm()
-        pbar = tqdm_cls(
-            total=total_samples,
-            desc="Validate",
-            unit="sample",
-            dynamic_ncols=True,
-            mininterval=0.5,
-            leave=True,
-        )
+        if tqdm_cls is None:
+            return
+        pbar_kwargs = {
+            "total": total_samples,
+            "desc": "Validate",
+            "unit": "sample",
+            "dynamic_ncols": True,
+            "mininterval": 0.5,
+            "leave": True,
+        }
+        try:
+            pbar = _instantiate_tqdm(tqdm_cls, **pbar_kwargs)
+        except Exception as e:
+            logger.warning(f"[RolloutManager] Validate progress fallback to local tqdm due to: {e}")
+            from tqdm import tqdm
+
+            pbar = _instantiate_tqdm(tqdm, **pbar_kwargs)
         last_done = 0
         last_active = -1
 
@@ -847,8 +892,19 @@ class RolloutManager:
                     if delta > 0:
                         pbar.update(delta)
                         last_done = done_samples
-                    pbar.set_postfix_str(f"active={workers_active}/{len(assigned_workers)}", refresh=False)
-                    pbar.refresh()
+                    postfix = f"active={workers_active}/{len(assigned_workers)}"
+                    if hasattr(pbar, "set_postfix_str"):
+                        try:
+                            pbar.set_postfix_str(postfix, refresh=False)
+                        except TypeError:
+                            pbar.set_postfix_str(postfix)
+                    elif hasattr(pbar, "set_postfix"):
+                        try:
+                            pbar.set_postfix({"active": f"{workers_active}/{len(assigned_workers)}"}, refresh=False)
+                        except TypeError:
+                            pbar.set_postfix({"active": f"{workers_active}/{len(assigned_workers)}"})
+                    if hasattr(pbar, "refresh"):
+                        pbar.refresh()
                     last_active = workers_active
 
                 if done_samples >= total_samples:
