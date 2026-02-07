@@ -542,8 +542,9 @@ class NaiveExecutor:
             else:
                 result = await self._validate_multi_turn(val_samples, use_router=use_router)
 
+        val_get_time_sec = val_get_time.elapsed if hasattr(val_get_time, "elapsed") else float(val_get_time)
         metrics = {
-            "val_get_time": val_get_time.elapsed,
+            "val_get_time": val_get_time_sec,
             "val_generate_time": val_generate_time.elapsed,
         }
         return result, metrics
