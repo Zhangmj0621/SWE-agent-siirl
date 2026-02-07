@@ -20,6 +20,7 @@ multiple backends (console, wandb, tensorboard) simultaneously.
 """
 
 import contextlib
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +46,60 @@ class GenerationSample:
     output_text: str
     score: float
     metadata: dict[str, Any] | None = None
+
+
+def _std_from_stats(sum_val: float, sum_sq: float, count: int, use_sample_var: bool) -> float:
+    if count <= 0:
+        return 0.0
+    if use_sample_var:
+        if count <= 1:
+            return 0.0
+        variance = (sum_sq - (sum_val**2) / count) / (count - 1)
+    else:
+        mean_val = sum_val / count
+        variance = (sum_sq / count) - (mean_val**2)
+    return math.sqrt(max(variance, 0.0))
+
+
+def sanitize_metrics_for_logging(data: dict[str, Any]) -> dict[str, float]:
+    """
+    Convert metrics to scalar values accepted by logger backends.
+    """
+    sanitized: dict[str, float] = {}
+
+    for key, value in data.items():
+        if isinstance(value, bool):
+            sanitized[key] = float(int(value))
+            continue
+        if isinstance(value, int | float):
+            sanitized[key] = float(value)
+            continue
+
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                scalar = value.item()
+                if isinstance(scalar, int | float):
+                    sanitized[key] = float(scalar)
+                    continue
+            except Exception:
+                pass
+
+        # Handle StdStats-like objects and dicts.
+        sum_val = getattr(value, "sum", None)
+        sum_sq = getattr(value, "sum_sq", None)
+        count = getattr(value, "count", None)
+        if isinstance(value, dict):
+            sum_val = value.get("sum")
+            sum_sq = value.get("sum_sq")
+            count = value.get("count")
+        if sum_val is not None and sum_sq is not None and count is not None:
+            use_sample_var = "pooled_std" in key
+            sanitized[key] = _std_from_stats(float(sum_val), float(sum_sq), int(count), use_sample_var)
+            continue
+
+        logger.warning(f"Drop non-scalar metric for logging: key={key}, type={type(value)}")
+
+    return sanitized
 
 
 class MetricTracker:
@@ -231,6 +286,10 @@ class MetricTracker:
         """
         if self._closed:
             logger.warning("MetricTracker is closed, ignoring log call")
+            return
+
+        data = sanitize_metrics_for_logging(data)
+        if not data:
             return
 
         for name, backend in self._backends.items():

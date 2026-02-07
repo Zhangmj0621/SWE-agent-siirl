@@ -859,7 +859,11 @@ class RolloutManager:
             all_samples = []
             for samples, _ in results:
                 all_samples.extend(samples)
-            val_metrics = aggregate_and_log_validation_metrics(all_samples)
+            raw_val_metrics = aggregate_and_log_validation_metrics(all_samples)
+            val_metrics = raw_val_metrics
+            if self.metric_worker is not None and raw_val_metrics:
+                await self.metric_worker.submit_metric.remote(raw_val_metrics, 1)
+                val_metrics = await self.metric_worker.wait_final_res.remote()
             logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
             self.message_queue.append((val_metrics, self.global_steps))
         finally:
