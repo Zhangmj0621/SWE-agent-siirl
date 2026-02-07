@@ -841,7 +841,7 @@ class MegatronPPOActor:
 
                 # Restore original order if dynamic batch shuffled the samples
                 if partitions is not None:
-                    from siirl.utils.dynamic_batch import restore_batch_order
+                    from siirl.engine.actor.dynamic_batch import restore_batch_order
 
                     log_probs = restore_batch_order(log_probs, partitions)
                     if calculate_entropy:
@@ -972,7 +972,7 @@ class MegatronPPOActor:
         metric_weights = None
         use_dynamic_batch = getattr(self.actor_config, "use_dynamic_batch", False)
         if use_dynamic_batch:
-            from siirl.utils.dynamic_batch import rearrange_micro_batches
+            from siirl.engine.actor.dynamic_batch import rearrange_micro_batches
 
             micro_batches, partitions = rearrange_micro_batches(
                 batch=mini_batch,
