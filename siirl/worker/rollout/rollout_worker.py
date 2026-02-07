@@ -257,7 +257,7 @@ class RolloutWorker:
             logger.info("=" * 60)
             logger.info(f"Starting Validation @ Global Step {global_step}...")
             logger.info("=" * 60)
-        samples, val_time_metrics = await self.executor.validate_samples(val_samples)
+        samples, val_time_metrics = await self.executor.validate_samples(val_samples, use_router=False)
         return self._filter_validate_samples(samples), val_time_metrics
 
     def get_ip(self):

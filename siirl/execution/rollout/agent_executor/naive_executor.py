@@ -422,7 +422,7 @@ class NaiveExecutor:
             ground_truth=sample.reward_model["ground_truth"],
         )
 
-    async def _validate_single_turn(self, samples: list[Sample]) -> list[Sample]:
+    async def _validate_single_turn(self, samples: list[Sample], use_router: bool = True) -> list[Sample]:
         """
         Optimized validation for single-turn scenarios.
         Uses batch generation with router load balancing and sort-by-length.
@@ -443,7 +443,7 @@ class NaiveExecutor:
             results = await self.engine.generate_batch(
                 batch_input_ids,
                 is_validate=True,
-                use_router=True,
+                use_router=use_router,
                 show_progress=(self._dp_rank == 0),
                 progress_desc="Validate",
             )
@@ -473,14 +473,14 @@ class NaiveExecutor:
         result = await self.generate(sample, is_validate=True)
         return idx, result
 
-    async def _validate_multi_turn(self, samples: list[Sample]) -> list[Sample]:
+    async def _validate_multi_turn(self, samples: list[Sample], use_router: bool = True) -> list[Sample]:
         """
         Validation for multi-turn scenarios.
         Uses high concurrency with router load balancing.
         Streaming collection via as_completed to reduce tail latency.
         """
         # Enable router on rollout_flow for validate duration
-        self.rollout_flow.use_router = True
+        self.rollout_flow.use_router = use_router
         try:
             results = [None] * len(samples)
             tasks = [self._indexed_generate(i, s) for i, s in enumerate(samples)]
@@ -522,7 +522,12 @@ class NaiveExecutor:
             val_samples = await self._load_val_data(val_batch_size)
         return await self.validate_samples(val_samples, val_get_time=val_get_time.elapsed)
 
-    async def validate_samples(self, val_samples: list[Sample], val_get_time: float = 0.0) -> tuple[list[Sample], dict]:
+    async def validate_samples(
+        self,
+        val_samples: list[Sample],
+        val_get_time: float = 0.0,
+        use_router: bool = True,
+    ) -> tuple[list[Sample], dict]:
         logger.info(
             f"RANK_{self._rank} start validate, batch_size:{len(val_samples)}, "
             f"mode:{'single-turn' if self._is_single_turn() else 'multi-turn'}"
@@ -533,9 +538,9 @@ class NaiveExecutor:
 
         with Timer("val_generate") as val_generate_time:
             if self._is_single_turn():
-                result = await self._validate_single_turn(val_samples)
+                result = await self._validate_single_turn(val_samples, use_router=use_router)
             else:
-                result = await self._validate_multi_turn(val_samples)
+                result = await self._validate_multi_turn(val_samples, use_router=use_router)
 
         metrics = {
             "val_get_time": val_get_time.elapsed,

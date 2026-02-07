@@ -74,6 +74,7 @@ class SglangEngine:
         self.port = port
         self.nccl_port = nccl_port
         self.ip = ip
+        self.router_address = None
         self._weight_version = 0
         # GPU placement parameters (directly passed, not calculated)
         self.base_gpu_id = base_gpu_id
