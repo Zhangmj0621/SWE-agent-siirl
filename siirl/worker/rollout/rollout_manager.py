@@ -129,7 +129,9 @@ class RolloutManager:
         self.worker_urls = []
         self._validate_active = False
         self._validate_reuse_enabled = bool(
-            getattr(config.trainer, "validate_reuse_train_gpus", False) and self.train_gpu_resources is not None
+            getattr(config.trainer, "validate_reuse_train_gpus", False)
+            and self.train_gpu_resources is not None
+            and not self.gpu_resources.is_shared
         )
         self._trainer_world_size = self.train_gpu_resources.num_gpus if self.train_gpu_resources is not None else 0
         self._validate_reuse_coordinator = ValidateReuseCoordinator(trainer_world_size=self._trainer_world_size)
@@ -184,11 +186,12 @@ class RolloutManager:
             bundle_idx = res.indices[first_gpu_idx]
             local_rank = res.local_ranks[first_gpu_idx]
 
+            worker_gpu_claim = 0.0 if self.gpu_resources.is_shared else 0.2
             worker = self._create_worker(
                 rank=worker_idx,
                 local_rank=local_rank,
                 bundle_idx=bundle_idx,
-                num_gpus=0.2,  # Fractional GPU for Ray scheduling
+                num_gpus=worker_gpu_claim,
                 device_name=self.device_name,
             )
             self.worker_handle.append(worker)

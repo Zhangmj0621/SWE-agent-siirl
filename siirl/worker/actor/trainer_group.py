@@ -210,6 +210,12 @@ class TrainerGroup:
         logger.info(f"[TrainerGroup.init_actors] Creating {self.num_gpus} trainers")
         logger.info(f"  gpu_indices={self.gpu_indices}, local_ranks={self.local_ranks}")
         logger.info(f"  node_ips={self.node_ips}, is_shared={self.is_shared}")
+        if not (len(self.gpu_indices) == len(self.local_ranks) == len(self.node_ips) == self.num_gpus):
+            raise ValueError(
+                "TrainerGroup resource shape mismatch: "
+                f"indices={len(self.gpu_indices)}, local_ranks={len(self.local_ranks)}, "
+                f"node_ips={len(self.node_ips)}, num_gpus={self.num_gpus}"
+            )
 
         for rank, (bundle_idx, local_rank) in enumerate(zip(self.gpu_indices, self.local_ranks, strict=False)):
             env_vars = self._build_trainer_env(rank, local_rank)

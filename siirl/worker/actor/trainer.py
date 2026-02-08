@@ -816,8 +816,20 @@ class Trainer:
                         aggregated_metrics["perf/delta_time/step_interval"] = step_timing["step_interval"]
                         aggregated_metrics["perf/time_per_step"] = step_timing["step_interval"]
                         aggregated_metrics["perf/time_per_step_max"] = step_timing["step_interval"]
-                        if step_timing["step_interval"] > 0 and total_tokens > 0:
+
+                        if self.config.trainer.colocate:
+                            total_gpus = self.world_size
+                            if total_gpus <= 0:
+                                total_gpus = max(
+                                    self.config.trainer.actor_gpus,
+                                    self.config.trainer.nnodes * self.config.trainer.n_gpus_per_node,
+                                )
+                        else:
                             total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
+                        total_gpus = max(total_gpus, 1)
+                        aggregated_metrics["perf/total_gpus"] = total_gpus
+                        aggregated_metrics["perf/gpu_mode"] = "colocated" if self.config.trainer.colocate else "separated"
+                        if step_timing["step_interval"] > 0 and total_tokens > 0:
                             aggregated_metrics["perf/throughput"] = total_tokens / (step_timing["step_interval"] * total_gpus)
                         self.tracker.log(aggregated_metrics, step=self.global_step)
 

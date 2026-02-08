@@ -168,7 +168,7 @@ def allocate_resources(config: SiiRLArguments) -> dict[str, GPUResources]:
 
     Returns:
         Separated mode: {"actor": GPUResources, "rollout": GPUResources}
-        Colocated mode: {"shared": GPUResources}
+        Colocated mode: {"actor": GPUResources, "rollout": GPUResources}
 
     Example:
         # Separated mode (default)
@@ -179,7 +179,8 @@ def allocate_resources(config: SiiRLArguments) -> dict[str, GPUResources]:
         # Colocated mode
         config.trainer.colocate = True
         resources = allocate_resources(config)
-        shared_res = resources["shared"]   # 8 GPUs, shared between training and rollout
+        shared_actor_res = resources["actor"]    # 8 GPUs, shared between training and rollout
+        shared_rollout_res = resources["rollout"]  # same object as shared_actor_res
     """
     cfg = config.trainer
 
@@ -266,7 +267,7 @@ def _allocate_colocated(config: SiiRLArguments) -> dict[str, GPUResources]:
         config: SiiRLArguments configuration object.
 
     Returns:
-        {"shared": GPUResources}
+        {"actor": GPUResources, "rollout": GPUResources}
     """
     from loguru import logger
 
@@ -274,6 +275,10 @@ def _allocate_colocated(config: SiiRLArguments) -> dict[str, GPUResources]:
 
     # In colocated mode, use actor_gpus or default to all available GPUs
     total_gpus = cfg.actor_gpus if cfg.actor_gpus > 0 else (cfg.nnodes * cfg.n_gpus_per_node)
+    validate_colocated_topology(config, total_gpus=total_gpus)
+    if cfg.rollout_gpus != total_gpus:
+        logger.info(f"Colocated mode: overriding trainer.rollout_gpus from {cfg.rollout_gpus} to {total_gpus}")
+        cfg.rollout_gpus = total_gpus
 
     logger.info(f"Allocating resources (colocated mode): " f"{total_gpus} GPUs shared between training and rollout")
 
@@ -294,16 +299,54 @@ def _allocate_colocated(config: SiiRLArguments) -> dict[str, GPUResources]:
     for i, (idx, lr, ip) in enumerate(zip(sorted_indices, local_ranks, node_ips, strict=False)):
         logger.info(f"    idx {i}: bundle_idx={idx}, local_rank={lr}, node={ip}")
 
-    return {
-        "shared": GPUResources(
-            pg=pg,
-            indices=sorted_indices,
-            local_ranks=local_ranks,
-            node_ips=node_ips,
-            num_gpus=total_gpus,
-            is_shared=True,
-        ),
-    }
+    shared = GPUResources(
+        pg=pg,
+        indices=sorted_indices,
+        local_ranks=local_ranks,
+        node_ips=node_ips,
+        num_gpus=total_gpus,
+        is_shared=True,
+    )
+    return {"actor": shared, "rollout": shared}
+
+
+def validate_colocated_topology(config: SiiRLArguments, total_gpus: int) -> None:
+    cfg = config.trainer
+    tp = cfg.tensor_model_parallel_size
+    pp = cfg.pipeline_model_parallel_size
+    cp = cfg.context_parallel_size
+    ep = cfg.expert_model_parallel_size
+    etp = cfg.expert_tensor_parallel_size
+    rollout_tp = config.rollout.tensor_model_parallel_size
+    n_gpus_per_node = cfg.n_gpus_per_node
+
+    if total_gpus <= 0:
+        raise ValueError(f"colocate: total_gpus must be > 0, got {total_gpus}")
+    if tp <= 0 or pp <= 0 or cp <= 0:
+        raise ValueError(f"colocate: tp/pp/cp must be > 0, got tp={tp}, pp={pp}, cp={cp}")
+    if ep <= 0 or etp <= 0:
+        raise ValueError(f"colocate: ep/etp must be > 0, got ep={ep}, etp={etp}")
+    if rollout_tp <= 0:
+        raise ValueError(f"colocate: rollout_tp must be > 0, got {rollout_tp}")
+    if n_gpus_per_node <= 0:
+        raise ValueError(f"colocate: n_gpus_per_node must be > 0, got {n_gpus_per_node}")
+
+    megatron_unit = tp * pp * cp
+    if total_gpus % megatron_unit != 0:
+        raise ValueError(f"colocate: total_gpus={total_gpus} not divisible by tp*pp*cp={tp}*{pp}*{cp}={megatron_unit}")
+    if tp % etp != 0:
+        raise ValueError(f"colocate: tp={tp} not divisible by etp={etp}")
+
+    dp_size = total_gpus // megatron_unit
+    if ep > 1 and dp_size % ep != 0:
+        raise ValueError(f"colocate: dp_size={dp_size} not divisible by ep={ep}")
+
+    if total_gpus % rollout_tp != 0:
+        raise ValueError(f"colocate: total_gpus={total_gpus} not divisible by rollout_tp={rollout_tp}")
+    if rollout_tp > n_gpus_per_node and rollout_tp % n_gpus_per_node != 0:
+        raise ValueError(f"colocate: cross-node TP requires rollout_tp({rollout_tp}) % n_gpus_per_node({n_gpus_per_node}) == 0")
+
+    return
 
 
 def _sort_by_node(pg: PlacementGroup, num_bundles: int) -> tuple[list[int], list[int], list[str]]:
