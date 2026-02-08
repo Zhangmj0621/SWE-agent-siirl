@@ -4,16 +4,13 @@
 # ===================================================================================
 # Single machine 8 GPUs: 4 GPUs for Actor/Critic (training), 4 GPUs for Rollout.
 
-export SIIRL_DIR="${SIIRL_DIR:-{siirl-agentic-dir}}"
-export PYTHONPATH="$SIIRL_DIR:$PYTHONPATH"
-
 # --- Experiment and Model Definition ---
 export DATASET=deepscaler
 export ALG=ppo
 export MODEL_NAME=qwen3-1.7b
 
 # --- Path Definitions ---
-export HOME_DIR=${HOME_DIR:-/inspire/hdd/global_user/liuliming-liuliming}
+export HOME_DIR=${HOME_DIR:-{your-home-dir}}
 export TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/train.parquet}
 export TEST_DATA_PATH=${TEST_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/test.parquet}
 export MODEL_PATH=${MODEL_PATH:-$HOME_DIR/data/models/Qwen3-1.7B}
