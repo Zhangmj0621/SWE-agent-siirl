@@ -516,11 +516,9 @@ class Trainer:
             if hasattr(actor_metrics, "data"):  # NonTensorData wrapper
                 actor_metrics = actor_metrics.data
 
-            # Keep forward-only entropy for debugging and backfill actor/entropy_loss
-            # when the training path does not compute entropy (e.g., entropy_coeff=0).
+            # Add entropy loss to actor metrics (computed earlier from compute_log_prob)
             if entropy_loss is not None:
-                actor_metrics.setdefault("actor/entropy_loss", entropy_loss.item())
-                actor_metrics["actor/entropy_loss_forward_only"] = entropy_loss.item()
+                actor_metrics["actor/entropy_loss"] = entropy_loss.item()
 
             if self.use_critic:
                 with timers["update_critic"]:
@@ -687,18 +685,10 @@ class Trainer:
                 # Only rank=0 (global rank) aggregates and logs to tracker
                 if self.rank == 0 and self.tracker is not None and self.metric_client is not None:
                     try:
+                        from siirl.utils.metrics import restore_weighted_metrics
+
                         aggregated_metrics = self.metric_client.wait_final_res()
-                        # Reconstruct weighted means across ranks.
-                        weighted_metric_keys = ("actor/entropy_loss", "actor/kl_loss")
-                        for key in weighted_metric_keys:
-                            num_key = f"{key}_weighted_sum"
-                            den_key = f"{key}_weight_sum"
-                            weighted_den = aggregated_metrics.get(den_key)
-                            weighted_num = aggregated_metrics.get(num_key)
-                            if weighted_den is not None and weighted_num is not None and weighted_den > 0:
-                                aggregated_metrics[key] = weighted_num / weighted_den
-                            aggregated_metrics.pop(num_key, None)
-                            aggregated_metrics.pop(den_key, None)
+                        aggregated_metrics = restore_weighted_metrics(aggregated_metrics)
 
                         aggregated_metrics["training/global_step"] = self.global_step
                         aggregated_metrics["perf/delta_time/weight_sync"] = weight_sync_timer.elapsed

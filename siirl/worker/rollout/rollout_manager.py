@@ -995,6 +995,10 @@ class RolloutManager:
             if self.metric_worker is not None and raw_val_metrics:
                 await self.metric_worker.submit_metric.remote(raw_val_metrics, 1)
                 val_metrics = await self.metric_worker.wait_final_res.remote()
+            if val_metrics:
+                from siirl.utils.metrics import restore_weighted_metrics
+
+                val_metrics = restore_weighted_metrics(val_metrics)
             logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
             self.message_queue.append((val_metrics, self.global_steps))
         finally:
