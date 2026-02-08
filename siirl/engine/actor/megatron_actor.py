@@ -1286,6 +1286,17 @@ class MegatronPPOActor:
 class MegatronPPOCritic:
     """Core PPO Critic implementation with Megatron backend"""
 
+    @staticmethod
+    def _unwrap_output_item(item):
+        """Unwrap output item from forward_backward_batch result."""
+        if isinstance(item, dict):
+            return item
+        if isinstance(item, tuple):
+            for elem in item:
+                if isinstance(elem, dict):
+                    return elem
+        raise TypeError(f"Unexpected output item type: {type(item)}")
+
     def __init__(
         self,
         config: SiiRLArguments,
