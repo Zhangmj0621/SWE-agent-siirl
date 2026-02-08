@@ -101,6 +101,11 @@ class ActorArguments:
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
     ppo_micro_batch_size_per_gpu: int | None = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     loss_mode: str = field(default="vanilla", metadata={"help": "loss_mode for loss compute"})
+
+    # Dynamic batching config
+    use_dynamic_batch: bool = field(default=False, metadata={"help": "Enable dynamic batching (token-based instead of fixed batch size)"})
+    max_tokens_per_gpu: int = field(default=4096, metadata={"help": "Max tokens per GPU when dynamic batching is enabled"})
+    use_workload_balance: bool = field(default=True, metadata={"help": "Use FLOPs-based balancing (otherwise sequence length based)"})
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
     clip_ratio_c: float = field(
@@ -166,6 +171,10 @@ class RolloutArguments:
     max_num_batched_tokens: int = field(default=8192, metadata={"help": "Max batched tokens"})
     max_model_len: int | None = field(default=None, metadata={"help": "Max model length"})
     max_num_seqs: int = field(default=1024, metadata={"help": "Max concurrent sequences"})
+    server_concurrency: int = field(
+        default=512,
+        metadata={"help": "Max concurrent client requests per rollout engine during batch generation"},
+    )
     do_sample: bool = field(default=True, metadata={"help": "Enable sampling"})
     n: int = field(default=1, metadata={"help": "Number of responses"})
     enable_chunked_prefill: bool = field(default=True, metadata={"help": "Whether or not enable chunked prefill"})

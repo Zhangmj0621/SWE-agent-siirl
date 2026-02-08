@@ -70,20 +70,28 @@ class RolloutWorker:
         self.rollout_thread = None  # Thread for running the async rollout executor
         self.engine = None  # SGLang engine instance
 
-    def find_free_port(self, start_port: int = 15000) -> int:
+    def allocate_ports(self, start_port: int, count: int) -> list[int]:
         """
-        Find a free port on this worker's node starting from start_port.
+        Allocate multiple free ports sequentially on this node.
 
-        This method is called remotely by RolloutManager to allocate ports
-        on the correct node where the worker runs (slime-style sequential allocation).
+        This method ensures no race conditions by allocating all ports
+        in a single call. Each port is verified free before moving to the next.
 
         Args:
             start_port: Starting port number for search
+            count: Number of ports to allocate
 
         Returns:
-            int: Available port number
+            List of allocated port numbers
         """
-        return get_free_port(get_net_interface_ip(), start_port=start_port)
+        host = get_net_interface_ip()
+        ports = []
+        current = start_port
+        for _ in range(count):
+            port = get_free_port(host, start_port=current)
+            ports.append(port)
+            current = port + 1
+        return ports
 
     def init_engine(
         self,
@@ -187,6 +195,7 @@ class RolloutWorker:
             data_coordinator,
             self.engine,
             self.config.data.train_batch_size // num_engine,
+            dp_rank=self.rank,
         )
         self.executor = executor
         self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(executor,), daemon=True)
@@ -199,6 +208,11 @@ class RolloutWorker:
         """
         self.executor.stop()
         self.rollout_thread.join()
+
+    def shutdown_engine(self):
+        """Shutdown the SGLang engine process."""
+        if self.engine:
+            self.engine.shutdown()
 
     def get_port(self) -> int:
         """
@@ -284,4 +298,4 @@ class RolloutWorker:
         return self.engine.continue_generation()
 
     def weight_version(self):
-        return self.engine.weight_version
+        return self.engine._weight_version

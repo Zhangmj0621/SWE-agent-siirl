@@ -17,13 +17,19 @@ import os
 import re
 import time
 import traceback
-from collections import deque
+from collections import defaultdict, deque
 
 import ray
 
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.enums import DistributedEnv
-from siirl.utils.net_utils.net import get_free_port, get_net_interface_ip
+from siirl.utils.net_utils.net import (
+    SGLANG_DIST_INIT_START_PORT,
+    SGLANG_HTTP_START_PORT,
+    SGLANG_ROUTER_START_PORT,
+    get_free_port,
+    get_net_interface_ip,
+)
 from siirl.worker.ray_utils import GPUResources, RayClassWithInitArgs, get_random_string
 
 
@@ -101,6 +107,7 @@ class RolloutManager:
         self.metric_worker = metric_worker
 
         self.router_address = None
+        self.router_process = None
         self.worker_handle = []
         self.worker_urls = []
 
@@ -115,6 +122,7 @@ class RolloutManager:
         self.batches_to_skip = 0
         self.event = asyncio.Event()
         self.global_steps = 0  # will be reset by actor checkpoint, but maybe not correct in fully async mode
+        self._val_time_acc = 0.0
 
         # Initialize workers, engines, router and start rollout
         self.message_queue = deque()
@@ -254,7 +262,7 @@ class RolloutManager:
             if nnodes > 1:
                 if node_rank == 0:
                     # First actor in TP group: generate and cache dist_init_addr
-                    dist_init_start_port = 20000 + tp_group_idx  # Unique start port per TP group
+                    dist_init_start_port = SGLANG_DIST_INIT_START_PORT + tp_group_idx  # Unique start port per TP group
                     dist_init_addr = ray.get(self.worker_handle[worker_idx].get_ip_port.remote(start_port=dist_init_start_port))
                     self._dist_init_addrs[tp_group_idx] = dist_init_addr
                     logger.info(f"TP Group {tp_group_idx}: Cross-node TP with {nnodes} nodes, " f"dist_init_addr={dist_init_addr}")
@@ -308,18 +316,32 @@ class RolloutManager:
                 f"dist_init_addr={cfg['dist_init_addr']}"
             )
 
-        # Phase 1: Allocate ports sequentially and initialize engines
-        start_port = 15000
-        init_futures = []
-        worker_info = []  # Store (worker, cfg, ip, port) for phase 2
+        # Phase 1: Allocate ports by node (avoids race conditions)
+        # Group workers by node IP and cache IPs to avoid redundant remote calls
+        worker_ips = {}  # worker_idx -> ip
+        node_workers = defaultdict(list)
         for cfg in engine_configs:
             worker = self.worker_handle[cfg["worker_idx"]]
             ip = ray.get(worker.get_ip.remote())
+            worker_ips[cfg["worker_idx"]] = ip
+            node_workers[ip].append((worker, cfg))
 
-            # Allocate http port (slime-style sequential allocation)
-            # nccl_port is not passed - SGLang auto-allocates it internally
-            port = ray.get(worker.find_free_port.remote(start_port))
-            start_port = port + 1  # Increment for next worker
+        # Allocate ports per node using first worker on each node
+        worker_ports = {}  # worker_idx -> port
+        for _, workers_on_node in node_workers.items():
+            first_worker = workers_on_node[0][0]
+            num_ports = len(workers_on_node)
+            ports = ray.get(first_worker.allocate_ports.remote(start_port=SGLANG_HTTP_START_PORT, count=num_ports))
+            for i, (_, cfg) in enumerate(workers_on_node):
+                worker_ports[cfg["worker_idx"]] = ports[i]
+
+        # Initialize engines with allocated ports
+        init_futures = []
+        worker_info = []
+        for cfg in engine_configs:
+            worker = self.worker_handle[cfg["worker_idx"]]
+            ip = worker_ips[cfg["worker_idx"]]
+            port = worker_ports[cfg["worker_idx"]]
 
             future = worker.init_engine.remote(
                 rank=cfg["worker_idx"],
@@ -335,17 +357,18 @@ class RolloutManager:
 
         ray.get(init_futures)
 
-        # Phase 2: Collect worker URLs and launch servers
+        # Phase 2: Launch servers (may retry with new ports on conflict)
         launch_futures = []
         for info in worker_info:
-            worker, cfg, ip, port = info["worker"], info["cfg"], info["ip"], info["port"]
-
-            if cfg["is_tp0"]:
-                self.worker_urls.append(f"http://{ip}:{port}")
-
-            launch_futures.append(worker.launch_server.remote())
-
+            launch_futures.append(info["worker"].launch_server.remote())
         ray.get(launch_futures)
+
+        # Phase 3: Collect ACTUAL worker URLs (after possible port retries)
+        self.worker_urls = []
+        for info in worker_info:
+            if info["cfg"]["is_tp0"]:
+                actual_port = ray.get(info["worker"].get_port.remote())
+                self.worker_urls.append(f"http://{info['ip']}:{actual_port}")
 
         logger.info(
             f"Initialized {self.num_workers} SGLang processes "
@@ -395,7 +418,7 @@ class RolloutManager:
 
         router_ip = self.config.rollout.router_ip or get_net_interface_ip()
         # Use sequential port allocation starting from 25000 for router
-        router_port = self.config.rollout.router_port or get_free_port(router_ip, start_port=25000)
+        router_port = self.config.rollout.router_port or get_free_port(router_ip, start_port=SGLANG_ROUTER_START_PORT)
         router_address = f"{router_ip}:{router_port}"
 
         router_args = RouterArgs(
@@ -407,12 +430,12 @@ class RolloutManager:
             request_timeout_secs=3600,
         )
 
-        router_process = multiprocessing.Process(target=launch_router, args=(router_args,))
-        router_process.daemon = True
-        router_process.start()
+        self.router_process = multiprocessing.Process(target=launch_router, args=(router_args,))
+        self.router_process.daemon = True
+        self.router_process.start()
 
         time.sleep(3)
-        wait_until_ok(f"http://{router_address}/health", process=router_process)
+        wait_until_ok(f"http://{router_address}/health", process=self.router_process)
         self.router_address = router_address
 
         from loguru import logger
@@ -463,15 +486,21 @@ class RolloutManager:
         """
         from loguru import logger
 
-        for _ in range(val_num_batch):
-            await self.data_coordinator.run_dataloader.remote(is_validate=True)
-        logger.info("Starting validate rollout...")
-        rollout_workers = self.get_rollout_worker_on_tp0()
-        futures = [rollout_worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for rollout_worker in rollout_workers]
-        await asyncio.gather(*futures)
-        val_metrics = await self.metric_worker.wait_final_res.remote()
-        logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
-        self.message_queue.append((val_metrics, self.global_steps))
+        val_start = time.time()
+        try:
+            for _ in range(val_num_batch):
+                await self.data_coordinator.run_dataloader.remote(is_validate=True)
+            logger.info("Starting validate rollout...")
+            rollout_workers = self.get_rollout_worker_on_tp0()
+            futures = [
+                rollout_worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for rollout_worker in rollout_workers
+            ]
+            await asyncio.gather(*futures)
+            val_metrics = await self.metric_worker.wait_final_res.remote()
+            logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
+            self.message_queue.append((val_metrics, self.global_steps))
+        finally:
+            self._val_time_acc += time.time() - val_start
         return
 
     async def get_metrics(self):
@@ -481,6 +510,15 @@ class RolloutManager:
         result = list(self.message_queue)
         self.message_queue.clear()
         return result
+
+    def pop_validation_time(self) -> float:
+        """
+        Return and reset accumulated validation time.
+        Used by trainer to exclude validation from train throughput metrics.
+        """
+        val_time = self._val_time_acc
+        self._val_time_acc = 0.0
+        return val_time
 
     def should_stop(self) -> bool:
         """
@@ -528,7 +566,14 @@ class RolloutManager:
 
         logger.info("[RolloutManager] Starting cleanup...")
 
-        # Stop all workers
+        # Gracefully shutdown engine processes first
+        shutdown_futures = [w.shutdown_engine.remote() for w in self.worker_handle]
+        try:
+            ray.get(shutdown_futures, timeout=30)
+        except Exception as e:
+            logger.warning(f"[RolloutManager] Engine shutdown timed out or failed: {e}")
+
+        # Then kill Ray actors
         for i, worker in enumerate(self.worker_handle):
             try:
                 ray.kill(worker)
@@ -537,7 +582,17 @@ class RolloutManager:
                 logger.warning(f"[RolloutManager] Failed to kill worker {i}: {e}")
                 logger.warning(f"[RolloutManager] Traceback:\n{traceback.format_exc()}")
 
+        # Terminate router process
+        if self.router_process and self.router_process.is_alive():
+            self.router_process.terminate()
+            self.router_process.join(timeout=5)
+            if self.router_process.is_alive():
+                self.router_process.kill()
+                self.router_process.join(timeout=3)
+            logger.info("[RolloutManager] Router process terminated")
+
         self.worker_handle = []
         self.worker_urls = []
+        self.router_process = None
 
         logger.info("[RolloutManager] Cleanup completed")

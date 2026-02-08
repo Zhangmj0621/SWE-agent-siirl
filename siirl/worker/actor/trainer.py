@@ -155,6 +155,8 @@ class Trainer:
 
         # Training state
         self.global_step = 0
+        # Subtract prior checkpoint save overhead from next-step perf accounting.
+        self._pending_ckpt_excluded_time = 0.0
 
         # Local batch cache for handling async data fetch race conditions
         # When some dp_ranks get data while others don't, the ones with data
@@ -483,9 +485,11 @@ class Trainer:
             if hasattr(actor_metrics, "data"):  # NonTensorData wrapper
                 actor_metrics = actor_metrics.data
 
-            # Add entropy loss to actor metrics (computed earlier from compute_log_prob)
+            # Keep forward-only entropy for debugging and backfill actor/entropy_loss
+            # when the training path does not compute entropy (e.g., entropy_coeff=0).
             if entropy_loss is not None:
-                actor_metrics["actor/entropy_loss"] = entropy_loss.item()
+                actor_metrics.setdefault("actor/entropy_loss", entropy_loss.item())
+                actor_metrics["actor/entropy_loss_forward_only"] = entropy_loss.item()
 
             if self.use_critic:
                 with timers["update_critic"]:
@@ -517,8 +521,7 @@ class Trainer:
                 data_metrics = compute_data_metric(data_for_update)
                 self.metric_client.submit_metric(data_metrics, self.dp_world_size)
 
-                # Compute and submit throughput metrics
-                # Note: throughput will be recalculated in train() with correct step_interval
+                # Throughput is recalculated in train() with corrected step_interval.
                 n_gpus = self.world_size
                 throughput_metrics = compute_throughput_metrics(data_for_update, timing_raw, n_gpus)
                 self.metric_client.submit_metric(throughput_metrics, self.dp_world_size)
@@ -535,9 +538,7 @@ class Trainer:
                     if rollout_timing:
                         self.metric_client.submit_metric(rollout_timing, self.dp_world_size)
 
-                # Submit actor/critic update metrics
-                # Note: metrics from megatron_actor.py already have proper prefixes (e.g. "actor/pg_loss", "perf/mfu/actor")
-                # so we just merge them directly without adding another prefix
+                # Metrics from megatron_actor.py already include prefixes.
                 flat_metrics = {}
                 for _, result_dict in metrics.items():
                     if isinstance(result_dict, dict):
@@ -603,15 +604,14 @@ class Trainer:
         """
         logger.info(f"[Trainer rank={self.rank}] Starting training loop, batch_size={batch_size}")
 
-        # Track step interval for accurate throughput calculation
-        last_step_end_time = None
-
         try:
             while True:
                 # Check stop signal
                 if self._check_should_stop():
                     logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
                     break
+
+                train_e2e_start_time = time.time()
 
                 # Update rollout weights and record timing
                 with Timer("weight_sync") as weight_sync_timer:
@@ -629,13 +629,6 @@ class Trainer:
                 # compare
                 self.train_step(batch_data)
 
-                # Calculate step_interval (time between consecutive step completions)
-                current_step_end_time = time.time()
-                step_interval = None
-                if last_step_end_time is not None:
-                    step_interval = current_step_end_time - last_step_end_time
-                last_step_end_time = current_step_end_time
-
                 # Wait for all metric submissions and aggregate (rank=0 does the logging)
                 # Only TP rank 0 and PP rank 0 submit metrics, so only they need to wait
                 if self.metric_client is not None and self.should_submit_metrics:
@@ -647,25 +640,49 @@ class Trainer:
                 # Barrier sync to ensure all ranks are synchronized
                 dist.barrier()
 
+                train_e2e_end_time = time.time()
+                train_e2e = train_e2e_end_time - train_e2e_start_time
+                val_time = 0.0
+                if self.rollout_manager is not None:
+                    try:
+                        val_time = ray.get(self.rollout_manager.pop_validation_time.remote())
+                    except Exception as e:
+                        logger.warning(f"[Trainer rank={self.rank}] Failed to fetch validation time: {e}")
+                train_e2e_without_val = max(train_e2e - val_time, 0.0)
+                ckpt_excluded_time = min(self._pending_ckpt_excluded_time, train_e2e_without_val)
+                train_e2e_effective = max(train_e2e_without_val - ckpt_excluded_time, 0.0)
+
                 # Only rank=0 (global rank) aggregates and logs to tracker
                 if self.rank == 0 and self.tracker is not None and self.metric_client is not None:
                     try:
                         aggregated_metrics = self.metric_client.wait_final_res()
+                        # Reconstruct weighted means across ranks.
+                        weighted_metric_keys = ("actor/entropy_loss", "actor/kl_loss")
+                        for key in weighted_metric_keys:
+                            num_key = f"{key}_weighted_sum"
+                            den_key = f"{key}_weight_sum"
+                            weighted_den = aggregated_metrics.get(den_key)
+                            weighted_num = aggregated_metrics.get(num_key)
+                            if weighted_den is not None and weighted_num is not None and weighted_den > 0:
+                                aggregated_metrics[key] = weighted_num / weighted_den
+                            aggregated_metrics.pop(num_key, None)
+                            aggregated_metrics.pop(den_key, None)
+
                         aggregated_metrics["training/global_step"] = self.global_step
                         aggregated_metrics["perf/delta_time/weight_sync"] = weight_sync_timer.elapsed
                         aggregated_metrics["perf/delta_time/get_batch"] = get_batch_timer.elapsed
 
-                        # Compute throughput after aggregation to avoid per-rank bias
+                        # Recompute throughput after aggregation to avoid per-rank bias.
                         total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
-                        # time_per_step = aggregated_metrics.get("perf/time_per_step_max") or aggregated_metrics.get("perf/time_per_step")
-
-                        # Throughput based on end-to-end step interval (per-GPU effective)
-                        if step_interval is not None:
-                            aggregated_metrics["perf/delta_time/step_interval"] = step_interval
-                            if step_interval > 0 and total_tokens > 0:
-                                # Backward-compatible alias (step-interval based)
-                                total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
-                                aggregated_metrics["perf/throughput"] = total_tokens / (step_interval * total_gpus)
+                        # Exclude validation time and prior checkpoint save time.
+                        aggregated_metrics["perf/delta_time/step_interval_raw"] = train_e2e_without_val
+                        aggregated_metrics["perf/delta_time/checkpoint_save_excluded"] = ckpt_excluded_time
+                        aggregated_metrics["perf/delta_time/step_interval"] = train_e2e_effective
+                        aggregated_metrics["perf/time_per_step"] = train_e2e_effective
+                        aggregated_metrics["perf/time_per_step_max"] = train_e2e_effective
+                        if train_e2e_effective > 0 and total_tokens > 0:
+                            total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
+                            aggregated_metrics["perf/throughput"] = total_tokens / (train_e2e_effective * total_gpus)
                         self.tracker.log(aggregated_metrics, step=self.global_step)
 
                         # get rollout validate metrics
@@ -678,9 +695,15 @@ class Trainer:
 
                 self.global_step += 1
 
+                checkpoint_save_time = 0.0
                 if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
                     logger.info(f"[Trainer rank={self.rank}] Saving checkpoint at step {self.global_step}")
-                    self.checkpoint_manager.save_checkpoint(self.global_step)
+                    with Timer("save_checkpoint") as save_checkpoint_timer:
+                        self.checkpoint_manager.save_checkpoint(self.global_step)
+                    checkpoint_save_time = save_checkpoint_timer.elapsed
+
+                # Carry save time into next-step exclusion.
+                self._pending_ckpt_excluded_time = checkpoint_save_time
 
                 time.sleep(0.01)
 

@@ -23,7 +23,6 @@ import numpy as np
 import ray
 import torch
 from loguru import logger
-from tqdm.asyncio import tqdm_asyncio
 
 from siirl.data_coordinator.sample import Sample, SampleInfo
 from siirl.params.training_args import SiiRLArguments
@@ -38,7 +37,7 @@ class NaiveExecutor:
     for rollout processes in reinforcement learning with large language models.
     """
 
-    def __init__(self, config: SiiRLArguments, data_coordinator, engine, train_batch_size):
+    def __init__(self, config: SiiRLArguments, data_coordinator, engine, train_batch_size, dp_rank=0):
         """
         Initialize NaiveExecutor with core configuration and dependencies.
 
@@ -47,6 +46,7 @@ class NaiveExecutor:
             data_coordinator: Ray handle to data coordinator for sample management
             engine: Inference engine instance (e.g., SglangEngine) for text generation
             train_batch_size: Batch size for rollout sample generation
+            dp_rank: Data parallel rank (0 to dp_size-1), used for logging/progress
         """
         self.config = config
         self.data_coordinator = data_coordinator  # Ray actor handle to data coordinator
@@ -65,6 +65,7 @@ class NaiveExecutor:
         self.reward_fn = None  # Custom reward function (optional)
         self.rollout_flow = None  # Rollout flow function for sample generation
         self._rank = int(os.environ.get("RANK"))
+        self._dp_rank = dp_rank  # Data parallel rank for logging
         # Load custom reward function if configured
         if config.custom_reward_function.path:
             from siirl.utils.reward_score.custom_reward import load_custom_reward_function
@@ -284,7 +285,7 @@ class NaiveExecutor:
             prompt_length=getattr(sample, "prompt_length", 0),
             response_length=getattr(sample, "response_length", 0),
             uid=str(sample.uid),
-            weight_version=self.engine.weight_version,
+            weight_version=self.engine._weight_version,
             dict_info={
                 "key": "Actor",
             },
@@ -357,7 +358,7 @@ class NaiveExecutor:
         """
         self.running = True
         stats_task = None
-        if self._rank == 0:
+        if self._dp_rank == 0:
             stats_task = asyncio.create_task(self.rollout_status())
 
         while self.running:
@@ -384,32 +385,155 @@ class NaiveExecutor:
 
                 # Yield control to event loop (non-blocking sleep)
                 await asyncio.sleep(0)
-        if self._rank == 0:
+        if self._dp_rank == 0:
             stats_task.cancel()
             await asyncio.gather(stats_task, return_exceptions=True)
 
-    async def validate(self, val_batch_size) -> tuple[list[Sample], dict]:
+    def _is_single_turn(self) -> bool:
+        """Check if current config is single-turn (no tool/env calls)."""
+        return not self.config.rollout.multiturn.env_type
+
+    async def _load_val_data(self, val_batch_size: int) -> list[Sample]:
+        """Load validation data with async optimization."""
         val_samples = []
-        with Timer("get_val_data") as val_get_time:
-            while True:
-                data = ray.get(self.data_coordinator.get_dataloader.remote(batch_size=val_batch_size, is_validate=True))
-                if len(val_samples) and not len(data):
-                    break
-                val_samples.extend(data)
-        val_tasks = []
-        logger.info(f"RANK_{self._rank} start validate, batch_size:{len(val_samples)}")
-        with Timer("val_generate") as val_generate_time:
-            for sample in val_samples:
-                task = asyncio.create_task(self.generate(sample, is_validate=True))
-                val_tasks.append(task)
-            result = await tqdm_asyncio.gather(
-                *val_tasks,
-                desc=f"[Rank_{self._rank}]-Validate",
-                unit="sample",
-                dynamic_ncols=True,
-                mininterval=2.0,
-                miniters=50,
+        while True:
+            data = await self.data_coordinator.get_dataloader.remote(batch_size=val_batch_size, is_validate=True)
+            if not data:
+                break
+            val_samples.extend(data)
+        return val_samples
+
+    def _compute_reward(self, sample: Sample, response_text: str):
+        """Compute reward for a sample using custom or default reward function.
+
+        Shared by _validate_single_turn and NaiveFlow to avoid logic duplication.
+        """
+        from siirl.utils.reward_score import default_compute_score
+
+        if self.reward_fn:
+            return self.reward_fn(
+                data_source=sample.data_source,
+                solution_str=response_text,
+                ground_truth=sample.reward_model["ground_truth"],
             )
+        return default_compute_score(
+            data_source=sample.data_source,
+            solution_str=response_text,
+            ground_truth=sample.reward_model["ground_truth"],
+        )
+
+    async def _validate_single_turn(self, samples: list[Sample]) -> list[Sample]:
+        """
+        Optimized validation for single-turn scenarios.
+        Uses batch generation with router load balancing and sort-by-length.
+        """
+        # 1. Preprocess (direct loop, microsecond-level)
+        with Timer("preprocess") as preprocess_time:
+            for sample in samples:
+                sample.prompts = sample.raw_prompt_ids
+                sample.prompt_texts = self.engine.tokenizer.decode(sample.prompts)
+
+        # 2. Batch generate with router load balancing (the only expensive operation)
+        with Timer("generate") as generate_time:
+
+            def to_list(ids):
+                return ids.tolist() if hasattr(ids, "tolist") else list(ids)
+
+            batch_input_ids = [to_list(sample.raw_prompt_ids) for sample in samples]
+            results = await self.engine.generate_batch(
+                batch_input_ids,
+                is_validate=True,
+                use_router=True,
+                show_progress=(self._dp_rank == 0),
+                progress_desc="Validate",
+            )
+
+        # 3. Reward + postprocess (direct loop, millisecond-level)
+        with Timer("reward_and_postprocess") as reward_time:
+            for sample, (_, response_ids, log_probs) in zip(samples, results, strict=False):
+                sample.responses = response_ids
+                sample.response_mask = [1] * len(response_ids)
+                sample.rollout_log_prob = np.array(log_probs, dtype=np.float32)
+                response_text = self.engine.tokenizer.decode(response_ids)
+                sample.rewards = self._compute_reward(sample, response_text)
+                sample = self._post_process(sample)
+
+        # Log timing breakdown (rank 0 only)
+        if self._dp_rank == 0:
+            logger.info(
+                f"Validate timing: preprocess={preprocess_time.elapsed:.2f}s, "
+                f"generate={generate_time.elapsed:.2f}s, "
+                f"reward_postprocess={reward_time.elapsed:.2f}s"
+            )
+
+        return samples
+
+    async def _indexed_generate(self, idx: int, sample: Sample):
+        """Wrapper that returns (index, result) for correct ordering with as_completed."""
+        result = await self.generate(sample, is_validate=True)
+        return idx, result
+
+    async def _validate_multi_turn(self, samples: list[Sample]) -> list[Sample]:
+        """
+        Validation for multi-turn scenarios.
+        Uses high concurrency with router load balancing.
+        Streaming collection via as_completed to reduce tail latency.
+        """
+        # Enable router on rollout_flow for validate duration
+        self.rollout_flow.use_router = True
+        try:
+            results = [None] * len(samples)
+            tasks = [self._indexed_generate(i, s) for i, s in enumerate(samples)]
+
+            if self._dp_rank == 0:
+                from tqdm import tqdm
+
+                pbar = tqdm(
+                    total=len(samples),
+                    desc="Validate",
+                    unit="sample",
+                    dynamic_ncols=True,
+                    mininterval=2.0,
+                    miniters=50,
+                )
+                try:
+                    for coro in asyncio.as_completed(tasks):
+                        idx, result = await coro
+                        results[idx] = result
+                        pbar.update(1)
+                finally:
+                    pbar.close()
+            else:
+                for coro in asyncio.as_completed(tasks):
+                    idx, result = await coro
+                    results[idx] = result
+
+            return results
+        finally:
+            self.rollout_flow.use_router = False
+
+    async def validate(self, val_batch_size: int) -> tuple[list[Sample], dict]:
+        """
+        Optimized validation with A+B strategy:
+        - Single-turn: batch generation + router load balancing
+        - Multi-turn: high concurrency + router load balancing
+        """
+        # 1. Load validation data (async optimized)
+        with Timer("get_val_data") as val_get_time:
+            val_samples = await self._load_val_data(val_batch_size)
+
+        logger.info(
+            f"RANK_{self._rank} start validate, batch_size:{len(val_samples)}, "
+            f"mode:{'single-turn' if self._is_single_turn() else 'multi-turn'}"
+        )
+
+        # 2. Generate based on mode
+        with Timer("val_generate") as val_generate_time:
+            if self._is_single_turn():
+                result = await self._validate_single_turn(val_samples)
+            else:
+                result = await self._validate_multi_turn(val_samples)
+
         metrics = {
             "val_get_time": val_get_time.elapsed,
             "val_generate_time": val_generate_time.elapsed,
