@@ -1191,7 +1191,8 @@ class MegatronPPOActor:
         """Update policy using PPO algorithm"""
         metrics = {}
         temperature = data["temperature"]
-        sum_metric_accum = defaultdict(float)
+        sum_metric_num = defaultdict(float)
+        sum_metric_den = defaultdict(float)
         weighted_metric_num = defaultdict(float)
         weighted_metric_den = defaultdict(float)
 
@@ -1249,7 +1250,16 @@ class MegatronPPOActor:
                     for key, value in sum_metrics.items():
                         scalar = _to_float(value)
                         if reduce_mode == "sum":
-                            sum_metric_accum[key] += scalar
+                            # sum-metrics are per-micro contributions normalized by the
+                            # mini-batch denominator. Reconstruct a global mean via
+                            # weighted sums to avoid mini-batch-count inflation.
+                            #
+                            # Keep actor/entropy_loss driven by forward-only path in
+                            # trainer (master-compatible definition).
+                            if key == "actor/entropy_loss":
+                                continue
+                            sum_metric_num[key] += scalar * token_weight
+                            sum_metric_den[key] += token_weight
                         else:
                             append_to_dict(metrics, {key: scalar})
 
@@ -1272,8 +1282,11 @@ class MegatronPPOActor:
                 raise NotImplementedError
 
         get_torch_device().empty_cache()
-        for key, value in sum_metric_accum.items():
-            metrics[key] = value
+        for key, numerator in sum_metric_num.items():
+            denominator = sum_metric_den[key]
+            if denominator > 0:
+                metrics[f"{key}_weighted_sum"] = numerator
+                metrics[f"{key}_weight_sum"] = denominator
 
         for key, numerator in weighted_metric_num.items():
             denominator = weighted_metric_den[key]
