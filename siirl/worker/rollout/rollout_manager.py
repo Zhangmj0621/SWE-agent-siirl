@@ -515,7 +515,26 @@ class RolloutManager:
         )
 
     def set_step(self, step: int):
+        from loguru import logger
+
+        step = max(0, int(step))
         self.global_steps = step
+
+        if self.num_train_batches > 0:
+            self.start_epoch = min(step // self.num_train_batches, self.config.trainer.total_epochs)
+            self.batches_to_skip = step % self.num_train_batches
+        else:
+            self.start_epoch = 0
+            self.batches_to_skip = 0
+
+        if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
+            self.start_epoch = self.config.trainer.total_epochs
+            self.batches_to_skip = 0
+
+        logger.info(
+            "[RolloutManager] Resume cursor updated "
+            f"global_steps={self.global_steps} start_epoch={self.start_epoch} batches_to_skip={self.batches_to_skip}"
+        )
 
     def get_rollout_worker_on_tp0(self):
         """
@@ -951,19 +970,39 @@ class RolloutManager:
         val_before_train = self.config.trainer.val_before_train
         for epoch in range(self.start_epoch, total_epochs):
             for batch_idx in range(self.num_train_batches):
-                is_last_step = self.global_steps >= self.total_training_steps
-                if epoch == self.start_epoch and batch_idx < (self.global_steps % self.num_train_batches):
+                if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
+                    logger.info(
+                        "[RolloutManager] Reached total training steps, stop dataloader loop "
+                        f"global_steps={self.global_steps} total_training_steps={self.total_training_steps}"
+                    )
+                    self.report_completed()
+                    return
+                if epoch == self.start_epoch and batch_idx < self.batches_to_skip:
                     continue
                 await self.event.wait()
                 self.event.clear()
                 if val_before_train:
                     await self.validate(val_num_batch, dp_val_batch)
                     val_before_train = False
-                self.global_steps += 1
+                next_step = self.global_steps + 1
+                is_last_step = self.total_training_steps > 0 and next_step >= self.total_training_steps
+                has_batch = await self.data_coordinator.run_dataloader.remote(epoch)
+                if not has_batch:
+                    reason = (
+                        "[RolloutManager] Dataloader exhausted before expected training completion "
+                        f"epoch={epoch} batch_idx={batch_idx} global_steps={self.global_steps} "
+                        f"total_training_steps={self.total_training_steps}"
+                    )
+                    logger.warning(reason)
+                    if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
+                        self.report_completed()
+                    else:
+                        self.report_failure(reason)
+                    return
+                self.global_steps = next_step
                 if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     await self.validate(val_num_batch, dp_val_batch)
                 logger.info(f"Start Rollout Step {rollout_to_train_step(self.global_steps)} " f"(rollout_index={self.global_steps})")
-                await self.data_coordinator.run_dataloader.remote(epoch)
 
     def next_rollout(self):
         self.event.set()
@@ -1050,7 +1089,10 @@ class RolloutManager:
         val_start = time.time()
         try:
             for _ in range(val_num_batch):
-                await self.data_coordinator.run_dataloader.remote(is_validate=True)
+                has_val_batch = await self.data_coordinator.run_dataloader.remote(is_validate=True)
+                if not has_val_batch:
+                    logger.warning("[RolloutManager] Validation dataloader exhausted before filling expected batches")
+                    break
 
             if self._validate_reuse_enabled:
                 try:
@@ -1184,6 +1226,17 @@ class RolloutManager:
                 ray.get(self.coordinator.report_failure.remote("rollout_manager", reason))
             except Exception as e:
                 logger.warning(f"[RolloutManager] Failed to report to coordinator: {e}")
+                logger.warning(f"[RolloutManager] Traceback:\n{traceback.format_exc()}")
+
+    def report_completed(self):
+        from loguru import logger
+
+        logger.info("[RolloutManager] Reporting task completion")
+        if self.coordinator:
+            try:
+                ray.get(self.coordinator.report_completed.remote("rollout_manager"))
+            except Exception as e:
+                logger.warning(f"[RolloutManager] Failed to report completion: {e}")
                 logger.warning(f"[RolloutManager] Traceback:\n{traceback.format_exc()}")
 
     def cleanup(self):

@@ -674,6 +674,16 @@ class Trainer:
             logger.warning(f"[Trainer rank={self.rank}] Failed to report failure: {e}")
             logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
 
+    def _report_completed(self):
+        """Report training completion to coordinator."""
+        if not self.coordinator:
+            return
+        try:
+            ray.get(self.coordinator.report_completed.remote(source=f"trainer_{self.rank}"))
+        except Exception as e:
+            logger.warning(f"[Trainer rank={self.rank}] Failed to report completion: {e}")
+            logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
+
     def _pop_validation_time_once(self) -> float:
         """Read and reset validation time exactly once per step (rank 0 only)."""
         if self.rank != 0 or self.rollout_manager is None:
@@ -709,12 +719,21 @@ class Trainer:
             batch_size: Training batch size
         """
         logger.info(f"[Trainer rank={self.rank}] Starting training loop, batch_size={batch_size}")
+        total_training_steps = int(getattr(self.config.actor_ref.actor.optim, "total_training_steps", 0) or 0)
 
         try:
             while True:
                 # Check stop signal
                 if self._check_should_stop():
                     logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
+                    break
+                if total_training_steps > 0 and self.global_step >= total_training_steps:
+                    logger.info(
+                        f"[Trainer rank={self.rank}] Reached total training steps "
+                        f"({self.global_step}/{total_training_steps}), exiting..."
+                    )
+                    if self.rank == 0:
+                        self._report_completed()
                     break
 
                 train_e2e_start_time = time.time()

@@ -436,7 +436,12 @@ class DataCoordinator:
 
     @ray.method(concurrency_group="dataloader")
     async def run_dataloader(self, epoch=0, is_validate=False):
-        batch = self.dataloader.run(epoch, is_validation_step=is_validate)
+        try:
+            batch = self.dataloader.run(epoch, is_validation_step=is_validate)
+        except StopIteration:
+            return False
+        if batch is None:
+            return False
         tensor_dict = preprocess_dataloader(batch)
         samples = await Dict2Samples(tensor_dict, True)
         if is_validate:
@@ -445,6 +450,7 @@ class DataCoordinator:
         else:
             async with self.dataloader_lock:
                 self.dataloader_queue.extend(samples)
+        return True
 
     @ray.method(concurrency_group="dataloader")
     async def get_dataloader(self, batch_size, is_validate=False):

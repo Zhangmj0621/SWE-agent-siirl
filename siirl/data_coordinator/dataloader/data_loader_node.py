@@ -350,6 +350,8 @@ class DataLoaderNode:
 
             return batch
 
+        except StopIteration:
+            raise
         except Exception as e:
             error_msg = f"Error during data loading : {e}"
             logger.exception(error_msg)  # Log with stack trace
