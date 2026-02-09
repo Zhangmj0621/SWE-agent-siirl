@@ -58,6 +58,11 @@ class ConsoleBackend:
         """Console backend is always initialized."""
         return True
 
+    @staticmethod
+    def _display_step(step: int) -> int:
+        """Render user-facing steps as 1-based without changing internal step semantics."""
+        return step + 1 if step >= 0 else step
+
     def log(self, data: dict[str, float], step: int) -> None:
         """
         Log metrics to console with grouped formatting.
@@ -80,7 +85,7 @@ class ConsoleBackend:
         """
         # Truncate long text
         display_text = text[:500] + "..." if len(text) > 500 else text
-        logger.info(f"[Step {step}] {tag}:\n{display_text}")
+        logger.info(f"[Step {self._display_step(step)}] {tag}:\n{display_text}")
 
     def log_table(self, tag: str, columns: list[str], data: list[list[Any]], step: int) -> None:
         """
@@ -101,7 +106,7 @@ class ConsoleBackend:
             if self._console is None:
                 self._console = Console()
 
-            table = Table(title=f"{tag} (Step {step})")
+            table = Table(title=f"{tag} (Step {self._display_step(step)})")
             for col in columns:
                 table.add_column(col, overflow="fold", max_width=50)
 
@@ -116,7 +121,7 @@ class ConsoleBackend:
 
         except ImportError:
             # Fallback without rich
-            logger.info(f"[Step {step}] {tag}: {len(data)} rows")
+            logger.info(f"[Step {self._display_step(step)}] {tag}: {len(data)} rows")
             for i, row in enumerate(data[:3]):
                 logger.info(f"  Row {i}: {row}")
             if len(data) > 3:
@@ -155,22 +160,26 @@ class ConsoleBackend:
                 groups[group] = []
 
             # Format value
-            if isinstance(value, float):
-                if abs(value) < 0.0001 or abs(value) > 10000:
-                    formatted_value = f"{value:.2e}"
-                elif abs(value) < 1:
-                    formatted_value = f"{value:.4f}"
+            value_for_display = value
+            if key == "training/global_step" and isinstance(value, (int, float)):
+                value_for_display = value + 1
+
+            if isinstance(value_for_display, float):
+                if abs(value_for_display) < 0.0001 or abs(value_for_display) > 10000:
+                    formatted_value = f"{value_for_display:.2e}"
+                elif abs(value_for_display) < 1:
+                    formatted_value = f"{value_for_display:.4f}"
                 else:
-                    formatted_value = f"{value:.2f}"
-            elif isinstance(value, int):
-                formatted_value = str(value)
+                    formatted_value = f"{value_for_display:.2f}"
+            elif isinstance(value_for_display, int):
+                formatted_value = str(value_for_display)
             else:
-                formatted_value = str(value)
+                formatted_value = str(value_for_display)
 
             groups[group].append(f"{name}={formatted_value}")
 
         # Build output string
-        parts = [f"Step {step}"]
+        parts = [f"Step {self._display_step(step)}"]
 
         # Priority order for groups
         priority_groups = ["training", "actor", "critic", "response", "prompt", "perf"]
