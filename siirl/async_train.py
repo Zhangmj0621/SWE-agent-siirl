@@ -16,6 +16,7 @@
 import sys
 import time
 import traceback
+from contextlib import suppress
 
 import ray
 
@@ -34,6 +35,66 @@ RAY_RUNTIME_ENV_VARS = {
 }
 
 MAIN_RUNNER_CPU_RESERVATION = 5
+VALIDATE_PROGRESS_DRIVER_POLL_S = 0.5
+
+
+class _ValidateProgressMonitor:
+    def __init__(self, rollout_manager_name: str):
+        self.rollout_manager_name = rollout_manager_name
+        self.rollout_manager = None
+        self.progress_bar = None
+        self.last_key = None
+        try:
+            from tqdm.auto import tqdm
+        except Exception:
+            tqdm = None
+        self.tqdm = tqdm
+
+    def close(self):
+        if self.progress_bar is not None:
+            self.progress_bar.close()
+            self.progress_bar = None
+
+    def poll_once(self):
+        if self.rollout_manager is None:
+            with suppress(Exception):
+                self.rollout_manager = ray.get_actor(self.rollout_manager_name)
+            if self.rollout_manager is None:
+                return
+
+        with suppress(Exception):
+            snapshot = ray.get(self.rollout_manager.get_validate_progress_snapshot.remote(), timeout=1)
+            self._update(snapshot)
+
+    def _update(self, snapshot: dict):
+        total = max(0, int(snapshot.get("total", 0)))
+        done = max(0, int(snapshot.get("done", 0)))
+        active = bool(snapshot.get("active", False))
+        step = int(snapshot.get("step", 0))
+        workers_active = max(0, int(snapshot.get("workers_active", 0)))
+        workers_total = max(0, int(snapshot.get("workers_total", 0)))
+        key = (active, total, done, step, workers_active, workers_total)
+        if key == self.last_key:
+            return
+        self.last_key = key
+
+        if self.tqdm is None:
+            return
+
+        if active and total > 0:
+            if self.progress_bar is None or self.progress_bar.total != total:
+                self.close()
+                self.progress_bar = self.tqdm(total=total, desc=f"Validate@step{step}", unit="sample", dynamic_ncols=True, leave=False)
+            self.progress_bar.n = min(done, total)
+            self.progress_bar.set_postfix_str(f"active={workers_active}/{workers_total}", refresh=False)
+            self.progress_bar.refresh()
+            return
+
+        if self.progress_bar is not None:
+            if total > 0:
+                self.progress_bar.n = min(done, total)
+                self.progress_bar.refresh()
+            self.close()
 
 
 @ray.remote(num_cpus=MAIN_RUNNER_CPU_RESERVATION)
@@ -47,7 +108,7 @@ class MainRunner:
     and that the setup process is managed within the Ray cluster.
     """
 
-    def run(self, config: SiiRLArguments) -> None:
+    def run(self, config: SiiRLArguments, rollout_manager_name: str | None = None) -> None:
         """
         Executes the main training workflow.
 
@@ -101,7 +162,11 @@ class MainRunner:
         try:
             logger.info(f"Initializing components: {actor_resources.num_gpus} training GPUs, {rollout_resources.num_gpus} rollout GPUs...")
 
-            rollout_manager = RolloutManager.remote(
+            rollout_manager_options = {}
+            if rollout_manager_name:
+                rollout_manager_options["name"] = rollout_manager_name
+
+            rollout_manager = RolloutManager.options(**rollout_manager_options).remote(
                 config,
                 rollout_resources,
                 data_coordinator,
@@ -262,9 +327,18 @@ def main() -> None:
         # Launch the main orchestration actor and wait for it to complete.
         logger.info("Starting MainRunner actor to orchestrate the job.")
         runner = MainRunner.remote()
-
-        # This is a blocking call that waits for the remote `run` method to finish.
-        ray.get(runner.run.remote(siirl_args))
+        rollout_manager_name = f"siirl_rollout_manager_{time.time_ns()}"
+        progress_monitor = _ValidateProgressMonitor(rollout_manager_name)
+        try:
+            run_ref = runner.run.remote(siirl_args, rollout_manager_name)
+            while True:
+                ready_refs, _ = ray.wait([run_ref], timeout=VALIDATE_PROGRESS_DRIVER_POLL_S)
+                progress_monitor.poll_once()
+                if ready_refs:
+                    ray.get(ready_refs[0])
+                    break
+        finally:
+            progress_monitor.close()
         logger.success("MainRunner has completed its execution.")
 
     except KeyboardInterrupt:

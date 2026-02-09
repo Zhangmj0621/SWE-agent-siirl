@@ -13,7 +13,6 @@
 # limitations under the License.
 import asyncio
 import contextlib
-import inspect
 import multiprocessing
 import os
 import re
@@ -42,50 +41,6 @@ VALIDATE_REUSE_RECREATE_COOLDOWN_S = 3.0
 VALIDATE_REUSE_PORT_STRIDE = 128
 VALIDATE_REUSE_PORT_CYCLE = 10
 VALIDATE_REUSE_PORT_RETRY_SLOTS = 3
-
-
-def get_validate_tqdm():
-    backend = os.environ.get("SIIRL_VALIDATE_PROGRESS_BACKEND", "local").strip().lower()
-    if backend in {"none", "off", "disable", "disabled"}:
-        return None
-
-    if backend == "ray":
-        try:
-            from ray.experimental.tqdm_ray import tqdm as ray_tqdm
-
-            return ray_tqdm
-        except Exception:
-            pass
-
-    if backend == "local":
-        from tqdm import tqdm
-
-        return tqdm
-
-    # auto mode:
-    # In Ray actor processes, local tqdm is easier to observe from actor logs.
-    if os.environ.get("RAY_WORKER_ID"):
-        from tqdm import tqdm
-
-        return tqdm
-
-    try:
-        from ray.experimental.tqdm_ray import tqdm as ray_tqdm
-
-        return ray_tqdm
-    except Exception:
-        from tqdm import tqdm
-
-        return tqdm
-
-
-def _instantiate_tqdm(tqdm_cls, **kwargs):
-    signature = inspect.signature(tqdm_cls)
-    accepts_var_kwargs = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
-    if accepts_var_kwargs:
-        return tqdm_cls(**kwargs)
-    supported = {k: v for k, v in kwargs.items() if k in signature.parameters}
-    return tqdm_cls(**supported)
 
 
 def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
@@ -249,6 +204,13 @@ class RolloutManager:
         self.event = asyncio.Event()
         self.global_steps = 0  # will be reset by actor checkpoint, but maybe not correct in fully async mode
         self._val_time_acc = 0.0
+        self._validate_progress_active = False
+        self._validate_progress_total = 0
+        self._validate_progress_done = 0
+        self._validate_progress_workers_active = 0
+        self._validate_progress_workers_total = 0
+        self._validate_progress_step = 0
+        self._validate_progress_last_update_ts = 0.0
 
         # Initialize workers, engines, router and start rollout
         self.message_queue = deque()
@@ -1008,32 +970,46 @@ class RolloutManager:
         self.event.set()
         return self.router_address
 
-    async def _monitor_validate_progress(self, assigned_workers: list[tuple], total_samples: int):
-        from loguru import logger
+    def _set_validate_progress_state(self, *, active: bool, total: int, done: int, workers_active: int, workers_total: int):
+        self._validate_progress_active = active
+        self._validate_progress_total = max(0, int(total))
+        self._validate_progress_done = max(0, int(done))
+        self._validate_progress_workers_active = max(0, int(workers_active))
+        self._validate_progress_workers_total = max(0, int(workers_total))
+        self._validate_progress_step = int(self.global_steps)
+        self._validate_progress_last_update_ts = time.time()
 
-        if total_samples <= 0 or not assigned_workers:
-            return
-
-        tqdm_cls = get_validate_tqdm()
-        if tqdm_cls is None:
-            return
-        pbar_kwargs = {
-            "total": total_samples,
-            "desc": "Validate",
-            "unit": "sample",
-            "dynamic_ncols": True,
-            "mininterval": 0.5,
-            "leave": True,
+    def get_validate_progress_snapshot(self):
+        return {
+            "active": self._validate_progress_active,
+            "total": self._validate_progress_total,
+            "done": self._validate_progress_done,
+            "workers_active": self._validate_progress_workers_active,
+            "workers_total": self._validate_progress_workers_total,
+            "step": self._validate_progress_step,
+            "last_update_ts": self._validate_progress_last_update_ts,
         }
-        try:
-            pbar = _instantiate_tqdm(tqdm_cls, **pbar_kwargs)
-        except Exception as e:
-            logger.warning(f"[RolloutManager] Validate progress fallback to local tqdm due to: {e}")
-            from tqdm import tqdm
 
-            pbar = _instantiate_tqdm(tqdm, **pbar_kwargs)
-        last_done = 0
-        last_active = -1
+    async def _monitor_validate_progress(self, assigned_workers: list[tuple], total_samples: int):
+        total_samples = max(0, int(total_samples))
+        worker_total = len(assigned_workers)
+        if total_samples <= 0 or worker_total <= 0:
+            self._set_validate_progress_state(
+                active=False,
+                total=total_samples,
+                done=total_samples,
+                workers_active=0,
+                workers_total=worker_total,
+            )
+            return
+
+        self._set_validate_progress_state(
+            active=True,
+            total=total_samples,
+            done=0,
+            workers_active=worker_total,
+            workers_total=worker_total,
+        )
 
         try:
             while True:
@@ -1049,34 +1025,25 @@ class RolloutManager:
                         workers_active += 1
 
                 done_samples = min(done_samples, total_samples)
-                delta = done_samples - last_done
-                active_changed = workers_active != last_active
-                if delta > 0 or active_changed:
-                    if delta > 0:
-                        pbar.update(delta)
-                        last_done = done_samples
-                    postfix = f"active={workers_active}/{len(assigned_workers)}"
-                    if hasattr(pbar, "set_postfix_str"):
-                        try:
-                            pbar.set_postfix_str(postfix, refresh=False)
-                        except TypeError:
-                            pbar.set_postfix_str(postfix)
-                    elif hasattr(pbar, "set_postfix"):
-                        try:
-                            pbar.set_postfix({"active": f"{workers_active}/{len(assigned_workers)}"}, refresh=False)
-                        except TypeError:
-                            pbar.set_postfix({"active": f"{workers_active}/{len(assigned_workers)}"})
-                    if hasattr(pbar, "refresh"):
-                        pbar.refresh()
-                    last_active = workers_active
+                self._set_validate_progress_state(
+                    active=done_samples < total_samples,
+                    total=total_samples,
+                    done=done_samples,
+                    workers_active=workers_active,
+                    workers_total=worker_total,
+                )
 
                 if done_samples >= total_samples:
                     return
                 await asyncio.sleep(VALIDATE_PROGRESS_POLL_INTERVAL_S)
         finally:
-            if last_done < total_samples:
-                pbar.update(total_samples - last_done)
-            pbar.close()
+            self._set_validate_progress_state(
+                active=False,
+                total=total_samples,
+                done=total_samples,
+                workers_active=0,
+                workers_total=worker_total,
+            )
 
     async def validate(self, val_num_batch, val_batch_size):
         """
@@ -1087,6 +1054,7 @@ class RolloutManager:
         from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
 
         val_start = time.time()
+        self._set_validate_progress_state(active=False, total=0, done=0, workers_active=0, workers_total=0)
         try:
             for _ in range(val_num_batch):
                 has_val_batch = await self.data_coordinator.run_dataloader.remote(is_validate=True)
