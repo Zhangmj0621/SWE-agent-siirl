@@ -11,12 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Backward-compatible re-export for validation metric helpers."""
-
-from siirl.worker.validate.metrics import aggregate_and_log_validation_metrics, aggregate_validation_results
-
-__all__ = [
-    "aggregate_and_log_validation_metrics",
-    "aggregate_validation_results",
-]

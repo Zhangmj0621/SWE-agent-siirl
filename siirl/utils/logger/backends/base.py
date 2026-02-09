@@ -21,6 +21,8 @@ Defines the interface that all logger backends must implement.
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+NumericScalar = int | float
+
 
 @dataclass
 class BackendConfig:
@@ -59,7 +61,7 @@ class LoggerBackend(Protocol):
         """Backend name identifier."""
         ...
 
-    def log(self, data: dict[str, float], step: int) -> None:
+    def log(self, data: dict[str, NumericScalar], step: int) -> None:
         """
         Log scalar metrics.
 

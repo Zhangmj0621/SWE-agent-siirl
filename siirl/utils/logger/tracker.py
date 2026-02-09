@@ -27,7 +27,7 @@ from typing import Any
 from loguru import logger
 
 from .backends import BackendConfig, BackendRegistry
-from .backends.base import LoggerBackend
+from .backends.base import LoggerBackend, NumericScalar
 
 
 @dataclass
@@ -61,13 +61,41 @@ def _std_from_stats(sum_val: float, sum_sq: float, count: int, use_sample_var: b
     return math.sqrt(max(variance, 0.0))
 
 
-def sanitize_metrics_for_logging(data: dict[str, Any]) -> dict[str, float]:
+def sanitize_metrics_for_logging(data: dict[str, Any]) -> dict[str, NumericScalar]:
     """
     Convert metrics to scalar values accepted by logger backends.
     """
-    sanitized: dict[str, float] = {}
+    sanitized: dict[str, NumericScalar] = {}
+    step_metric_keys = {"training/global_step", "training/global_step_1based"}
 
     for key, value in data.items():
+        if key in step_metric_keys:
+            if isinstance(value, bool):
+                sanitized[key] = int(value)
+                continue
+            if isinstance(value, int):
+                sanitized[key] = value
+                continue
+            if isinstance(value, float) and math.isfinite(value):
+                sanitized[key] = int(value)
+                continue
+            if hasattr(value, "item") and callable(value.item):
+                try:
+                    scalar = value.item()
+                    if isinstance(scalar, bool):
+                        sanitized[key] = int(scalar)
+                        continue
+                    if isinstance(scalar, int):
+                        sanitized[key] = scalar
+                        continue
+                    if isinstance(scalar, float) and math.isfinite(scalar):
+                        sanitized[key] = int(scalar)
+                        continue
+                except Exception:
+                    pass
+            logger.warning(f"Drop non-scalar step metric for logging: key={key}, type={type(value)}")
+            continue
+
         if isinstance(value, bool):
             sanitized[key] = float(int(value))
             continue
@@ -272,7 +300,7 @@ class MetricTracker:
 
     def log(
         self,
-        data: dict[str, float],
+        data: dict[str, NumericScalar],
         step: int,
         backends: list[str] | None = None,
     ) -> None:

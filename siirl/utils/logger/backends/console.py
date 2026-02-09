@@ -23,7 +23,9 @@ from typing import Any
 
 from loguru import logger
 
-from .base import BackendConfig
+from .base import BackendConfig, NumericScalar
+
+STEP_METRIC_KEYS = {"training/global_step", "training/global_step_1based"}
 
 
 class ConsoleBackend:
@@ -61,10 +63,10 @@ class ConsoleBackend:
 
     @staticmethod
     def _display_step(step: int) -> int:
-        """Render user-facing steps as 1-based without changing internal step semantics."""
-        return step + 1 if step >= 0 else step
+        """Render canonical training step without implicit offset."""
+        return step
 
-    def log(self, data: dict[str, float], step: int) -> None:
+    def log(self, data: dict[str, NumericScalar], step: int) -> None:
         """
         Log metrics to console with grouped formatting.
 
@@ -132,7 +134,7 @@ class ConsoleBackend:
         """Console backend doesn't need cleanup."""
         pass
 
-    def _format_metrics(self, data: dict[str, float], step: int) -> str:
+    def _format_metrics(self, data: dict[str, NumericScalar], step: int) -> str:
         """
         Format metrics into a grouped string.
 
@@ -162,8 +164,8 @@ class ConsoleBackend:
 
             # Format value
             value_for_display = value
-            if key == "training/global_step" and isinstance(value, (int, float)):
-                value_for_display = value + 1
+            if key in STEP_METRIC_KEYS and isinstance(value_for_display, (int, float)):
+                value_for_display = int(value_for_display)
 
             if isinstance(value_for_display, float):
                 formatted_value = f"{value_for_display:.8f}" if math.isfinite(value_for_display) else str(value_for_display)

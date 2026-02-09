@@ -17,7 +17,6 @@ import datetime
 import os
 import time
 import traceback
-from enum import Enum
 
 import ray
 import torch
@@ -33,25 +32,15 @@ from siirl.engine.actor.utils import set_random_seed
 from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.params import SiiRLArguments, TrainingArguments
 from siirl.utils.backend.device import get_nccl_backend, get_torch_device
-from siirl.utils.distributed_utils import get_gloo_group, init_gloo_group
+from siirl.utils.distributed_utils import init_gloo_group
 from siirl.utils.logger.memory_profiler import MemoryProfiler
 from siirl.utils.megatron.megatron_utils import offload_megatron_model_to_cpu
 from siirl.utils.timer import Timer, TimerCollection
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
+from siirl.worker.validate.reuse.constants import SYNC_RETRY_SLEEP_S
+from siirl.worker.validate.reuse.trainer_sync import ValidateGateDecision, ValidateReuseTrainerSync
 
-VALIDATE_REUSE_GATE_POLL_INTERVAL_MS = 50
-VALIDATE_SYNC_RETRY_SLEEP_S = 0.05
 TRAIN_NO_BATCH_BACKOFF_S = 0.1
-_VALIDATE_STATE_ACTIVE_IDX = 0
-_VALIDATE_STATE_SYNC_REQUIRED_IDX = 1
-_VALIDATE_STATE_SESSION_ID_IDX = 2
-_VALIDATE_STATE_NUM_FIELDS = 3
-_VALIDATE_STATE_NO_SESSION_ID = -1
-
-
-class _ValidateGateDecision(str, Enum):
-    PROCEED = "proceed"
-    RETRY_SYNC = "retry_sync"
 
 
 def global_initialize_model_parallel(config: TrainingArguments):
@@ -167,13 +156,13 @@ class Trainer:
         self.should_submit_metrics = False  # Will be set in init_models()
 
         self.checkpoint_manager = None
+        self.param_sync = None
+        self._validate_reuse_sync: ValidateReuseTrainerSync | None = None
 
         # Training state
         self.global_step = 0
         # Subtract prior checkpoint save overhead from next-step perf accounting.
         self._pending_ckpt_excluded_time = 0.0
-        self._validate_wait_session_id = _VALIDATE_STATE_NO_SESSION_ID
-        self._validate_wait_started_at = 0.0
 
         # Local batch cache for handling async data fetch race conditions
         # When some dp_ranks get data while others don't, the ones with data
@@ -297,6 +286,7 @@ class Trainer:
 
     def set_rollout_manager(self, rollout_manager):
         self.rollout_manager = rollout_manager
+        self._maybe_init_validate_reuse_sync()
 
     def setup_param_sync(self):
         assert self.actor_worker is not None, "must init models first"
@@ -307,6 +297,7 @@ class Trainer:
             bridge=self.actor_worker.bridge,
         )
         init_gloo_group()
+        self._maybe_init_validate_reuse_sync()
 
     # @timer
     def update_rollout_weight(self):
@@ -341,134 +332,32 @@ class Trainer:
             offload_megatron_model_to_cpu(self.actor_worker.actor_module)
             get_torch_device().empty_cache()
 
-    def _try_sync_validate_reuse_workers(self) -> bool:
+    def _get_regular_rollout_workers(self) -> list:
         if self.rollout_manager is None:
-            return False
-
-        sync_plan = ray.get(self.rollout_manager.get_validate_reuse_sync_plan.remote(self.rank))
-        distributed_workers = sync_plan.get("distributed_workers", [])
-        tensor_workers = sync_plan.get("tensor_workers", [])
-        needs_sync_local = 1 if (distributed_workers or tensor_workers) else 0
-        needs_sync_tensor = torch.tensor([needs_sync_local], dtype=torch.int32)
-        dist.all_reduce(needs_sync_tensor, op=dist.ReduceOp.MAX, group=get_gloo_group())
-        if needs_sync_tensor.item() == 0:
-            return False
-
+            return []
         rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
-        session_id_tensor = torch.tensor([-1], dtype=torch.int64)
-        if self.rank == 0:
-            try:
-                session_id_tensor[0] = int(ray.get(self.rollout_manager.start_validate_reuse_sync_session.remote(), timeout=rpc_timeout_s))
-            except Exception as e:
-                logger.error(f"[Trainer rank=0] Failed to allocate validate reuse session: {e}")
-                session_id_tensor[0] = -1
-        dist.broadcast(session_id_tensor, src=0, group=get_gloo_group())
-        session_id = int(session_id_tensor.item())
-        if session_id < 0:
-            return False
+        return ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote(), timeout=rpc_timeout_s)
 
-        begin_result = ray.get(self.rollout_manager.mark_validate_reuse_begin.remote(self.rank, session_id), timeout=rpc_timeout_s)
-        if not begin_result.get("accepted", False):
-            logger.warning(
-                f"[Trainer rank={self.rank}] Validate reuse begin rejected: "
-                f"phase={begin_result.get('phase')} reason={begin_result.get('reason')}"
-            )
-
-        begin_timeout_s = max(1, int(getattr(self.config.trainer, "validate_reuse_begin_timeout_s", 30)))
-        gate_poll_s = max(0.001, float(VALIDATE_REUSE_GATE_POLL_INTERVAL_MS) / 1000.0)
-        gate_decision = torch.tensor([0], dtype=torch.int32)
-        if self.rank == 0:
-            deadline = time.time() + begin_timeout_s
-            gate_reason = ""
-            while True:
-                gate_state = ray.get(self.rollout_manager.get_validate_reuse_sync_gate.remote(session_id), timeout=rpc_timeout_s)
-                proceed = gate_state.get("proceed")
-                if proceed is True:
-                    gate_decision[0] = 1
-                    break
-                if proceed is False:
-                    gate_reason = gate_state.get("reason", "aborted")
-                    gate_decision[0] = -1
-                    break
-                if time.time() >= deadline:
-                    gate_reason = f"validate reuse begin timeout after {begin_timeout_s}s"
-                    ray.get(self.rollout_manager.abort_validate_reuse_sync_session.remote(session_id, gate_reason), timeout=rpc_timeout_s)
-                    gate_decision[0] = -1
-                    break
-                time.sleep(gate_poll_s)
-            if gate_decision.item() < 0:
-                logger.warning(f"[Trainer rank=0] Validate reuse sync gate aborted: {gate_reason or 'unknown'}")
-        dist.broadcast(gate_decision, src=0, group=get_gloo_group())
-        if gate_decision.item() < 0:
-            return False
-
-        start = time.time()
-        logger.info(
-            f"[Trainer rank={self.rank}] Validate reuse sync start: "
-            f"distributed_workers={len(distributed_workers)} tensor_workers={len(tensor_workers)} "
-            f"weight_version={self.get_current_weight_version()}"
-        )
-        self._sync_rollout_workers(distributed_workers, tensor_workers, bump_weight_version=False)
-        regular_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote(), timeout=rpc_timeout_s)
+    def _ensure_regular_rollout_workers(self, regular_workers) -> None:
         if isinstance(self.param_sync, ParamSyncDistributed):
             if regular_workers and any(not self.param_sync.has_connected_to_actor(x) for x in regular_workers):
                 self.param_sync.setup_param_sync_group(regular_workers)
-        else:
-            self._sync_rollout_workers(regular_workers, bump_weight_version=False)
-        ray.get(self.rollout_manager.mark_validate_reuse_synced.remote(self.rank, session_id), timeout=rpc_timeout_s)
-        logger.info(
-            f"[Trainer rank={self.rank}] Validate reuse sync done in {time.time() - start:.2f}s "
-            f"weight_version={self.get_current_weight_version()}"
+            return
+        self._sync_rollout_workers(regular_workers, bump_weight_version=False)
+
+    def _maybe_init_validate_reuse_sync(self) -> None:
+        if self.rollout_manager is None or self.param_sync is None:
+            self._validate_reuse_sync = None
+            return
+        self._validate_reuse_sync = ValidateReuseTrainerSync(
+            rollout_manager=self.rollout_manager,
+            rank=self.rank,
+            config=self.config,
+            sync_workers_fn=self._sync_rollout_workers,
+            get_regular_workers_fn=self._get_regular_rollout_workers,
+            ensure_regular_workers_fn=self._ensure_regular_rollout_workers,
+            get_current_weight_version_fn=self.get_current_weight_version,
         )
-        return True
-
-    def _wait_validate_idle(self) -> _ValidateGateDecision:
-        if self.rollout_manager is None:
-            return _ValidateGateDecision.PROCEED
-
-        rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
-        poll_s = max(0.001, float(VALIDATE_REUSE_GATE_POLL_INTERVAL_MS) / 1000.0)
-
-        while True:
-            state_tensor = torch.zeros(_VALIDATE_STATE_NUM_FIELDS, dtype=torch.int64)
-            state_tensor[_VALIDATE_STATE_SESSION_ID_IDX] = _VALIDATE_STATE_NO_SESSION_ID
-            if self.rank == 0:
-                try:
-                    state = ray.get(self.rollout_manager.get_validate_active_state.remote(), timeout=rpc_timeout_s)
-                    state_tensor[_VALIDATE_STATE_ACTIVE_IDX] = 1 if bool(state.get("active", False)) else 0
-                    state_tensor[_VALIDATE_STATE_SYNC_REQUIRED_IDX] = 1 if bool(state.get("sync_required", False)) else 0
-                    state_tensor[_VALIDATE_STATE_SESSION_ID_IDX] = int(state.get("session_id", _VALIDATE_STATE_NO_SESSION_ID))
-                except Exception as e:
-                    logger.warning(f"[Trainer rank=0] Failed to query validate active state: {e}")
-                    state_tensor[_VALIDATE_STATE_ACTIVE_IDX] = 0
-                    state_tensor[_VALIDATE_STATE_SYNC_REQUIRED_IDX] = 0
-                    state_tensor[_VALIDATE_STATE_SESSION_ID_IDX] = _VALIDATE_STATE_NO_SESSION_ID
-
-            dist.broadcast(state_tensor, src=0, group=get_gloo_group())
-            is_active = bool(state_tensor[_VALIDATE_STATE_ACTIVE_IDX].item())
-            sync_required = bool(state_tensor[_VALIDATE_STATE_SYNC_REQUIRED_IDX].item())
-            session_id = int(state_tensor[_VALIDATE_STATE_SESSION_ID_IDX].item())
-            if not is_active:
-                if self.rank == 0 and self._validate_wait_started_at > 0:
-                    elapsed_s = time.time() - self._validate_wait_started_at
-                    logger.info(
-                        f"[Trainer rank=0] Validate wait finished in {elapsed_s:.2f}s " f"session_id={self._validate_wait_session_id}"
-                    )
-                self._validate_wait_session_id = _VALIDATE_STATE_NO_SESSION_ID
-                self._validate_wait_started_at = 0.0
-                return _ValidateGateDecision.PROCEED
-
-            if sync_required:
-                self._validate_wait_session_id = _VALIDATE_STATE_NO_SESSION_ID
-                self._validate_wait_started_at = 0.0
-                return _ValidateGateDecision.RETRY_SYNC
-
-            if self._validate_wait_started_at <= 0 or self._validate_wait_session_id != session_id:
-                self._validate_wait_session_id = session_id
-                self._validate_wait_started_at = time.time()
-                if self.rank == 0:
-                    logger.info(f"[Trainer rank=0] Validate wait start session_id={session_id}")
-            time.sleep(poll_s)
 
     def has_critic(self):
         return self.critic_worker is not None
@@ -817,24 +706,30 @@ class Trainer:
                 if self.rank == 0:
                     ray.get(self.rollout_manager.next_rollout.remote())
 
-                self._try_sync_validate_reuse_workers()
+                if self._validate_reuse_sync is not None:
+                    self._validate_reuse_sync.try_sync()
 
                 # Record get_batch timing
                 with Timer("get_batch") as get_batch_timer:
                     while (batch_data := self.get_batch(batch_size)) is None:
-                        did_sync = self._try_sync_validate_reuse_workers()
-                        gate_decision = self._wait_validate_idle()
-                        if gate_decision is _ValidateGateDecision.RETRY_SYNC:
-                            time.sleep(VALIDATE_SYNC_RETRY_SLEEP_S)
+                        did_sync = self._validate_reuse_sync.try_sync() if self._validate_reuse_sync is not None else False
+                        gate_decision = (
+                            self._validate_reuse_sync.wait_idle() if self._validate_reuse_sync is not None else ValidateGateDecision.PROCEED
+                        )
+                        if gate_decision is ValidateGateDecision.RETRY_SYNC:
+                            time.sleep(SYNC_RETRY_SLEEP_S)
                             continue
                         if not did_sync:
                             time.sleep(TRAIN_NO_BATCH_BACKOFF_S)
 
                 while True:
-                    self._try_sync_validate_reuse_workers()
-                    gate_decision = self._wait_validate_idle()
-                    if gate_decision is _ValidateGateDecision.RETRY_SYNC:
-                        time.sleep(VALIDATE_SYNC_RETRY_SLEEP_S)
+                    if self._validate_reuse_sync is not None:
+                        self._validate_reuse_sync.try_sync()
+                    gate_decision = (
+                        self._validate_reuse_sync.wait_idle() if self._validate_reuse_sync is not None else ValidateGateDecision.PROCEED
+                    )
+                    if gate_decision is ValidateGateDecision.RETRY_SYNC:
+                        time.sleep(SYNC_RETRY_SLEEP_S)
                         continue
                     break
 

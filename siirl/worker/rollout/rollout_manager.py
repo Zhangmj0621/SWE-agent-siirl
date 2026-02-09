@@ -32,67 +32,21 @@ from siirl.utils.net_utils.net import (
     get_net_interface_ip,
 )
 from siirl.worker.ray_utils import GPUResources, RayClassWithInitArgs, get_random_string
-
-VALIDATE_REUSE_SYNC_TIMEOUT_S = 120
-VALIDATE_REUSE_SYNC_LOG_INTERVAL_S = 5.0
-VALIDATE_PROGRESS_POLL_INTERVAL_S = 2.0
-VALIDATE_REUSE_GRACEFUL_SHUTDOWN_TIMEOUT_S = 15
-VALIDATE_REUSE_RECREATE_COOLDOWN_S = 3.0
-VALIDATE_REUSE_PORT_STRIDE = 128
-VALIDATE_REUSE_PORT_CYCLE = 10
-VALIDATE_REUSE_PORT_RETRY_SLOTS = 3
-VALIDATE_NO_SESSION_ID = -1
-
-
-def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
-    if train_gpus <= 0 or tp_size <= 0 or n_gpus_per_node <= 0:
-        return None
-
-    gpus_per_rollout = min(tp_size, n_gpus_per_node)
-    if tp_size % gpus_per_rollout != 0:
-        return None
-
-    num_tp_groups = train_gpus // tp_size
-    if num_tp_groups == 0:
-        return None
-
-    usable_gpus = num_tp_groups * tp_size
-    num_workers = usable_gpus // gpus_per_rollout
-    rollout_per_tp_group = tp_size // gpus_per_rollout
-
-    return {
-        "usable_gpus": usable_gpus,
-        "num_workers": num_workers,
-        "num_tp_groups": num_tp_groups,
-        "gpus_per_rollout": gpus_per_rollout,
-        "rollout_per_tp_group": rollout_per_tp_group,
-    }
-
-
-def split_validate_samples(samples: list, num_workers: int) -> list[list]:
-    if num_workers <= 0:
-        return []
-    shards = [[] for _ in range(num_workers)]
-    for idx, sample in enumerate(samples):
-        shards[idx % num_workers].append(sample)
-    return shards
-
-
-def split_validate_reuse_sync_workers(worker_infos: list[dict], trainer_node_ip: str, trainer_local_rank: int) -> tuple[list, list]:
-    distributed_workers = []
-    tensor_workers = []
-    for info in worker_infos:
-        worker = info["worker"]
-        local_ranks = info.get("local_ranks") or []
-        if info.get("node_ip") == trainer_node_ip and trainer_local_rank in local_ranks:
-            tensor_workers.append(worker)
-        else:
-            distributed_workers.append(worker)
-    return distributed_workers, tensor_workers
-
-
-def rollout_to_train_step(rollout_step: int) -> int:
-    return max(rollout_step - 1, 0)
+from siirl.worker.validate.progress import ValidateProgressTracker
+from siirl.worker.validate.reuse.constants import (
+    GRACEFUL_SHUTDOWN_TIMEOUT_S,
+    NO_SESSION_ID,
+    PORT_CYCLE,
+    PORT_RETRY_SLOTS,
+    PORT_STRIDE,
+    PROGRESS_POLL_INTERVAL_S,
+    RECREATE_COOLDOWN_S,
+    SYNC_LOG_INTERVAL_S,
+    SYNC_TIMEOUT_S,
+)
+from siirl.worker.validate.reuse.coordinator import ValidateReuseCoordinator
+from siirl.worker.validate.reuse.topology import rollout_to_train_step, split_validate_reuse_sync_workers, split_validate_samples
+from siirl.worker.validate.reuse.worker_pool import ValidateReuseWorkerPool
 
 
 @ray.remote
@@ -174,25 +128,13 @@ class RolloutManager:
         self.router_process = None
         self.worker_handle = []
         self.worker_urls = []
-        self._validate_reuse_workers = []
-        self._validate_reuse_tp0_workers = []
-        self._validate_reuse_tp0_worker_infos = []
-        self._validate_reuse_sync_required = False
-        self._validate_reuse_synced_ranks: set[int] = set()
-        self._validate_reuse_begin_ranks: set[int] = set()
-        self._validate_reuse_sync_plan_logged_ranks: set[int] = set()
-        self._validate_reuse_topology = None
-        self._validate_reuse_phase = "IDLE"
-        self._validate_reuse_abort_reason = ""
-        self._validate_reuse_session_counter = 0
         self._validate_active = False
-        self._validate_reuse_active_session_id: int | None = None
-        self._validate_reuse_last_destroy_ts = 0.0
-        self._validate_reuse_port_window_idx = -1
         self._validate_reuse_enabled = bool(
             getattr(config.trainer, "validate_reuse_train_gpus", False) and self.train_gpu_resources is not None
         )
         self._trainer_world_size = self.train_gpu_resources.num_gpus if self.train_gpu_resources is not None else 0
+        self._validate_reuse_coordinator = ValidateReuseCoordinator(trainer_world_size=self._trainer_world_size)
+        self._validate_reuse_pool = ValidateReuseWorkerPool()
 
         # Cache for dist_init_addr (used in cross-node TP)
         self._dist_init_addrs = {}
@@ -206,14 +148,7 @@ class RolloutManager:
         self.event = asyncio.Event()
         self.global_steps = 0  # will be reset by actor checkpoint, but maybe not correct in fully async mode
         self._val_time_acc = 0.0
-        self._validate_progress_active = False
-        self._validate_progress_total = 0
-        self._validate_progress_done = 0
-        self._validate_progress_workers_active = 0
-        self._validate_progress_workers_total = 0
-        self._validate_progress_step = 0
-        self._validate_progress_rollout_index = 0
-        self._validate_progress_last_update_ts = 0.0
+        self._validate_progress = ValidateProgressTracker()
 
         # Initialize workers, engines, router and start rollout
         self.message_queue = deque()
@@ -519,37 +454,28 @@ class RolloutManager:
         return result
 
     def get_validate_reuse_sync_workers(self, trainer_rank: int):
-        if not self._validate_reuse_sync_required:
+        if not self._validate_reuse_coordinator.sync_required:
             return []
-        return self._validate_reuse_tp0_workers
+        return self._validate_reuse_pool.tp0_workers
 
     def get_validate_active_state(self):
-        session_id = self._validate_reuse_active_session_id
-        return {
-            "active": bool(self._validate_active),
-            "sync_required": bool(self._validate_reuse_sync_required),
-            "phase": self._validate_reuse_phase,
-            "session_id": int(session_id) if session_id is not None else VALIDATE_NO_SESSION_ID,
-            "global_steps": int(self.global_steps),
-        }
+        return self._validate_reuse_coordinator.get_active_state(
+            validate_active=self._validate_active,
+            global_steps=self.global_steps,
+            no_session_id=NO_SESSION_ID,
+        )
 
     def _reset_validate_reuse_sync_state(self):
-        self._validate_reuse_sync_required = False
-        self._validate_reuse_phase = "IDLE"
-        self._validate_reuse_abort_reason = ""
-        self._validate_reuse_active_session_id = None
-        self._validate_reuse_begin_ranks.clear()
-        self._validate_reuse_synced_ranks.clear()
-        self._validate_reuse_sync_plan_logged_ranks.clear()
+        self._validate_reuse_coordinator.reset()
 
     def get_validate_reuse_sync_plan(self, trainer_rank: int):
-        if not self._validate_reuse_sync_required:
+        if not self._validate_reuse_coordinator.sync_required:
             return {"distributed_workers": [], "tensor_workers": [], "phase": "IDLE"}
         if self.train_gpu_resources is None or trainer_rank < 0 or trainer_rank >= self.train_gpu_resources.num_gpus:
             return {
-                "distributed_workers": self._validate_reuse_tp0_workers,
+                "distributed_workers": self._validate_reuse_pool.tp0_workers,
                 "tensor_workers": [],
-                "phase": self._validate_reuse_phase,
+                "phase": self._validate_reuse_coordinator.phase,
             }
 
         from loguru import logger
@@ -557,326 +483,75 @@ class RolloutManager:
         trainer_node_ip = self.train_gpu_resources.node_ips[trainer_rank]
         trainer_local_rank = self.train_gpu_resources.local_ranks[trainer_rank]
         distributed_workers, tensor_workers = split_validate_reuse_sync_workers(
-            self._validate_reuse_tp0_worker_infos,
+            self._validate_reuse_pool.tp0_worker_infos,
             trainer_node_ip,
             trainer_local_rank,
         )
-        if trainer_rank not in self._validate_reuse_sync_plan_logged_ranks:
-            self._validate_reuse_sync_plan_logged_ranks.add(trainer_rank)
+        if self._validate_reuse_coordinator.should_log_sync_plan(trainer_rank):
             logger.info(
                 "[RolloutManager] Validate reuse sync plan "
                 f"trainer_rank={trainer_rank} trainer_node={trainer_node_ip} trainer_local_rank={trainer_local_rank} "
                 f"distributed_workers={len(distributed_workers)} tensor_workers={len(tensor_workers)} "
-                f"phase={self._validate_reuse_phase}"
+                f"phase={self._validate_reuse_coordinator.phase}"
             )
         return {
             "distributed_workers": distributed_workers,
             "tensor_workers": tensor_workers,
-            "phase": self._validate_reuse_phase,
+            "phase": self._validate_reuse_coordinator.phase,
         }
 
     def start_validate_reuse_sync_session(self) -> int:
-        if not self._validate_reuse_sync_required:
-            return -1
-        if self._validate_reuse_active_session_id is None:
-            self._validate_reuse_session_counter += 1
-            self._validate_reuse_active_session_id = self._validate_reuse_session_counter
-            self._validate_reuse_phase = "COLLECTING"
-            self._validate_reuse_abort_reason = ""
-            self._validate_reuse_begin_ranks.clear()
-        return self._validate_reuse_active_session_id
+        return self._validate_reuse_coordinator.start_session(no_session_id=NO_SESSION_ID)
 
     def mark_validate_reuse_begin(self, trainer_rank: int, session_id: int):
-        if not self._validate_reuse_sync_required:
-            return {"accepted": False, "reason": "sync_not_required", "phase": self._validate_reuse_phase}
-        if session_id != self._validate_reuse_active_session_id:
-            return {"accepted": False, "reason": "stale_session", "phase": self._validate_reuse_phase}
-        if self._validate_reuse_phase == "ABORTED":
-            return {"accepted": False, "reason": self._validate_reuse_abort_reason, "phase": self._validate_reuse_phase}
-
-        self._validate_reuse_begin_ranks.add(trainer_rank)
-        if len(self._validate_reuse_begin_ranks) >= self._trainer_world_size > 0:
-            self._validate_reuse_phase = "RUNNING"
-        return {
-            "accepted": True,
-            "phase": self._validate_reuse_phase,
-            "begun": len(self._validate_reuse_begin_ranks),
-            "world_size": self._trainer_world_size,
-        }
+        return self._validate_reuse_coordinator.mark_begin(trainer_rank, session_id)
 
     def get_validate_reuse_sync_gate(self, session_id: int):
-        if not self._validate_reuse_sync_required:
-            return {"proceed": False, "phase": "IDLE", "reason": "sync_not_required"}
-        if session_id != self._validate_reuse_active_session_id:
-            return {"proceed": False, "phase": self._validate_reuse_phase, "reason": "stale_session"}
-        if self._validate_reuse_phase == "ABORTED":
-            return {
-                "proceed": False,
-                "phase": self._validate_reuse_phase,
-                "reason": self._validate_reuse_abort_reason or "aborted",
-            }
-        if len(self._validate_reuse_begin_ranks) >= self._trainer_world_size > 0:
-            self._validate_reuse_phase = "RUNNING"
-            return {"proceed": True, "phase": self._validate_reuse_phase}
-        return {"proceed": None, "phase": self._validate_reuse_phase}
+        return self._validate_reuse_coordinator.get_gate(session_id)
 
     def abort_validate_reuse_sync_session(self, session_id: int, reason: str):
-        if not self._validate_reuse_sync_required:
-            return {"aborted": False, "phase": "IDLE"}
-        if session_id != self._validate_reuse_active_session_id:
-            return {"aborted": False, "phase": self._validate_reuse_phase, "reason": "stale_session"}
-        self._validate_reuse_phase = "ABORTED"
-        self._validate_reuse_abort_reason = reason
-        return {"aborted": True, "phase": self._validate_reuse_phase, "reason": reason}
+        return self._validate_reuse_coordinator.abort_session(session_id, reason)
 
     def mark_validate_reuse_synced(self, trainer_rank: int, session_id: int | None = None):
-        if not self._validate_reuse_sync_required:
-            return {"accepted": False, "reason": "sync_not_required"}
-        if session_id is not None and session_id != self._validate_reuse_active_session_id:
-            return {"accepted": False, "reason": "stale_session"}
-        if self._validate_reuse_phase == "ABORTED":
-            return {"accepted": False, "reason": self._validate_reuse_abort_reason}
+        result = self._validate_reuse_coordinator.mark_synced(trainer_rank, session_id=session_id)
+        if not result.get("accepted", False):
+            return result
 
         from loguru import logger
 
-        self._validate_reuse_synced_ranks.add(trainer_rank)
-        synced = len(self._validate_reuse_synced_ranks)
-        missing = sorted(set(range(self._trainer_world_size)) - self._validate_reuse_synced_ranks)
         logger.info(
             "[RolloutManager] Validate reuse synced "
-            f"trainer_rank={trainer_rank} synced={synced}/{self._trainer_world_size} missing={missing}"
+            f"trainer_rank={trainer_rank} synced={result['synced']}/{result['world_size']} missing={result['missing']}"
         )
-        if synced >= self._trainer_world_size > 0:
-            self._validate_reuse_phase = "DONE"
-            self._validate_reuse_sync_required = False
-        return {"accepted": True, "phase": self._validate_reuse_phase, "synced": synced}
+        return result
 
-    async def _wait_validate_reuse_synced(self, timeout_s: int = VALIDATE_REUSE_SYNC_TIMEOUT_S) -> bool:
-        if not self._validate_reuse_sync_required:
-            return True
-        if self._trainer_world_size <= 0:
-            return False
-
-        from loguru import logger
-
-        start = time.time()
-        next_log_at = start + VALIDATE_REUSE_SYNC_LOG_INTERVAL_S
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            if self._validate_reuse_phase == "ABORTED":
-                logger.warning("[RolloutManager] Validate reuse sync aborted " f"reason={self._validate_reuse_abort_reason or 'unknown'}")
-                return False
-            if len(self._validate_reuse_synced_ranks) >= self._trainer_world_size:
-                logger.info(
-                    "[RolloutManager] Validate reuse sync completed "
-                    f"in {time.time() - start:.2f}s synced={len(self._validate_reuse_synced_ranks)}/{self._trainer_world_size}"
-                )
-                return True
-            now = time.time()
-            if now >= next_log_at:
-                missing = sorted(set(range(self._trainer_world_size)) - self._validate_reuse_synced_ranks)
-                logger.info(
-                    "[RolloutManager] Waiting validate reuse sync "
-                    f"elapsed={now - start:.2f}s synced={len(self._validate_reuse_synced_ranks)}/{self._trainer_world_size} "
-                    f"missing={missing}"
-                )
-                next_log_at = now + VALIDATE_REUSE_SYNC_LOG_INTERVAL_S
-            await asyncio.sleep(0.05)
-        return False
+    async def _wait_validate_reuse_synced(self, timeout_s: int = SYNC_TIMEOUT_S) -> bool:
+        return await self._validate_reuse_coordinator.wait_synced(
+            timeout_s=timeout_s,
+            log_interval_s=SYNC_LOG_INTERVAL_S,
+        )
 
     def _destroy_validate_reuse_pool(self):
-        if not self._validate_reuse_workers:
-            self._validate_reuse_tp0_workers = []
-            self._validate_reuse_tp0_worker_infos = []
-            self._validate_reuse_topology = None
-            self._validate_reuse_sync_plan_logged_ranks.clear()
-            return
-
-        from loguru import logger
-
-        shutdown_timeout_s = max(1, int(VALIDATE_REUSE_GRACEFUL_SHUTDOWN_TIMEOUT_S))
-        shutdown_futures = [w.shutdown_engine.remote() for w in self._validate_reuse_workers]
-        try:
-            ray.get(shutdown_futures, timeout=shutdown_timeout_s)
-        except Exception as e:
-            logger.warning(f"[RolloutManager] Validate reuse engine shutdown failed: {e}")
-
-        for i, worker in enumerate(self._validate_reuse_workers):
-            with contextlib.suppress(Exception):
-                ray.kill(worker)
-                logger.debug(f"[RolloutManager] Killed validate reuse worker {i}")
-
-        self._validate_reuse_workers = []
-        self._validate_reuse_tp0_workers = []
-        self._validate_reuse_tp0_worker_infos = []
-        self._validate_reuse_topology = None
-        self._validate_reuse_sync_plan_logged_ranks.clear()
-        self._validate_reuse_last_destroy_ts = time.time()
-
-    def _next_validate_reuse_port_bases(self) -> tuple[int, int]:
-        stride = max(1, int(VALIDATE_REUSE_PORT_STRIDE))
-        cycle = max(1, int(VALIDATE_REUSE_PORT_CYCLE))
-        self._validate_reuse_port_window_idx = (self._validate_reuse_port_window_idx + 1) % cycle
-        offset = self._validate_reuse_port_window_idx * stride
-        http_port_base = SGLANG_HTTP_START_PORT + 2000 + offset
-        dist_port_base = SGLANG_DIST_INIT_START_PORT + 1000 + offset
-        return http_port_base, dist_port_base
+        self._validate_reuse_pool.destroy(graceful_shutdown_timeout_s=GRACEFUL_SHUTDOWN_TIMEOUT_S)
+        self._validate_reuse_coordinator.clear_sync_plan_logs()
 
     def _init_validate_reuse_pool(self) -> list:
-        if not self._validate_reuse_enabled or self.train_gpu_resources is None:
-            return []
-
-        from loguru import logger
-
-        from siirl.worker.rollout.rollout_worker import RolloutWorker
-
-        cooldown_s = max(0.0, float(VALIDATE_REUSE_RECREATE_COOLDOWN_S))
-        if self._validate_reuse_last_destroy_ts > 0 and cooldown_s > 0:
-            elapsed = time.time() - self._validate_reuse_last_destroy_ts
-            if elapsed < cooldown_s:
-                sleep_s = cooldown_s - elapsed
-                logger.info(f"[RolloutManager] Waiting {sleep_s:.2f}s before recreating validate reuse workers")
-                time.sleep(sleep_s)
-
-        http_port_base, dist_port_base = self._next_validate_reuse_port_bases()
-        retry_slots = max(1, int(VALIDATE_REUSE_PORT_RETRY_SLOTS))
-        logger.info(
-            "[RolloutManager] Validate reuse port window "
-            f"window_idx={self._validate_reuse_port_window_idx} http_port_base={http_port_base} "
-            f"dist_port_base={dist_port_base} retry_slots={retry_slots}"
+        return self._validate_reuse_pool.init_pool(
+            enabled=self._validate_reuse_enabled,
+            train_gpu_resources=self.train_gpu_resources,
+            tp_size=self.tp_size,
+            n_gpus_per_node=self.n_gpus_per_node,
+            name_prefix=self.name_prefix,
+            config=self.config,
+            metric_worker=self.metric_worker,
+            device_name=self.device_name,
+            data_coordinator=self.data_coordinator,
+            create_worker_fn=self._create_worker,
+            recreate_cooldown_s=RECREATE_COOLDOWN_S,
+            port_stride=PORT_STRIDE,
+            port_cycle=PORT_CYCLE,
+            port_retry_slots=PORT_RETRY_SLOTS,
         )
-
-        train_pairs = list(zip(self.train_gpu_resources.indices, self.train_gpu_resources.local_ranks, strict=False))
-
-        topology = compute_validate_reuse_topology(
-            len(train_pairs),
-            self.tp_size,
-            self.n_gpus_per_node,
-        )
-        if topology is None:
-            logger.info("[RolloutManager] Validate GPU reuse disabled: no full TP group available on training GPUs")
-            return []
-
-        self._validate_reuse_topology = topology
-        use_gpus = topology["usable_gpus"]
-        num_workers = topology["num_workers"]
-        num_tp_groups = topology["num_tp_groups"]
-        gpus_per_rollout = topology["gpus_per_rollout"]
-        rollout_per_tp_group = topology["rollout_per_tp_group"]
-
-        selected_pairs = train_pairs[:use_gpus]
-        indices = [idx for idx, _ in selected_pairs]
-        local_ranks = [lr for _, lr in selected_pairs]
-
-        reuse_prefix = f"{self.name_prefix}_valreuse"
-        reuse_ray_class = RayClassWithInitArgs(ray.remote(RolloutWorker), self.config, num_tp_groups, self.metric_worker)
-
-        workers = []
-        for worker_idx in range(num_workers):
-            first_gpu_idx = worker_idx * gpus_per_rollout
-            bundle_idx = indices[first_gpu_idx]
-            local_rank = local_ranks[first_gpu_idx]
-            worker = self._create_worker(
-                rank=worker_idx,
-                local_rank=local_rank,
-                bundle_idx=bundle_idx,
-                num_gpus=0,
-                device_name=self.device_name,
-                num_cpus=0,
-                world_size=num_workers,
-                worker_prefix=reuse_prefix,
-                rollout_ray_class=reuse_ray_class,
-            )
-            workers.append(worker)
-
-        dist_init_addrs = {}
-        configs = []
-        for worker_idx in range(num_workers):
-            tp_group_idx = worker_idx // rollout_per_tp_group
-            node_rank = worker_idx % rollout_per_tp_group
-            first_gpu_idx = worker_idx * gpus_per_rollout
-            base_gpu_id = local_ranks[first_gpu_idx]
-            worker_local_ranks = local_ranks[first_gpu_idx : first_gpu_idx + gpus_per_rollout]
-            if rollout_per_tp_group > 1:
-                if node_rank == 0:
-                    dist_init_start_port = dist_port_base + tp_group_idx
-                    dist_init_addr = ray.get(workers[worker_idx].get_ip_port.remote(start_port=dist_init_start_port))
-                    dist_init_addrs[tp_group_idx] = dist_init_addr
-                else:
-                    dist_init_addr = dist_init_addrs[tp_group_idx]
-            else:
-                dist_init_addr = None
-            configs.append(
-                {
-                    "worker_idx": worker_idx,
-                    "base_gpu_id": base_gpu_id,
-                    "node_rank": node_rank,
-                    "nnodes": rollout_per_tp_group,
-                    "dist_init_addr": dist_init_addr,
-                    "is_tp0": node_rank == 0,
-                    "worker_local_ranks": worker_local_ranks,
-                }
-            )
-
-        worker_ips = {}
-        node_workers = defaultdict(list)
-        for cfg in configs:
-            worker = workers[cfg["worker_idx"]]
-            ip = ray.get(worker.get_ip.remote())
-            worker_ips[cfg["worker_idx"]] = ip
-            node_workers[ip].append((worker, cfg))
-
-        worker_reserved_ports = {}
-        for _, workers_on_node in node_workers.items():
-            first_worker = workers_on_node[0][0]
-            worker_count = len(workers_on_node)
-            ports = ray.get(first_worker.allocate_ports.remote(start_port=http_port_base, count=worker_count * retry_slots))
-            for i, (_, cfg) in enumerate(workers_on_node):
-                worker_reserved_ports[cfg["worker_idx"]] = [ports[i + j * worker_count] for j in range(retry_slots)]
-
-        init_futures = []
-        for cfg in configs:
-            worker = workers[cfg["worker_idx"]]
-            reserved_ports = worker_reserved_ports[cfg["worker_idx"]]
-            init_futures.append(
-                worker.init_engine.remote(
-                    rank=cfg["worker_idx"],
-                    dist_init_addr=cfg["dist_init_addr"],
-                    ip=worker_ips[cfg["worker_idx"]],
-                    port=reserved_ports[0],
-                    base_gpu_id=cfg["base_gpu_id"],
-                    node_rank=cfg["node_rank"],
-                    nnodes=cfg["nnodes"],
-                )
-            )
-        ray.get(init_futures)
-        launch_futures = []
-        for cfg in configs:
-            worker = workers[cfg["worker_idx"]]
-            reserved_ports = worker_reserved_ports[cfg["worker_idx"]]
-            launch_futures.append(worker.launch_server.remote(max_retries=len(reserved_ports), reserved_ports=reserved_ports))
-        ray.get(launch_futures)
-
-        tp0_workers = []
-        tp0_infos = []
-        for cfg in configs:
-            if cfg["is_tp0"]:
-                worker = workers[cfg["worker_idx"]]
-                tp0_workers.append(worker)
-                tp0_infos.append(
-                    {
-                        "worker": worker,
-                        "node_ip": worker_ips[cfg["worker_idx"]],
-                        "local_ranks": cfg["worker_local_ranks"],
-                    }
-                )
-        ray.get([w.init_validate_executor.remote(self.data_coordinator, num_tp_groups) for w in tp0_workers])
-
-        logger.info(f"[RolloutManager] Validate GPU reuse enabled: {use_gpus} train GPUs, " f"{len(tp0_workers)} extra TP0 workers")
-        self._validate_reuse_workers = workers
-        self._validate_reuse_tp0_workers = tp0_workers
-        self._validate_reuse_tp0_worker_infos = tp0_infos
-        return tp0_workers
 
     def start_rollout(self):
         """
@@ -985,26 +660,18 @@ class RolloutManager:
         return self.router_address
 
     def _set_validate_progress_state(self, *, active: bool, total: int, done: int, workers_active: int, workers_total: int):
-        self._validate_progress_active = active
-        self._validate_progress_total = max(0, int(total))
-        self._validate_progress_done = max(0, int(done))
-        self._validate_progress_workers_active = max(0, int(workers_active))
-        self._validate_progress_workers_total = max(0, int(workers_total))
-        self._validate_progress_step = int(rollout_to_train_step(self.global_steps))
-        self._validate_progress_rollout_index = int(self.global_steps)
-        self._validate_progress_last_update_ts = time.time()
+        self._validate_progress.set_state(
+            active=active,
+            total=total,
+            done=done,
+            workers_active=workers_active,
+            workers_total=workers_total,
+            step=rollout_to_train_step(self.global_steps),
+            rollout_index=self.global_steps,
+        )
 
     def get_validate_progress_snapshot(self):
-        return {
-            "active": self._validate_progress_active,
-            "total": self._validate_progress_total,
-            "done": self._validate_progress_done,
-            "workers_active": self._validate_progress_workers_active,
-            "workers_total": self._validate_progress_workers_total,
-            "step": self._validate_progress_step,
-            "rollout_index": self._validate_progress_rollout_index,
-            "last_update_ts": self._validate_progress_last_update_ts,
-        }
+        return self._validate_progress.snapshot()
 
     async def _monitor_validate_progress(self, assigned_workers: list[tuple], total_samples: int):
         total_samples = max(0, int(total_samples))
@@ -1051,7 +718,7 @@ class RolloutManager:
 
                 if done_samples >= total_samples:
                     return
-                await asyncio.sleep(VALIDATE_PROGRESS_POLL_INTERVAL_S)
+                await asyncio.sleep(PROGRESS_POLL_INTERVAL_S)
         finally:
             self._set_validate_progress_state(
                 active=False,
@@ -1067,7 +734,7 @@ class RolloutManager:
         """
         from loguru import logger
 
-        from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
+        from siirl.worker.validate.metrics import aggregate_and_log_validation_metrics
 
         val_start = time.time()
         self._validate_active = True
@@ -1086,30 +753,26 @@ class RolloutManager:
                     logger.warning(f"[RolloutManager] Validate GPU reuse init failed, fallback to rollout-only: {e}")
                     self._destroy_validate_reuse_pool()
 
-            if self._validate_reuse_tp0_workers:
-                self._validate_reuse_sync_required = True
-                self._validate_reuse_phase = "IDLE"
-                self._validate_reuse_abort_reason = ""
-                self._validate_reuse_active_session_id = None
-                self._validate_reuse_begin_ranks.clear()
-                self._validate_reuse_synced_ranks.clear()
-                self._validate_reuse_sync_plan_logged_ranks.clear()
+            if self._validate_reuse_pool.tp0_workers:
+                self._validate_reuse_coordinator.prepare_for_validation(sync_required=True)
+                trainer_world_size = self._validate_reuse_coordinator.trainer_world_size
                 logger.info(
                     "[RolloutManager] Start validate reuse sync wait "
-                    f"trainer_world_size={self._trainer_world_size} reuse_tp0_workers={len(self._validate_reuse_tp0_workers)}"
+                    f"trainer_world_size={trainer_world_size} reuse_tp0_workers={len(self._validate_reuse_pool.tp0_workers)}"
                 )
                 synced = await self._wait_validate_reuse_synced()
                 if not synced:
-                    missing = sorted(set(range(self._trainer_world_size)) - self._validate_reuse_synced_ranks)
+                    missing = self._validate_reuse_coordinator.missing_ranks()
+                    synced_count = self._validate_reuse_coordinator.synced_count()
                     logger.warning(
                         "[RolloutManager] Validate GPU reuse sync timeout, fallback to rollout-only "
-                        f"synced={len(self._validate_reuse_synced_ranks)}/{self._trainer_world_size} missing={missing}"
+                        f"synced={synced_count}/{trainer_world_size} missing={missing}"
                     )
                     self._reset_validate_reuse_sync_state()
                     self._destroy_validate_reuse_pool()
 
             logger.info("Starting validate rollout...")
-            validate_workers = self.get_rollout_worker_on_tp0() + self._validate_reuse_tp0_workers
+            validate_workers = self.get_rollout_worker_on_tp0() + self._validate_reuse_pool.tp0_workers
             all_val_samples = []
             drain_batch_size = max(val_batch_size * val_num_batch, len(validate_workers))
             while True:
