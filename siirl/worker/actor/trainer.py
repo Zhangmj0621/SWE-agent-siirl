@@ -710,7 +710,11 @@ class Trainer:
                 # Record get_batch timing
                 with Timer("get_batch") as get_batch_timer:
                     while (batch_data := self.get_batch(batch_size)) is None:
-                        time.sleep(0.1)
+                        did_sync = self._try_sync_validate_reuse_workers()
+                        if not did_sync:
+                            time.sleep(0.1)
+
+                self._try_sync_validate_reuse_workers()
 
                 # compare
                 self.train_step(batch_data)
