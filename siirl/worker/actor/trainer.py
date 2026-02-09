@@ -40,7 +40,6 @@ from siirl.utils.timer import Timer, TimerCollection
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
 
 VALIDATE_REUSE_GATE_POLL_INTERVAL_MS = 50
-VALIDATE_WAIT_LOG_INTERVAL_S = 5.0
 VALIDATE_SYNC_RETRY_SLEEP_S = 0.05
 TRAIN_NO_BATCH_BACKOFF_S = 0.1
 _VALIDATE_STATE_ACTIVE_IDX = 0
@@ -173,6 +172,8 @@ class Trainer:
         self.global_step = 0
         # Subtract prior checkpoint save overhead from next-step perf accounting.
         self._pending_ckpt_excluded_time = 0.0
+        self._validate_wait_session_id = _VALIDATE_STATE_NO_SESSION_ID
+        self._validate_wait_started_at = 0.0
 
         # Local batch cache for handling async data fetch race conditions
         # When some dp_ranks get data while others don't, the ones with data
@@ -427,9 +428,6 @@ class Trainer:
 
         rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
         poll_s = max(0.001, float(VALIDATE_REUSE_GATE_POLL_INTERVAL_MS) / 1000.0)
-        waited = False
-        wait_start = time.time()
-        next_log_ts = wait_start + VALIDATE_WAIT_LOG_INTERVAL_S
 
         while True:
             state_tensor = torch.zeros(_VALIDATE_STATE_NUM_FIELDS, dtype=torch.int64)
@@ -449,27 +447,27 @@ class Trainer:
             dist.broadcast(state_tensor, src=0, group=get_gloo_group())
             is_active = bool(state_tensor[_VALIDATE_STATE_ACTIVE_IDX].item())
             sync_required = bool(state_tensor[_VALIDATE_STATE_SYNC_REQUIRED_IDX].item())
+            session_id = int(state_tensor[_VALIDATE_STATE_SESSION_ID_IDX].item())
             if not is_active:
-                if waited and self.rank == 0:
-                    logger.info(f"[Trainer rank=0] Validate wait finished in {time.time() - wait_start:.2f}s")
+                if self.rank == 0 and self._validate_wait_started_at > 0:
+                    elapsed_s = time.time() - self._validate_wait_started_at
+                    logger.info(
+                        f"[Trainer rank=0] Validate wait finished in {elapsed_s:.2f}s " f"session_id={self._validate_wait_session_id}"
+                    )
+                self._validate_wait_session_id = _VALIDATE_STATE_NO_SESSION_ID
+                self._validate_wait_started_at = 0.0
                 return _ValidateGateDecision.PROCEED
 
             if sync_required:
-                if self.rank == 0 and time.time() >= next_log_ts:
-                    logger.info(
-                        "[Trainer rank=0] Validate sync required, retrying sync "
-                        f"session_id={int(state_tensor[_VALIDATE_STATE_SESSION_ID_IDX].item())}"
-                    )
-                    next_log_ts = time.time() + VALIDATE_WAIT_LOG_INTERVAL_S
+                self._validate_wait_session_id = _VALIDATE_STATE_NO_SESSION_ID
+                self._validate_wait_started_at = 0.0
                 return _ValidateGateDecision.RETRY_SYNC
 
-            waited = True
-            if self.rank == 0 and time.time() >= next_log_ts:
-                logger.info(
-                    "[Trainer rank=0] Waiting validate to finish before train_step "
-                    f"session_id={int(state_tensor[_VALIDATE_STATE_SESSION_ID_IDX].item())}"
-                )
-                next_log_ts = time.time() + VALIDATE_WAIT_LOG_INTERVAL_S
+            if self._validate_wait_started_at <= 0 or self._validate_wait_session_id != session_id:
+                self._validate_wait_session_id = session_id
+                self._validate_wait_started_at = time.time()
+                if self.rank == 0:
+                    logger.info(f"[Trainer rank=0] Validate wait start session_id={session_id}")
             time.sleep(poll_s)
 
     def has_critic(self):
