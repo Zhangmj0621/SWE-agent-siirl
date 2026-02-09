@@ -32,11 +32,13 @@ from siirl.engine.actor.utils import set_random_seed
 from siirl.engine.param_sync.update_weight import ParamSyncDistributed
 from siirl.params import SiiRLArguments, TrainingArguments
 from siirl.utils.backend.device import get_nccl_backend, get_torch_device
-from siirl.utils.distributed_utils import init_gloo_group
+from siirl.utils.distributed_utils import get_gloo_group, init_gloo_group
 from siirl.utils.logger.memory_profiler import MemoryProfiler
 from siirl.utils.megatron.megatron_utils import offload_megatron_model_to_cpu
 from siirl.utils.timer import Timer, TimerCollection
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
+
+VALIDATE_REUSE_GATE_POLL_INTERVAL_MS = 50
 
 
 def global_initialize_model_parallel(config: TrainingArguments):
@@ -323,11 +325,64 @@ class Trainer:
     def _try_sync_validate_reuse_workers(self) -> bool:
         if self.rollout_manager is None:
             return False
+
         sync_plan = ray.get(self.rollout_manager.get_validate_reuse_sync_plan.remote(self.rank))
         distributed_workers = sync_plan.get("distributed_workers", [])
         tensor_workers = sync_plan.get("tensor_workers", [])
-        if not distributed_workers and not tensor_workers:
+        needs_sync_local = 1 if (distributed_workers or tensor_workers) else 0
+        needs_sync_tensor = torch.tensor([needs_sync_local], dtype=torch.int32)
+        dist.all_reduce(needs_sync_tensor, op=dist.ReduceOp.MAX, group=get_gloo_group())
+        if needs_sync_tensor.item() == 0:
             return False
+
+        rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+        session_id_tensor = torch.tensor([-1], dtype=torch.int64)
+        if self.rank == 0:
+            try:
+                session_id_tensor[0] = int(ray.get(self.rollout_manager.start_validate_reuse_sync_session.remote(), timeout=rpc_timeout_s))
+            except Exception as e:
+                logger.error(f"[Trainer rank=0] Failed to allocate validate reuse session: {e}")
+                session_id_tensor[0] = -1
+        dist.broadcast(session_id_tensor, src=0, group=get_gloo_group())
+        session_id = int(session_id_tensor.item())
+        if session_id < 0:
+            return False
+
+        begin_result = ray.get(self.rollout_manager.mark_validate_reuse_begin.remote(self.rank, session_id), timeout=rpc_timeout_s)
+        if not begin_result.get("accepted", False):
+            logger.warning(
+                f"[Trainer rank={self.rank}] Validate reuse begin rejected: "
+                f"phase={begin_result.get('phase')} reason={begin_result.get('reason')}"
+            )
+
+        begin_timeout_s = max(1, int(getattr(self.config.trainer, "validate_reuse_begin_timeout_s", 30)))
+        gate_poll_s = max(0.001, float(VALIDATE_REUSE_GATE_POLL_INTERVAL_MS) / 1000.0)
+        gate_decision = torch.tensor([0], dtype=torch.int32)
+        if self.rank == 0:
+            deadline = time.time() + begin_timeout_s
+            gate_reason = ""
+            while True:
+                gate_state = ray.get(self.rollout_manager.get_validate_reuse_sync_gate.remote(session_id), timeout=rpc_timeout_s)
+                proceed = gate_state.get("proceed")
+                if proceed is True:
+                    gate_decision[0] = 1
+                    break
+                if proceed is False:
+                    gate_reason = gate_state.get("reason", "aborted")
+                    gate_decision[0] = -1
+                    break
+                if time.time() >= deadline:
+                    gate_reason = f"validate reuse begin timeout after {begin_timeout_s}s"
+                    ray.get(self.rollout_manager.abort_validate_reuse_sync_session.remote(session_id, gate_reason), timeout=rpc_timeout_s)
+                    gate_decision[0] = -1
+                    break
+                time.sleep(gate_poll_s)
+            if gate_decision.item() < 0:
+                logger.warning(f"[Trainer rank=0] Validate reuse sync gate aborted: {gate_reason or 'unknown'}")
+        dist.broadcast(gate_decision, src=0, group=get_gloo_group())
+        if gate_decision.item() < 0:
+            return False
+
         start = time.time()
         logger.info(
             f"[Trainer rank={self.rank}] Validate reuse sync start: "
@@ -335,9 +390,9 @@ class Trainer:
             f"weight_version={self.get_current_weight_version()}"
         )
         self._sync_rollout_workers(distributed_workers, tensor_workers)
-        regular_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
+        regular_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote(), timeout=rpc_timeout_s)
         self._sync_rollout_workers(regular_workers)
-        ray.get(self.rollout_manager.mark_validate_reuse_synced.remote(self.rank))
+        ray.get(self.rollout_manager.mark_validate_reuse_synced.remote(self.rank, session_id), timeout=rpc_timeout_s)
         logger.info(
             f"[Trainer rank={self.rank}] Validate reuse sync done in {time.time() - start:.2f}s "
             f"weight_version={self.get_current_weight_version()}"
@@ -650,10 +705,11 @@ class Trainer:
                 if self.rank == 0:
                     ray.get(self.rollout_manager.next_rollout.remote())
 
+                self._try_sync_validate_reuse_workers()
+
                 # Record get_batch timing
                 with Timer("get_batch") as get_batch_timer:
                     while (batch_data := self.get_batch(batch_size)) is None:
-                        self._try_sync_validate_reuse_workers()
                         time.sleep(0.1)
 
                 # compare

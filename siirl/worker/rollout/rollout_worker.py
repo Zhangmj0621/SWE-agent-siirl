@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import importlib
 import os
 import threading
@@ -162,7 +163,7 @@ class RolloutWorker:
             self.ip = ip
             self.port = port
 
-    def launch_server(self, max_retries: int = 3):
+    def launch_server(self, max_retries: int = 3, reserved_ports: list[int] | None = None):
         """
         Launch the SGLang server with retry mechanism for port conflicts.
 
@@ -171,22 +172,40 @@ class RolloutWorker:
 
         Args:
             max_retries: Maximum number of retry attempts (default: 3)
+            reserved_ports: Optional reserved ports for this worker. When provided,
+                retries are limited to this list to avoid cross-worker port stealing.
         """
-        for attempt in range(max_retries):
+        candidate_ports = []
+        if reserved_ports:
+            seen_ports = set()
+            for port in reserved_ports:
+                if port in seen_ports:
+                    continue
+                seen_ports.add(port)
+                candidate_ports.append(port)
+
+        attempt_budget = min(max_retries, len(candidate_ports)) if candidate_ports else max_retries
+
+        for attempt in range(attempt_budget):
+            if candidate_ports:
+                target_port = candidate_ports[attempt]
+            elif attempt == 0:
+                target_port = self.port
+            else:
+                target_port = get_free_port(get_net_interface_ip(), start_port=self.port + 1)
+
+            self.port = target_port
+            self.engine.port = target_port
             try:
                 self.engine.launch_server()
                 return  # Success
             except Exception as e:
-                if attempt < max_retries - 1:
-                    # Get a new port and retry
-                    new_port = get_free_port(get_net_interface_ip(), start_port=self.port + 1)
-                    logger.warning(
-                        f"Port {self.port} conflict (attempt {attempt + 1}/{max_retries}), " f"retrying with port {new_port}: {e}"
-                    )
-                    self.port = new_port
-                    self.engine.port = new_port
+                with contextlib.suppress(Exception):
+                    self.engine.shutdown()
+                if attempt < attempt_budget - 1:
+                    logger.warning(f"Port {self.port} conflict (attempt {attempt + 1}/{attempt_budget}), retrying: {e}")
                 else:
-                    logger.error(f"Failed to start server after {max_retries} attempts")
+                    logger.error(f"Failed to start server after {attempt_budget} attempts")
                     raise
 
     def start_rollout(self, router_address, data_coordinator, num_engine):

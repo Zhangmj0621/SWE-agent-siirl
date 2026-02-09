@@ -96,6 +96,14 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Reuse training GPUs to scale validation in separated mode"},
     )
+    validate_reuse_begin_timeout_s: int = field(
+        default=30,
+        metadata={"help": "Timeout in seconds for trainer ranks to rendezvous before validate-reuse sync"},
+    )
+    param_sync_rpc_timeout_s: int = field(
+        default=120,
+        metadata={"help": "Timeout in seconds for param sync RPC calls to rollout workers"},
+    )
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
     pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
     context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})

@@ -211,6 +211,9 @@ class SglangEngine:
     def set_router(self, router_address):
         self.router_address = router_address
 
+    def _rpc_timeout_s(self) -> int:
+        return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+
     def _get_sampling_params(self, is_validate: bool, input_len: int | None = None) -> dict:
         """Get sampling parameters based on mode (train/validate)."""
         params = copy.deepcopy(self.sampling_params)
@@ -384,10 +387,11 @@ class SglangEngine:
         """Flush the cache of the server."""
         if self.rank != 0:
             return
+        timeout_s = self._rpc_timeout_s()
         # flush cache will not return status_code 200 when there are pending requests
         for _ in range(60):
             try:
-                response = requests.get(f"{self.sgl_args.url()}/flush_cache")
+                response = requests.get(f"{self.sgl_args.url()}/flush_cache", timeout=timeout_s)
                 if response.status_code == 200:
                     break
             except NewConnectionError as e:
@@ -400,12 +404,12 @@ class SglangEngine:
             raise TimeoutError("Timeout while flushing cache.")
 
     def pause_generation(self):
-        response = requests.post(f"{self.sgl_args.url()}/pause_generation", json={})
+        response = requests.post(f"{self.sgl_args.url()}/pause_generation", json={}, timeout=self._rpc_timeout_s())
         response.raise_for_status()
         return response
 
     def continue_generation(self):
-        response = requests.post(f"{self.sgl_args.url()}/continue_generation", json={})
+        response = requests.post(f"{self.sgl_args.url()}/continue_generation", json={}, timeout=self._rpc_timeout_s())
         response.raise_for_status()
         return response
 
@@ -423,7 +427,7 @@ class SglangEngine:
             return
 
         url = f"{self.sgl_args.url()}/{endpoint}"
-        response = requests.post(url, json=payload or {})
+        response = requests.post(url, json=payload or {}, timeout=self._rpc_timeout_s())
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError:
@@ -496,7 +500,7 @@ class SglangEngine:
             return
 
         url = f"{self.sgl_args.url()}/destroy_weights_update_group"
-        response = requests.post(url, json={"group_name": group_name})
+        response = requests.post(url, json={"group_name": group_name}, timeout=self._rpc_timeout_s())
         if response.status_code < 400:
             return response.json()
         if "does not exist" in response.text:
