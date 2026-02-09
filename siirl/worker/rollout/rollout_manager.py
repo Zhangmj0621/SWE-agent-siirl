@@ -184,6 +184,7 @@ class RolloutManager:
         self._validate_reuse_phase = "IDLE"
         self._validate_reuse_abort_reason = ""
         self._validate_reuse_session_counter = 0
+        self._validate_active = False
         self._validate_reuse_active_session_id: int | None = None
         self._validate_reuse_last_destroy_ts = 0.0
         self._validate_reuse_port_window_idx = -1
@@ -210,6 +211,7 @@ class RolloutManager:
         self._validate_progress_workers_active = 0
         self._validate_progress_workers_total = 0
         self._validate_progress_step = 0
+        self._validate_progress_rollout_index = 0
         self._validate_progress_last_update_ts = 0.0
 
         # Initialize workers, engines, router and start rollout
@@ -519,6 +521,15 @@ class RolloutManager:
         if not self._validate_reuse_sync_required:
             return []
         return self._validate_reuse_tp0_workers
+
+    def get_validate_active_state(self):
+        session_id = self._validate_reuse_active_session_id
+        return {
+            "active": bool(self._validate_active),
+            "phase": self._validate_reuse_phase,
+            "session_id": int(session_id) if session_id is not None else -1,
+            "global_steps": int(self.global_steps),
+        }
 
     def _reset_validate_reuse_sync_state(self):
         self._validate_reuse_sync_required = False
@@ -964,7 +975,8 @@ class RolloutManager:
                 self.global_steps = next_step
                 if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     await self.validate(val_num_batch, dp_val_batch)
-                logger.info(f"Start Rollout Step {rollout_to_train_step(self.global_steps)} " f"(rollout_index={self.global_steps})")
+                train_step = rollout_to_train_step(self.global_steps)
+                logger.info(f"Start rollout generation for train_step={train_step} (rollout_index={self.global_steps})")
 
     def next_rollout(self):
         self.event.set()
@@ -976,7 +988,8 @@ class RolloutManager:
         self._validate_progress_done = max(0, int(done))
         self._validate_progress_workers_active = max(0, int(workers_active))
         self._validate_progress_workers_total = max(0, int(workers_total))
-        self._validate_progress_step = int(self.global_steps)
+        self._validate_progress_step = int(rollout_to_train_step(self.global_steps))
+        self._validate_progress_rollout_index = int(self.global_steps)
         self._validate_progress_last_update_ts = time.time()
 
     def get_validate_progress_snapshot(self):
@@ -987,6 +1000,7 @@ class RolloutManager:
             "workers_active": self._validate_progress_workers_active,
             "workers_total": self._validate_progress_workers_total,
             "step": self._validate_progress_step,
+            "rollout_index": self._validate_progress_rollout_index,
             "last_update_ts": self._validate_progress_last_update_ts,
         }
 
@@ -1054,6 +1068,7 @@ class RolloutManager:
         from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
 
         val_start = time.time()
+        self._validate_active = True
         self._set_validate_progress_state(active=False, total=0, done=0, workers_active=0, workers_total=0)
         try:
             for _ in range(val_num_batch):
@@ -1135,9 +1150,11 @@ class RolloutManager:
                 from siirl.utils.metrics import restore_weighted_metrics
 
                 val_metrics = restore_weighted_metrics(val_metrics)
-            logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
-            self.message_queue.append((val_metrics, self.global_steps))
+            train_step = rollout_to_train_step(self.global_steps)
+            logger.info(f"Validate Metrics train_step={train_step} rollout_index={self.global_steps}: {val_metrics}")
+            self.message_queue.append((val_metrics, train_step))
         finally:
+            self._validate_active = False
             self._reset_validate_reuse_sync_state()
             self._destroy_validate_reuse_pool()
             self._val_time_acc += time.time() - val_start

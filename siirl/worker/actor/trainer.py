@@ -407,6 +407,41 @@ class Trainer:
         )
         return True
 
+    def _wait_validate_idle(self) -> bool:
+        if self.rollout_manager is None:
+            return False
+
+        rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+        poll_s = max(0.001, float(VALIDATE_REUSE_GATE_POLL_INTERVAL_MS) / 1000.0)
+        waited = False
+        wait_start = time.time()
+        next_log_ts = wait_start + 5.0
+
+        while True:
+            state_tensor = torch.tensor([0, -1], dtype=torch.int64)
+            if self.rank == 0:
+                try:
+                    state = ray.get(self.rollout_manager.get_validate_active_state.remote(), timeout=rpc_timeout_s)
+                    state_tensor[0] = 1 if bool(state.get("active", False)) else 0
+                    state_tensor[1] = int(state.get("session_id", -1))
+                except Exception as e:
+                    logger.warning(f"[Trainer rank=0] Failed to query validate active state: {e}")
+                    state_tensor[0] = 0
+                    state_tensor[1] = -1
+
+            dist.broadcast(state_tensor, src=0, group=get_gloo_group())
+            is_active = bool(state_tensor[0].item())
+            if not is_active:
+                if waited and self.rank == 0:
+                    logger.info(f"[Trainer rank=0] Validate wait finished in {time.time() - wait_start:.2f}s")
+                return waited
+
+            waited = True
+            if self.rank == 0 and time.time() >= next_log_ts:
+                logger.info(f"[Trainer rank=0] Waiting validate to finish before train_step " f"session_id={int(state_tensor[1].item())}")
+                next_log_ts = time.time() + 5.0
+            time.sleep(poll_s)
+
     def has_critic(self):
         return self.critic_worker is not None
 
@@ -761,9 +796,11 @@ class Trainer:
                     while (batch_data := self.get_batch(batch_size)) is None:
                         did_sync = self._try_sync_validate_reuse_workers()
                         if not did_sync:
+                            self._wait_validate_idle()
                             time.sleep(0.1)
 
                 self._try_sync_validate_reuse_workers()
+                self._wait_validate_idle()
 
                 # compare
                 self.train_step(batch_data)

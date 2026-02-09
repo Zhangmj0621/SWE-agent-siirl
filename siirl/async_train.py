@@ -44,11 +44,14 @@ class _ValidateProgressMonitor:
         self.rollout_manager = None
         self.progress_bar = None
         self.last_key = None
+        self.last_progress_rollout_index = -1
+        self.last_completed_rollout_index = -1
         try:
             from tqdm.auto import tqdm
         except Exception:
             tqdm = None
         self.tqdm = tqdm
+        self.use_tqdm = self.tqdm is not None and bool(getattr(sys.stdout, "isatty", lambda: False)())
 
     def close(self):
         if self.progress_bar is not None:
@@ -71,20 +74,26 @@ class _ValidateProgressMonitor:
         done = max(0, int(snapshot.get("done", 0)))
         active = bool(snapshot.get("active", False))
         step = int(snapshot.get("step", 0))
+        rollout_index = int(snapshot.get("rollout_index", 0))
         workers_active = max(0, int(snapshot.get("workers_active", 0)))
         workers_total = max(0, int(snapshot.get("workers_total", 0)))
-        key = (active, total, done, step, workers_active, workers_total)
+        key = (active, total, done, step, rollout_index, workers_active, workers_total)
         if key == self.last_key:
             return
         self.last_key = key
 
-        if self.tqdm is None:
-            return
-
-        if active and total > 0:
-            if self.progress_bar is None or self.progress_bar.total != total:
+        if self.use_tqdm and active and total > 0:
+            if self.progress_bar is None or self.progress_bar.total != total or self.last_progress_rollout_index != rollout_index:
                 self.close()
-                self.progress_bar = self.tqdm(total=total, desc=f"Validate@step{step}", unit="sample", dynamic_ncols=True, leave=False)
+                self.progress_bar = self.tqdm(
+                    total=total,
+                    desc=f"Validate@step{step}",
+                    unit="sample",
+                    dynamic_ncols=True,
+                    leave=True,
+                    file=sys.stdout,
+                )
+                self.last_progress_rollout_index = rollout_index
             self.progress_bar.n = min(done, total)
             self.progress_bar.set_postfix_str(f"active={workers_active}/{workers_total}", refresh=False)
             self.progress_bar.refresh()
@@ -92,9 +101,19 @@ class _ValidateProgressMonitor:
 
         if self.progress_bar is not None:
             if total > 0:
-                self.progress_bar.n = min(done, total)
+                self.progress_bar.n = total if not active else min(done, total)
                 self.progress_bar.refresh()
             self.close()
+
+        if not self.use_tqdm and total > 0 and not active and rollout_index > self.last_completed_rollout_index:
+            done_clamped = min(done, total)
+            pct = 100.0 * done_clamped / total
+            print(
+                f"Validate@step{step} done: {done_clamped}/{total} ({pct:.1f}%), "
+                f"workers_active={workers_active}/{workers_total}, rollout_index={rollout_index}",
+                flush=True,
+            )
+            self.last_completed_rollout_index = rollout_index
 
 
 @ray.remote(num_cpus=MAIN_RUNNER_CPU_RESERVATION)
