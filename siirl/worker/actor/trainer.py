@@ -17,6 +17,7 @@ import datetime
 import os
 import time
 import traceback
+from enum import Enum
 
 import ray
 import torch
@@ -39,6 +40,19 @@ from siirl.utils.timer import Timer, TimerCollection
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
 
 VALIDATE_REUSE_GATE_POLL_INTERVAL_MS = 50
+VALIDATE_WAIT_LOG_INTERVAL_S = 5.0
+VALIDATE_SYNC_RETRY_SLEEP_S = 0.05
+TRAIN_NO_BATCH_BACKOFF_S = 0.1
+_VALIDATE_STATE_ACTIVE_IDX = 0
+_VALIDATE_STATE_SYNC_REQUIRED_IDX = 1
+_VALIDATE_STATE_SESSION_ID_IDX = 2
+_VALIDATE_STATE_NUM_FIELDS = 3
+_VALIDATE_STATE_NO_SESSION_ID = -1
+
+
+class _ValidateGateDecision(str, Enum):
+    PROCEED = "proceed"
+    RETRY_SYNC = "retry_sync"
 
 
 def global_initialize_model_parallel(config: TrainingArguments):
@@ -407,39 +421,55 @@ class Trainer:
         )
         return True
 
-    def _wait_validate_idle(self) -> bool:
+    def _wait_validate_idle(self) -> _ValidateGateDecision:
         if self.rollout_manager is None:
-            return False
+            return _ValidateGateDecision.PROCEED
 
         rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
         poll_s = max(0.001, float(VALIDATE_REUSE_GATE_POLL_INTERVAL_MS) / 1000.0)
         waited = False
         wait_start = time.time()
-        next_log_ts = wait_start + 5.0
+        next_log_ts = wait_start + VALIDATE_WAIT_LOG_INTERVAL_S
 
         while True:
-            state_tensor = torch.tensor([0, -1], dtype=torch.int64)
+            state_tensor = torch.zeros(_VALIDATE_STATE_NUM_FIELDS, dtype=torch.int64)
+            state_tensor[_VALIDATE_STATE_SESSION_ID_IDX] = _VALIDATE_STATE_NO_SESSION_ID
             if self.rank == 0:
                 try:
                     state = ray.get(self.rollout_manager.get_validate_active_state.remote(), timeout=rpc_timeout_s)
-                    state_tensor[0] = 1 if bool(state.get("active", False)) else 0
-                    state_tensor[1] = int(state.get("session_id", -1))
+                    state_tensor[_VALIDATE_STATE_ACTIVE_IDX] = 1 if bool(state.get("active", False)) else 0
+                    state_tensor[_VALIDATE_STATE_SYNC_REQUIRED_IDX] = 1 if bool(state.get("sync_required", False)) else 0
+                    state_tensor[_VALIDATE_STATE_SESSION_ID_IDX] = int(state.get("session_id", _VALIDATE_STATE_NO_SESSION_ID))
                 except Exception as e:
                     logger.warning(f"[Trainer rank=0] Failed to query validate active state: {e}")
-                    state_tensor[0] = 0
-                    state_tensor[1] = -1
+                    state_tensor[_VALIDATE_STATE_ACTIVE_IDX] = 0
+                    state_tensor[_VALIDATE_STATE_SYNC_REQUIRED_IDX] = 0
+                    state_tensor[_VALIDATE_STATE_SESSION_ID_IDX] = _VALIDATE_STATE_NO_SESSION_ID
 
             dist.broadcast(state_tensor, src=0, group=get_gloo_group())
-            is_active = bool(state_tensor[0].item())
+            is_active = bool(state_tensor[_VALIDATE_STATE_ACTIVE_IDX].item())
+            sync_required = bool(state_tensor[_VALIDATE_STATE_SYNC_REQUIRED_IDX].item())
             if not is_active:
                 if waited and self.rank == 0:
                     logger.info(f"[Trainer rank=0] Validate wait finished in {time.time() - wait_start:.2f}s")
-                return waited
+                return _ValidateGateDecision.PROCEED
+
+            if sync_required:
+                if self.rank == 0 and time.time() >= next_log_ts:
+                    logger.info(
+                        "[Trainer rank=0] Validate sync required, retrying sync "
+                        f"session_id={int(state_tensor[_VALIDATE_STATE_SESSION_ID_IDX].item())}"
+                    )
+                    next_log_ts = time.time() + VALIDATE_WAIT_LOG_INTERVAL_S
+                return _ValidateGateDecision.RETRY_SYNC
 
             waited = True
             if self.rank == 0 and time.time() >= next_log_ts:
-                logger.info(f"[Trainer rank=0] Waiting validate to finish before train_step " f"session_id={int(state_tensor[1].item())}")
-                next_log_ts = time.time() + 5.0
+                logger.info(
+                    "[Trainer rank=0] Waiting validate to finish before train_step "
+                    f"session_id={int(state_tensor[_VALIDATE_STATE_SESSION_ID_IDX].item())}"
+                )
+                next_log_ts = time.time() + VALIDATE_WAIT_LOG_INTERVAL_S
             time.sleep(poll_s)
 
     def has_critic(self):
@@ -795,12 +825,20 @@ class Trainer:
                 with Timer("get_batch") as get_batch_timer:
                     while (batch_data := self.get_batch(batch_size)) is None:
                         did_sync = self._try_sync_validate_reuse_workers()
+                        gate_decision = self._wait_validate_idle()
+                        if gate_decision is _ValidateGateDecision.RETRY_SYNC:
+                            time.sleep(VALIDATE_SYNC_RETRY_SLEEP_S)
+                            continue
                         if not did_sync:
-                            self._wait_validate_idle()
-                            time.sleep(0.1)
+                            time.sleep(TRAIN_NO_BATCH_BACKOFF_S)
 
-                self._try_sync_validate_reuse_workers()
-                self._wait_validate_idle()
+                while True:
+                    self._try_sync_validate_reuse_workers()
+                    gate_decision = self._wait_validate_idle()
+                    if gate_decision is _ValidateGateDecision.RETRY_SYNC:
+                        time.sleep(VALIDATE_SYNC_RETRY_SLEEP_S)
+                        continue
+                    break
 
                 # compare
                 self.train_step(batch_data)

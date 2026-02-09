@@ -41,6 +41,7 @@ VALIDATE_REUSE_RECREATE_COOLDOWN_S = 3.0
 VALIDATE_REUSE_PORT_STRIDE = 128
 VALIDATE_REUSE_PORT_CYCLE = 10
 VALIDATE_REUSE_PORT_RETRY_SLOTS = 3
+VALIDATE_NO_SESSION_ID = -1
 
 
 def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
@@ -526,8 +527,9 @@ class RolloutManager:
         session_id = self._validate_reuse_active_session_id
         return {
             "active": bool(self._validate_active),
+            "sync_required": bool(self._validate_reuse_sync_required),
             "phase": self._validate_reuse_phase,
-            "session_id": int(session_id) if session_id is not None else -1,
+            "session_id": int(session_id) if session_id is not None else VALIDATE_NO_SESSION_ID,
             "global_steps": int(self.global_steps),
         }
 
