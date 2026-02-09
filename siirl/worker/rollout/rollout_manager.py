@@ -1153,7 +1153,6 @@ class RolloutManager:
 
                 val_metrics = restore_weighted_metrics(val_metrics)
             train_step = rollout_to_train_step(self.global_steps)
-            logger.info(f"Validate Metrics train_step={train_step} rollout_index={self.global_steps}: {val_metrics}")
             self.message_queue.append((val_metrics, train_step))
         finally:
             self._validate_active = False
