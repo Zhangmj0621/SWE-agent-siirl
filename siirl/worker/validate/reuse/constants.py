@@ -19,8 +19,6 @@ SYNC_TIMEOUT_S = 120
 SYNC_LOG_INTERVAL_S = 5.0
 GATE_POLL_INTERVAL_MS = 50
 SYNC_RETRY_SLEEP_S = 0.05
-# Session id sentinel used before rank0 allocates a real sync session.
-NO_SESSION_ID = -1
 
 # === Worker pool lifecycle ===
 GRACEFUL_SHUTDOWN_TIMEOUT_S = 15
@@ -37,5 +35,6 @@ PROGRESS_POLL_INTERVAL_S = 2.0
 # Fixed indices keep broadcast payload layout stable across trainer ranks.
 STATE_ACTIVE_IDX = 0
 STATE_SYNC_REQUIRED_IDX = 1
-STATE_SESSION_ID_IDX = 2
-STATE_NUM_FIELDS = 3
+STATE_HAS_SESSION_IDX = 2
+STATE_SESSION_ID_IDX = 3
+STATE_NUM_FIELDS = 4

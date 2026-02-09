@@ -35,7 +35,6 @@ from siirl.worker.ray_utils import GPUResources, RayClassWithInitArgs, get_rando
 from siirl.worker.validate.progress import ValidateProgressTracker
 from siirl.worker.validate.reuse.constants import (
     GRACEFUL_SHUTDOWN_TIMEOUT_S,
-    NO_SESSION_ID,
     PORT_CYCLE,
     PORT_RETRY_SLOTS,
     PORT_STRIDE,
@@ -462,7 +461,6 @@ class RolloutManager:
         return self._validate_reuse_coordinator.get_active_state(
             validate_active=self._validate_active,
             global_steps=self.global_steps,
-            no_session_id=NO_SESSION_ID,
         )
 
     def _reset_validate_reuse_sync_state(self):
@@ -500,8 +498,8 @@ class RolloutManager:
             "phase": self._validate_reuse_coordinator.phase,
         }
 
-    def start_validate_reuse_sync_session(self) -> int:
-        return self._validate_reuse_coordinator.start_session(no_session_id=NO_SESSION_ID)
+    def start_validate_reuse_sync_session(self) -> int | None:
+        return self._validate_reuse_coordinator.start_session()
 
     def mark_validate_reuse_begin(self, trainer_rank: int, session_id: int):
         return self._validate_reuse_coordinator.mark_begin(trainer_rank, session_id)

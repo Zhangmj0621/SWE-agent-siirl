@@ -27,8 +27,8 @@ from loguru import logger
 from siirl.utils.distributed_utils import get_gloo_group
 from siirl.worker.validate.reuse.constants import (
     GATE_POLL_INTERVAL_MS,
-    NO_SESSION_ID,
     STATE_ACTIVE_IDX,
+    STATE_HAS_SESSION_IDX,
     STATE_NUM_FIELDS,
     STATE_SESSION_ID_IDX,
     STATE_SYNC_REQUIRED_IDX,
@@ -61,7 +61,7 @@ class ValidateReuseTrainerSync:
         self._get_regular_workers_fn = get_regular_workers_fn
         self._ensure_regular_workers_fn = ensure_regular_workers_fn
         self._get_current_weight_version_fn = get_current_weight_version_fn
-        self._wait_session_id = NO_SESSION_ID
+        self._wait_session_id: int | None = None
         self._wait_started_at = 0.0
 
     def _rpc_timeout_s(self) -> int:
@@ -88,18 +88,24 @@ class ValidateReuseTrainerSync:
         if needs_sync_tensor.item() == 0:
             return False
 
-        session_id_tensor = torch.tensor([NO_SESSION_ID], dtype=torch.int64)
+        session_state_tensor = torch.zeros(2, dtype=torch.int64)
         rpc_timeout_s = self._rpc_timeout_s()
         if self._rank == 0:
             try:
-                session_id_tensor[0] = int(ray.get(self._rollout_manager.start_validate_reuse_sync_session.remote(), timeout=rpc_timeout_s))
+                session_id = ray.get(
+                    self._rollout_manager.start_validate_reuse_sync_session.remote(),
+                    timeout=rpc_timeout_s,
+                )
+                if session_id is not None:
+                    session_state_tensor[0] = 1
+                    session_state_tensor[1] = int(session_id)
             except Exception as e:
                 logger.error(f"[Trainer rank=0] Failed to allocate validate reuse session: {e}")
-                session_id_tensor[0] = NO_SESSION_ID
         # Rank0 is the single session allocator to avoid split-brain sessions.
-        dist.broadcast(session_id_tensor, src=0, group=get_gloo_group())
-        session_id = int(session_id_tensor.item())
-        if session_id < 0:
+        dist.broadcast(session_state_tensor, src=0, group=get_gloo_group())
+        has_session = bool(session_state_tensor[0].item())
+        session_id = int(session_state_tensor[1].item())
+        if not has_session:
             return False
 
         begin_result = ray.get(
@@ -173,34 +179,37 @@ class ValidateReuseTrainerSync:
         poll_s = self._poll_sleep_s()
         while True:
             state_tensor = torch.zeros(STATE_NUM_FIELDS, dtype=torch.int64)
-            state_tensor[STATE_SESSION_ID_IDX] = NO_SESSION_ID
             if self._rank == 0:
                 try:
                     state = ray.get(self._rollout_manager.get_validate_active_state.remote(), timeout=rpc_timeout_s)
                     state_tensor[STATE_ACTIVE_IDX] = 1 if bool(state.get("active", False)) else 0
                     state_tensor[STATE_SYNC_REQUIRED_IDX] = 1 if bool(state.get("sync_required", False)) else 0
-                    state_tensor[STATE_SESSION_ID_IDX] = int(state.get("session_id", NO_SESSION_ID))
+                    state_tensor[STATE_HAS_SESSION_IDX] = 1 if bool(state.get("has_session", False)) else 0
+                    state_tensor[STATE_SESSION_ID_IDX] = int(state.get("session_id", 0))
                 except Exception as e:
                     logger.warning(f"[Trainer rank=0] Failed to query validate active state: {e}")
                     state_tensor[STATE_ACTIVE_IDX] = 0
                     state_tensor[STATE_SYNC_REQUIRED_IDX] = 0
-                    state_tensor[STATE_SESSION_ID_IDX] = NO_SESSION_ID
+                    state_tensor[STATE_HAS_SESSION_IDX] = 0
+                    state_tensor[STATE_SESSION_ID_IDX] = 0
 
             dist.broadcast(state_tensor, src=0, group=get_gloo_group())
             is_active = bool(state_tensor[STATE_ACTIVE_IDX].item())
             sync_required = bool(state_tensor[STATE_SYNC_REQUIRED_IDX].item())
-            session_id = int(state_tensor[STATE_SESSION_ID_IDX].item())
+            has_session = bool(state_tensor[STATE_HAS_SESSION_IDX].item())
+            session_id = int(state_tensor[STATE_SESSION_ID_IDX].item()) if has_session else None
             if not is_active:
                 if self._rank == 0 and self._wait_started_at > 0:
                     elapsed_s = time.time() - self._wait_started_at
-                    logger.info(f"[Trainer rank=0] Validate wait finished in {elapsed_s:.2f}s " f"session_id={self._wait_session_id}")
-                self._wait_session_id = NO_SESSION_ID
+                    session_label = self._wait_session_id if self._wait_session_id is not None else "none"
+                    logger.info(f"[Trainer rank=0] Validate wait finished in {elapsed_s:.2f}s " f"session_id={session_label}")
+                self._wait_session_id = None
                 self._wait_started_at = 0.0
                 return ValidateGateDecision.PROCEED
 
             if sync_required:
                 # Validate is active and still waiting for trainer-side sync.
-                self._wait_session_id = NO_SESSION_ID
+                self._wait_session_id = None
                 self._wait_started_at = 0.0
                 return ValidateGateDecision.RETRY_SYNC
 
@@ -208,5 +217,6 @@ class ValidateReuseTrainerSync:
                 self._wait_session_id = session_id
                 self._wait_started_at = time.time()
                 if self._rank == 0:
-                    logger.info(f"[Trainer rank=0] Validate wait start session_id={session_id}")
+                    session_label = session_id if session_id is not None else "none"
+                    logger.info(f"[Trainer rank=0] Validate wait start session_id={session_label}")
             time.sleep(poll_s)

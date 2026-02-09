@@ -80,18 +80,19 @@ class ValidateReuseCoordinator:
         self.reset()
         self._sync_required = bool(sync_required)
 
-    def get_active_state(self, *, validate_active: bool, global_steps: int, no_session_id: int) -> dict:
+    def get_active_state(self, *, validate_active: bool, global_steps: int) -> dict:
         return {
             "active": bool(validate_active),
             "sync_required": bool(self._sync_required),
             "phase": self._phase,
-            "session_id": int(self._active_session_id) if self._active_session_id is not None else no_session_id,
+            "has_session": self._active_session_id is not None,
+            "session_id": int(self._active_session_id) if self._active_session_id is not None else 0,
             "global_steps": int(global_steps),
         }
 
-    def start_session(self, *, no_session_id: int) -> int:
+    def start_session(self) -> int | None:
         if not self._sync_required:
-            return no_session_id
+            return None
         if self._active_session_id is None:
             self._session_counter += 1
             self._active_session_id = self._session_counter
