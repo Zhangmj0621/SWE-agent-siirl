@@ -674,6 +674,28 @@ class Trainer:
             logger.warning(f"[Trainer rank={self.rank}] Failed to report failure: {e}")
             logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
 
+    def _pop_validation_time_once(self) -> float:
+        """Read and reset validation time exactly once per step (rank 0 only)."""
+        if self.rank != 0 or self.rollout_manager is None:
+            return 0.0
+        try:
+            return float(ray.get(self.rollout_manager.pop_validation_time.remote()))
+        except Exception as e:
+            logger.warning(f"[Trainer rank={self.rank}] Failed to fetch validation time: {e}")
+            return 0.0
+
+    def _compute_step_timing(self, train_e2e: float, validation_excluded: float) -> dict[str, float]:
+        """Compute step timing with validation/checkpoint exclusions."""
+        step_interval_raw = max(train_e2e - max(validation_excluded, 0.0), 0.0)
+        checkpoint_excluded = min(self._pending_ckpt_excluded_time, step_interval_raw)
+        step_interval = max(step_interval_raw - checkpoint_excluded, 0.0)
+        return {
+            "validation_excluded": validation_excluded,
+            "step_interval_raw": step_interval_raw,
+            "checkpoint_excluded": checkpoint_excluded,
+            "step_interval": step_interval,
+        }
+
     def train(self, batch_size: int):
         """
         Continuous training loop that processes batches as they become available.
@@ -732,15 +754,8 @@ class Trainer:
 
                 train_e2e_end_time = time.time()
                 train_e2e = train_e2e_end_time - train_e2e_start_time
-                val_time = 0.0
-                if self.rollout_manager is not None:
-                    try:
-                        val_time = ray.get(self.rollout_manager.pop_validation_time.remote())
-                    except Exception as e:
-                        logger.warning(f"[Trainer rank={self.rank}] Failed to fetch validation time: {e}")
-                train_e2e_without_val = max(train_e2e - val_time, 0.0)
-                ckpt_excluded_time = min(self._pending_ckpt_excluded_time, train_e2e_without_val)
-                train_e2e_effective = max(train_e2e_without_val - ckpt_excluded_time, 0.0)
+                val_time = self._pop_validation_time_once()
+                step_timing = self._compute_step_timing(train_e2e, val_time)
 
                 # Only rank=0 (global rank) aggregates and logs to tracker
                 if self.rank == 0 and self.tracker is not None and self.metric_client is not None:
@@ -757,14 +772,15 @@ class Trainer:
                         # Recompute throughput after aggregation to avoid per-rank bias.
                         total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
                         # Exclude validation time and prior checkpoint save time.
-                        aggregated_metrics["perf/delta_time/step_interval_raw"] = train_e2e_without_val
-                        aggregated_metrics["perf/delta_time/checkpoint_save_excluded"] = ckpt_excluded_time
-                        aggregated_metrics["perf/delta_time/step_interval"] = train_e2e_effective
-                        aggregated_metrics["perf/time_per_step"] = train_e2e_effective
-                        aggregated_metrics["perf/time_per_step_max"] = train_e2e_effective
-                        if train_e2e_effective > 0 and total_tokens > 0:
+                        aggregated_metrics["perf/delta_time/validation_excluded"] = step_timing["validation_excluded"]
+                        aggregated_metrics["perf/delta_time/step_interval_raw"] = step_timing["step_interval_raw"]
+                        aggregated_metrics["perf/delta_time/checkpoint_save_excluded"] = step_timing["checkpoint_excluded"]
+                        aggregated_metrics["perf/delta_time/step_interval"] = step_timing["step_interval"]
+                        aggregated_metrics["perf/time_per_step"] = step_timing["step_interval"]
+                        aggregated_metrics["perf/time_per_step_max"] = step_timing["step_interval"]
+                        if step_timing["step_interval"] > 0 and total_tokens > 0:
                             total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
-                            aggregated_metrics["perf/throughput"] = total_tokens / (train_e2e_effective * total_gpus)
+                            aggregated_metrics["perf/throughput"] = total_tokens / (step_timing["step_interval"] * total_gpus)
                         self.tracker.log(aggregated_metrics, step=self.global_step)
 
                         # get rollout validate metrics
