@@ -18,6 +18,7 @@ Console Logger Backend
 Provides formatted console output for training metrics.
 """
 
+import math
 from typing import Any
 
 from loguru import logger
@@ -165,12 +166,7 @@ class ConsoleBackend:
                 value_for_display = value + 1
 
             if isinstance(value_for_display, float):
-                if abs(value_for_display) < 0.0001 or abs(value_for_display) > 10000:
-                    formatted_value = f"{value_for_display:.2e}"
-                elif abs(value_for_display) < 1:
-                    formatted_value = f"{value_for_display:.4f}"
-                else:
-                    formatted_value = f"{value_for_display:.2f}"
+                formatted_value = f"{value_for_display:.8f}" if math.isfinite(value_for_display) else str(value_for_display)
             elif isinstance(value_for_display, int):
                 formatted_value = str(value_for_display)
             else:
