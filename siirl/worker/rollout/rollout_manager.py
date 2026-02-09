@@ -768,6 +768,7 @@ class RolloutManager:
                         "[RolloutManager] Validate GPU reuse sync timeout, fallback to rollout-only "
                         f"synced={synced_count}/{trainer_world_size} missing={missing}"
                     )
+                    # Fall back to rollout-only validate to preserve forward progress.
                     self._reset_validate_reuse_sync_state()
                     self._destroy_validate_reuse_pool()
 

@@ -1,4 +1,4 @@
-# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+# Copyright 2026, Shanghai Innovation Institute. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -109,6 +109,7 @@ class ValidateReuseCoordinator:
             return {"accepted": False, "reason": self._abort_reason, "phase": self._phase}
 
         self._begin_ranks.add(trainer_rank)
+        # RUNNING means every trainer rank has entered the sync session.
         if len(self._begin_ranks) >= self._trainer_world_size > 0:
             self._phase = "RUNNING"
         return {
@@ -150,6 +151,7 @@ class ValidateReuseCoordinator:
         self._synced_ranks.add(trainer_rank)
         synced = len(self._synced_ranks)
         missing = self.missing_ranks()
+        # Done session clears sync_required so trainers can proceed with train_step.
         if synced >= self._trainer_world_size > 0:
             self._phase = "DONE"
             self._sync_required = False

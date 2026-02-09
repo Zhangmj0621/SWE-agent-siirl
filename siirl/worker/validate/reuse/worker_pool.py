@@ -1,4 +1,4 @@
-# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+# Copyright 2026, Shanghai Innovation Institute. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -106,6 +106,7 @@ class ValidateReuseWorkerPool:
         if self._last_destroy_ts > 0 and cooldown_s > 0:
             elapsed = time.time() - self._last_destroy_ts
             if elapsed < cooldown_s:
+                # Cooldown reduces immediate rebind failures from recently closed sockets.
                 sleep_s = cooldown_s - elapsed
                 logger.info(f"[RolloutManager] Waiting {sleep_s:.2f}s before recreating validate reuse workers")
                 time.sleep(sleep_s)
@@ -209,6 +210,7 @@ class ValidateReuseWorkerPool:
             worker_count = len(workers_on_node)
             ports = ray.get(first_worker.allocate_ports.remote(start_port=http_port_base, count=worker_count * retry_slots))
             for i, (_, cfg) in enumerate(workers_on_node):
+                # Each worker gets retry_slots deterministic ports on the same node.
                 worker_reserved_ports[cfg["worker_idx"]] = [ports[i + j * worker_count] for j in range(retry_slots)]
 
         init_futures = []

@@ -1,4 +1,4 @@
-# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+# Copyright 2026, Shanghai Innovation Institute. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -83,6 +83,7 @@ class ValidateReuseTrainerSync:
         tensor_workers = sync_plan.get("tensor_workers", [])
         needs_sync_local = 1 if (distributed_workers or tensor_workers) else 0
         needs_sync_tensor = torch.tensor([needs_sync_local], dtype=torch.int32)
+        # Any rank requiring sync forces all ranks onto the same collective path.
         dist.all_reduce(needs_sync_tensor, op=dist.ReduceOp.MAX, group=get_gloo_group())
         if needs_sync_tensor.item() == 0:
             return False
@@ -95,6 +96,7 @@ class ValidateReuseTrainerSync:
             except Exception as e:
                 logger.error(f"[Trainer rank=0] Failed to allocate validate reuse session: {e}")
                 session_id_tensor[0] = NO_SESSION_ID
+        # Rank0 is the single session allocator to avoid split-brain sessions.
         dist.broadcast(session_id_tensor, src=0, group=get_gloo_group())
         session_id = int(session_id_tensor.item())
         if session_id < 0:
@@ -149,6 +151,7 @@ class ValidateReuseTrainerSync:
             f"distributed_workers={len(distributed_workers)} tensor_workers={len(tensor_workers)} "
             f"weight_version={self._get_current_weight_version_fn()}"
         )
+        # Reuse sync must not advance weight_version seen by rollout dataloader.
         self._sync_workers_fn(distributed_workers, tensor_workers, False)
         regular_workers = self._get_regular_workers_fn()
         self._ensure_regular_workers_fn(regular_workers)
@@ -196,6 +199,7 @@ class ValidateReuseTrainerSync:
                 return ValidateGateDecision.PROCEED
 
             if sync_required:
+                # Validate is active and still waiting for trainer-side sync.
                 self._wait_session_id = NO_SESSION_ID
                 self._wait_started_at = 0.0
                 return ValidateGateDecision.RETRY_SYNC
