@@ -298,7 +298,7 @@ class Trainer:
         rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
         self._sync_rollout_workers(rollout_workers)
 
-    def _sync_rollout_workers(self, rollout_workers, tensor_workers=None):
+    def _sync_rollout_workers(self, rollout_workers, tensor_workers=None, bump_weight_version=True):
         assert self.param_sync is not None, "must setup param sync first"
         tensor_workers = tensor_workers or []
         if not rollout_workers and not tensor_workers:
@@ -313,7 +313,11 @@ class Trainer:
         if isinstance(self.param_sync, ParamSyncDistributed):
             if rollout_workers and any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
                 self.param_sync.setup_param_sync_group(rollout_workers)
-            self.param_sync.update_weights_mixed(rollout_workers, tensor_workers)
+            self.param_sync.update_weights_mixed(
+                rollout_workers,
+                tensor_workers,
+                bump_weight_version=bump_weight_version,
+            )
         else:
             self.param_sync.update_weights()
 
@@ -389,9 +393,13 @@ class Trainer:
             f"distributed_workers={len(distributed_workers)} tensor_workers={len(tensor_workers)} "
             f"weight_version={self.get_current_weight_version()}"
         )
-        self._sync_rollout_workers(distributed_workers, tensor_workers)
+        self._sync_rollout_workers(distributed_workers, tensor_workers, bump_weight_version=False)
         regular_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote(), timeout=rpc_timeout_s)
-        self._sync_rollout_workers(regular_workers)
+        if isinstance(self.param_sync, ParamSyncDistributed):
+            if regular_workers and any(not self.param_sync.has_connected_to_actor(x) for x in regular_workers):
+                self.param_sync.setup_param_sync_group(regular_workers)
+        else:
+            self._sync_rollout_workers(regular_workers, bump_weight_version=False)
         ray.get(self.rollout_manager.mark_validate_reuse_synced.remote(self.rank, session_id), timeout=rpc_timeout_s)
         logger.info(
             f"[Trainer rank={self.rank}] Validate reuse sync done in {time.time() - start:.2f}s "

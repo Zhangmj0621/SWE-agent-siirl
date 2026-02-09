@@ -170,6 +170,7 @@ class ParamSyncDistributed(ParamSyncInterface):
         self,
         rollout_workers: Sequence[ActorHandle],
         tensor_rollout_workers: Sequence[ActorHandle] | None = None,
+        bump_weight_version: bool = True,
     ) -> None:
         if self.param_sync_unhealthy:
             raise RuntimeError("Param sync group is unhealthy; refusing to sync rollout weights")
@@ -181,12 +182,14 @@ class ParamSyncDistributed(ParamSyncInterface):
             return
 
         timeout_s = self._rpc_timeout_s()
-        self.weight_version += 1
+        if bump_weight_version:
+            self.weight_version += 1
         if dist.get_rank() == 0:
             if self.tensor_rollout_workers:
                 logger.info(
                     f"[ParamSyncDistributed] Mixed weight sync: distributed_workers={len(self.rollout_workers)} "
-                    f"tensor_workers={len(self.tensor_rollout_workers)} weight_version={self.weight_version}"
+                    f"tensor_workers={len(self.tensor_rollout_workers)} "
+                    f"weight_version={self.weight_version} bump={bump_weight_version}"
                 )
             ray.get([worker.pause_generation.remote() for worker in all_workers], timeout=timeout_s)
             ray.get([worker.flush_cache.remote() for worker in all_workers], timeout=timeout_s)
