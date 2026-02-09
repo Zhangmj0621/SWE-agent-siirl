@@ -132,7 +132,9 @@ def rearrange_micro_batches(
     attention_mask = batch["attention_mask"]
     seq_lens = attention_mask.sum(dim=1).long()
     batch_size = len(seq_lens)
-    max_seq_len = attention_mask.shape[-1]
+    # Use per-sample effective length instead of padded width so CP/padding layouts
+    # don't trigger false positives for the budget feasibility check.
+    max_seq_len = int(seq_lens.max().item()) if batch_size > 0 else 0
 
     assert max_token_len >= max_seq_len, f"max_token_len({max_token_len}) < max_seq_len({max_seq_len})"
 

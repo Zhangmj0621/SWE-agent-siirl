@@ -992,9 +992,18 @@ class MegatronPPOActor:
         if use_dynamic_batch:
             from siirl.engine.actor.dynamic_batch import rearrange_micro_batches
 
+            max_token_len = int(self.actor_config.max_tokens_per_gpu)
+            # CP can be exposed differently by runtime groups vs configured topology.
+            # Use the largest visible CP size to avoid underestimating token budget.
+            runtime_cp_size = int(mpu.get_context_parallel_world_size())
+            trainer_cp_size = int(getattr(self.config.trainer, "context_parallel_size", 1))
+            tf_cp_size = int(getattr(self.tf_config, "context_parallel_size", 1))
+            cp_size = max(1, runtime_cp_size, trainer_cp_size, tf_cp_size)
+            max_token_len *= cp_size
+
             micro_batches, partitions = rearrange_micro_batches(
                 batch=mini_batch,
-                max_token_len=self.actor_config.max_tokens_per_gpu,
+                max_token_len=max_token_len,
                 dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
                 vpp_size=len(self.actor_module),
                 sync_micro_num=True,
