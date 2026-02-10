@@ -163,6 +163,11 @@ class Trainer:
         self.global_step = 0
         # Subtract prior checkpoint save overhead from next-step perf accounting.
         self._pending_ckpt_excluded_time = 0.0
+        # EMA of step_interval from non-validation steps.  Used as a floor
+        # when excluding validation time to avoid over-exclusion that removes
+        # the normal generation-pipeline lag.
+        self._step_interval_ema: float = 0.0
+        self._step_interval_ema_alpha: float = 0.3
 
         # Local batch cache for handling async data fetch race conditions
         # When some dp_ranks get data while others don't, the ones with data
@@ -666,10 +671,37 @@ class Trainer:
             return 0.0
 
     def _compute_step_timing(self, train_e2e: float, validation_excluded: float) -> dict[str, float]:
-        """Compute step timing with validation/checkpoint exclusions."""
+        """Compute step timing with validation/checkpoint exclusions.
+
+        When validation is excluded, the naive subtraction ``train_e2e - val``
+        removes the normal generation-pipeline lag that exists on every step
+        (the time ``get_batch`` waits for the inference server to finish the
+        previous batch).  This makes validation steps report a *shorter*
+        step_interval — and therefore *higher* throughput — than non-validation
+        steps, creating a periodic throughput spike.
+
+        Fix: clamp the validation-adjusted step_interval to be no less than
+        the recent EMA of non-validation step intervals.  On non-validation
+        steps, update the EMA so it tracks the true steady-state step time.
+        """
         step_interval_raw = max(train_e2e - max(validation_excluded, 0.0), 0.0)
         checkpoint_excluded = min(self._pending_ckpt_excluded_time, step_interval_raw)
         step_interval = max(step_interval_raw - checkpoint_excluded, 0.0)
+
+        is_validation_step = validation_excluded > 0.0
+        if is_validation_step and self._step_interval_ema > 0:
+            # Clamp: validation step should not report a shorter interval than
+            # the recent non-validation baseline.
+            step_interval = max(step_interval, self._step_interval_ema)
+            step_interval_raw = max(step_interval_raw, self._step_interval_ema)
+        elif not is_validation_step and step_interval > 0:
+            # Update EMA from non-validation steps only.
+            alpha = self._step_interval_ema_alpha
+            if self._step_interval_ema <= 0:
+                self._step_interval_ema = step_interval  # seed
+            else:
+                self._step_interval_ema = alpha * step_interval + (1 - alpha) * self._step_interval_ema
+
         return {
             "validation_excluded": validation_excluded,
             "step_interval_raw": step_interval_raw,
