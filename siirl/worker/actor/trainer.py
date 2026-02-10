@@ -644,12 +644,20 @@ class Trainer:
             logger.warning(f"[Trainer rank={self.rank}] Failed to report completion: {e}")
             logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
 
-    def _pop_validation_time_once(self, step: int) -> float:
-        """Read and reset validation time for one step (rank 0 only)."""
+    def _pop_validation_time_once(self, step: int, step_start: float, step_end: float) -> float:
+        """Read and reset validation-time overlap for one step window (rank 0 only)."""
         if self.rank != 0 or self.rollout_manager is None:
             return 0.0
         try:
-            val_time = float(ray.get(self.rollout_manager.pop_validation_time_for_step.remote(int(step))))
+            val_time = float(
+                ray.get(
+                    self.rollout_manager.pop_validation_time_overlap.remote(
+                        float(step_start),
+                        float(step_end),
+                        int(step),
+                    )
+                )
+            )
             if val_time > 0:
                 logger.info(f"[Trainer rank=0] Validation time pop step={int(step)} val_time={val_time:.2f}s")
             return val_time
@@ -752,7 +760,7 @@ class Trainer:
 
                 train_e2e_end_time = time.time()
                 train_e2e = train_e2e_end_time - train_e2e_start_time
-                val_time = self._pop_validation_time_once(self.global_step)
+                val_time = self._pop_validation_time_once(self.global_step, train_e2e_start_time, train_e2e_end_time)
                 step_timing = self._compute_step_timing(train_e2e, val_time)
 
                 # Only rank=0 (global rank) aggregates and logs to tracker

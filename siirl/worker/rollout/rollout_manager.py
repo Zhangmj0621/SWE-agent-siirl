@@ -146,7 +146,7 @@ class RolloutManager:
         self.batches_to_skip = 0
         self.event = asyncio.Event()
         self.global_steps = 0  # will be reset by actor checkpoint, but maybe not correct in fully async mode
-        self._val_time_by_step: dict[int, float] = {}
+        self._val_time_windows: deque[tuple[float, float]] = deque()
         self._validate_progress = ValidateProgressTracker()
 
         # Initialize workers, engines, router and start rollout
@@ -824,9 +824,8 @@ class RolloutManager:
         finally:
             self._reset_validate_reuse_sync_state()
             self._destroy_validate_reuse_pool()
-            train_step = rollout_to_train_step(self.global_steps)
-            val_elapsed = time.time() - val_start
-            self._val_time_by_step[train_step] = self._val_time_by_step.get(train_step, 0.0) + val_elapsed
+            val_end = time.time()
+            self._val_time_windows.append((val_start, val_end))
             self._validate_active = False
         return
 
@@ -838,32 +837,57 @@ class RolloutManager:
         self.message_queue.clear()
         return result
 
-    def pop_validation_time_for_step(self, step: int) -> float:
+    def pop_validation_time_overlap(self, step_start: float, step_end: float, step: int | None = None) -> float:
         """
-        Return and clear validation time for exactly one train step.
-        Also clears stale entries from earlier steps to avoid leakage across resumes.
+        Return validation-time overlap with [step_start, step_end], and consume matched windows.
+        This avoids cross-step attribution drift when validate spans step boundaries.
         """
-        step = int(step)
-        val_time = float(self._val_time_by_step.pop(step, 0.0))
-        stale_steps = [key for key in self._val_time_by_step if key < step]
-        if stale_steps:
+        step_start = float(step_start)
+        step_end = float(step_end)
+        if step_end <= step_start:
+            return 0.0
+
+        overlap_s = 0.0
+        stale_windows = 0
+        stale_seconds = 0.0
+        remaining_windows: deque[tuple[float, float]] = deque()
+
+        for window_start, window_end in self._val_time_windows:
+            if window_end <= step_start:
+                stale_windows += 1
+                stale_seconds += max(window_end - window_start, 0.0)
+                continue
+            if window_start >= step_end:
+                remaining_windows.append((window_start, window_end))
+                continue
+
+            overlap_start = max(window_start, step_start)
+            overlap_end = min(window_end, step_end)
+            if overlap_end > overlap_start:
+                overlap_s += overlap_end - overlap_start
+            if window_end > step_end:
+                remaining_windows.append((step_end, window_end))
+
+        self._val_time_windows = remaining_windows
+
+        if stale_windows:
             from loguru import logger
 
-            stale_total = sum(float(self._val_time_by_step.pop(key, 0.0)) for key in stale_steps)
             logger.warning(
-                "[RolloutManager] Dropped stale validation-time entries "
-                f"current_step={step} stale_steps={sorted(stale_steps)} stale_total={stale_total:.2f}s"
+                "[RolloutManager] Dropped stale validation windows "
+                f"current_step={step if step is not None else 'unknown'} "
+                f"stale_windows={stale_windows} stale_total={stale_seconds:.2f}s"
             )
-        return val_time
+        return float(overlap_s)
 
     def pop_validation_time(self) -> float:
         """
-        Return and reset accumulated validation time.
+        Return and reset all queued validation-time windows.
         Used by trainer to exclude validation from train throughput metrics.
         """
-        val_time = float(sum(self._val_time_by_step.values()))
-        self._val_time_by_step.clear()
-        return val_time
+        val_time = sum(max(window_end - window_start, 0.0) for window_start, window_end in self._val_time_windows)
+        self._val_time_windows.clear()
+        return float(val_time)
 
     def should_stop(self) -> bool:
         """
