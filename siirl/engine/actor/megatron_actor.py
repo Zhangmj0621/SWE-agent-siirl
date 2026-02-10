@@ -1259,16 +1259,15 @@ class MegatronPPOActor:
                     for key, value in sum_metrics.items():
                         scalar = _to_float(value)
                         if reduce_mode == "sum":
-                            # sum-metrics are per-micro contributions normalized by the
-                            # mini-batch denominator. Reconstruct a global mean via
-                            # weighted sums to avoid mini-batch-count inflation.
+                            # Already normalized by batch_num_tokens in agg_loss;
+                            # plain sum recovers global token-mean (weighted avg would double-normalize).
                             #
                             # Keep actor/entropy_loss driven by forward-only path in
                             # trainer (master-compatible definition).
                             if key == "actor/entropy_loss":
                                 continue
-                            sum_metric_num[key] += scalar * token_weight
-                            sum_metric_den[key] += token_weight
+                            sum_metric_num[key] += scalar
+                            sum_metric_den[key] = 1.0
                         else:
                             append_to_dict(metrics, {key: scalar})
 
