@@ -68,8 +68,6 @@ def aggregate_validation_results(all_payloads: list[Sample]) -> dict[str, float]
     infos_dict = defaultdict(list)
     for p in all_payloads:
         infos_dict["reward"].append(p.rewards)
-        # for key, value in p.extra_rewards.items():
-        #     infos_dict[key].append(value)
 
     data_src2var2metric2val = aggregate_validation_metrics(
         data_sources=data_sources,

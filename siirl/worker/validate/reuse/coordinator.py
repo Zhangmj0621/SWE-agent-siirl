@@ -148,6 +148,22 @@ class ValidateReuseCoordinator:
             return {"accepted": False, "reason": "stale_session"}
         if self._phase == "ABORTED":
             return {"accepted": False, "reason": self._abort_reason}
+        if trainer_rank in self._synced_ranks:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Duplicate validate-reuse mark_synced ignored " "trainer_rank=%s session_id=%s",
+                trainer_rank,
+                self._active_session_id,
+            )
+            return {
+                "accepted": True,
+                "phase": self._phase,
+                "synced": len(self._synced_ranks),
+                "world_size": self._trainer_world_size,
+                "missing": self.missing_ranks(),
+                "duplicate": True,
+            }
 
         self._synced_ranks.add(trainer_rank)
         synced = len(self._synced_ranks)

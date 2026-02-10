@@ -499,18 +499,23 @@ class RolloutManager:
         }
 
     def start_validate_reuse_sync_session(self) -> int | None:
+        """RPC facade for coordinator.start_session()."""
         return self._validate_reuse_coordinator.start_session()
 
     def mark_validate_reuse_begin(self, trainer_rank: int, session_id: int):
+        """RPC facade for coordinator.mark_begin()."""
         return self._validate_reuse_coordinator.mark_begin(trainer_rank, session_id)
 
     def get_validate_reuse_sync_gate(self, session_id: int):
+        """RPC facade for coordinator.get_gate()."""
         return self._validate_reuse_coordinator.get_gate(session_id)
 
     def abort_validate_reuse_sync_session(self, session_id: int, reason: str):
+        """RPC facade for coordinator.abort_session()."""
         return self._validate_reuse_coordinator.abort_session(session_id, reason)
 
     def mark_validate_reuse_synced(self, trainer_rank: int, session_id: int | None = None):
+        """RPC facade for coordinator.mark_synced()."""
         result = self._validate_reuse_coordinator.mark_synced(trainer_rank, session_id=session_id)
         if not result.get("accepted", False):
             return result

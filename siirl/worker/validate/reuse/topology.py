@@ -15,6 +15,7 @@
 """Pure helper functions for validate-reuse topology and partitioning."""
 
 from siirl.utils.net_utils.net import SGLANG_DIST_INIT_START_PORT, SGLANG_HTTP_START_PORT
+from siirl.worker.validate.reuse.constants import DIST_PORT_REUSE_OFFSET, HTTP_PORT_REUSE_OFFSET
 
 
 def compute_validate_reuse_topology(train_gpus: int, tp_size: int, n_gpus_per_node: int) -> dict | None:
@@ -75,6 +76,6 @@ def rollout_to_train_step(rollout_step: int) -> int:
 def next_port_bases(port_window_idx: int, stride: int, cycle: int) -> tuple[int, int, int]:
     next_window_idx = (port_window_idx + 1) % max(1, cycle)
     offset = next_window_idx * max(1, stride)
-    http_port_base = SGLANG_HTTP_START_PORT + 2000 + offset
-    dist_port_base = SGLANG_DIST_INIT_START_PORT + 1000 + offset
+    http_port_base = SGLANG_HTTP_START_PORT + HTTP_PORT_REUSE_OFFSET + offset
+    dist_port_base = SGLANG_DIST_INIT_START_PORT + DIST_PORT_REUSE_OFFSET + offset
     return http_port_base, dist_port_base, next_window_idx
