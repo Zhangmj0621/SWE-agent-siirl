@@ -146,7 +146,7 @@ class RolloutManager:
         self.batches_to_skip = 0
         self.event = asyncio.Event()
         self.global_steps = 0  # will be reset by actor checkpoint, but maybe not correct in fully async mode
-        self._val_time_acc = 0.0
+        self._val_time_by_step: dict[int, float] = {}
         self._validate_progress = ValidateProgressTracker()
 
         # Initialize workers, engines, router and start rollout
@@ -817,10 +817,12 @@ class RolloutManager:
             train_step = rollout_to_train_step(self.global_steps)
             self.message_queue.append((val_metrics, train_step))
         finally:
-            self._validate_active = False
             self._reset_validate_reuse_sync_state()
             self._destroy_validate_reuse_pool()
-            self._val_time_acc += time.time() - val_start
+            train_step = rollout_to_train_step(self.global_steps)
+            val_elapsed = time.time() - val_start
+            self._val_time_by_step[train_step] = self._val_time_by_step.get(train_step, 0.0) + val_elapsed
+            self._validate_active = False
         return
 
     async def get_metrics(self):
@@ -831,13 +833,31 @@ class RolloutManager:
         self.message_queue.clear()
         return result
 
+    def pop_validation_time_for_step(self, step: int) -> float:
+        """
+        Return and clear validation time for exactly one train step.
+        Also clears stale entries from earlier steps to avoid leakage across resumes.
+        """
+        step = int(step)
+        val_time = float(self._val_time_by_step.pop(step, 0.0))
+        stale_steps = [key for key in self._val_time_by_step if key < step]
+        if stale_steps:
+            from loguru import logger
+
+            stale_total = sum(float(self._val_time_by_step.pop(key, 0.0)) for key in stale_steps)
+            logger.warning(
+                "[RolloutManager] Dropped stale validation-time entries "
+                f"current_step={step} stale_steps={sorted(stale_steps)} stale_total={stale_total:.2f}s"
+            )
+        return val_time
+
     def pop_validation_time(self) -> float:
         """
         Return and reset accumulated validation time.
         Used by trainer to exclude validation from train throughput metrics.
         """
-        val_time = self._val_time_acc
-        self._val_time_acc = 0.0
+        val_time = float(sum(self._val_time_by_step.values()))
+        self._val_time_by_step.clear()
         return val_time
 
     def should_stop(self) -> bool:
