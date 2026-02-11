@@ -32,7 +32,7 @@ from siirl.engine.actor.utils import set_random_seed
 from siirl.engine.param_sync.update_weight import ParamSyncColocated, ParamSyncDistributed
 from siirl.params import SiiRLArguments, TrainingArguments
 from siirl.utils.backend.device import get_nccl_backend, get_torch_device
-from siirl.utils.distributed_utils import init_gloo_group
+from siirl.utils.distributed_utils import get_gloo_group, init_gloo_group
 from siirl.utils.logger.memory_profiler import MemoryProfiler
 from siirl.utils.megatron.megatron_utils import offload_megatron_model_to_cpu
 from siirl.utils.timer import Timer, TimerCollection
@@ -306,10 +306,73 @@ class Trainer:
         logger.info(f"[Trainer rank={self.rank}] param_sync={cls.__name__} (colocate={self.config.trainer.colocate})")
         self._maybe_init_validate_reuse_sync()
 
+    def _broadcast_rank0_error(self, local_error: Exception | None) -> Exception | None:
+        """Broadcast rank 0 error flag to all ranks via Gloo so every rank fails consistently.
+
+        Args:
+            local_error: The exception caught on rank 0 (None on non-rank-0 or success).
+
+        Returns:
+            The original exception on rank 0, a RuntimeError placeholder on other ranks
+            if rank 0 failed, or None if no error.
+        """
+        flag = torch.tensor([1 if local_error is not None else 0], dtype=torch.int32)
+        dist.broadcast(flag, src=0, group=get_gloo_group())
+        if flag.item() == 0:
+            return None
+        if local_error is not None:
+            return local_error
+        return RuntimeError(f"[Trainer rank={self.rank}] rank 0 reported failure (see rank 0 logs)")
+
     # @timer
     def update_rollout_weight(self):
         rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
-        self._sync_rollout_workers(rollout_workers)
+
+        # Colocated mode: release rollout GPU memory BEFORE loading trainer model
+        # to avoid OOM when both SGLang and trainer share the same GPU.
+        is_colocate = self.config.trainer.colocate and isinstance(self.param_sync, ParamSyncColocated)
+        rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+
+        # Phase 1: offload (rank 0 only, broadcast error to all ranks)
+        if is_colocate:
+            offload_error = None
+            if self.rank == 0:
+                try:
+                    ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=rpc_timeout_s))
+                except Exception as e:
+                    logger.error(f"[Trainer rank=0] offload_for_train failed: {e}")
+                    offload_error = e
+            offload_error = self._broadcast_rank0_error(offload_error)
+            if offload_error is not None:
+                raise offload_error
+
+        # Phase 2: sync — capture exception so finally can decide what to raise
+        sync_error = None
+        try:
+            self._sync_rollout_workers(rollout_workers)
+        except Exception as e:
+            sync_error = e
+        finally:
+            # Phase 3: resume (rank 0 only, broadcast error to all ranks)
+            if is_colocate:
+                resume_error = None
+                if self.rank == 0:
+                    try:
+                        ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=rpc_timeout_s))
+                    except Exception as e:
+                        logger.error(f"[Trainer rank=0] resume_after_sync failed: {e}")
+                        resume_error = e
+                resume_error = self._broadcast_rank0_error(resume_error)
+
+                # Decide which exception to surface
+                if sync_error is not None and resume_error is not None:
+                    # Both failed: preserve sync as primary, log resume
+                    logger.error(f"[Trainer rank={self.rank}] resume_after_sync also failed (suppressed): {resume_error}")
+                elif resume_error is not None:
+                    sync_error = resume_error
+
+        if sync_error is not None:
+            raise sync_error  # noqa: B012
 
     def _sync_rollout_workers(self, rollout_workers, tensor_workers=None, bump_weight_version=True):
         assert self.param_sync is not None, "must setup param sync first"
@@ -323,21 +386,22 @@ class Trainer:
 
             load_megatron_model_to_gpu(self.actor_worker.actor_module, load_grad=False)
 
-        if isinstance(self.param_sync, ParamSyncDistributed):
-            if rollout_workers and any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
-                self.param_sync.setup_param_sync_group(rollout_workers)
-            self.param_sync.update_weights_mixed(
-                rollout_workers,
-                tensor_workers,
-                bump_weight_version=bump_weight_version,
-            )
-        else:
-            self.param_sync.update_weights()
-
-        # Offload actor model back to CPU after weight sync
-        if self.actor_worker._is_offload_param:
-            offload_megatron_model_to_cpu(self.actor_worker.actor_module)
-            get_torch_device().empty_cache()
+        try:
+            if isinstance(self.param_sync, ParamSyncDistributed):
+                if rollout_workers and any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
+                    self.param_sync.setup_param_sync_group(rollout_workers)
+                self.param_sync.update_weights_mixed(
+                    rollout_workers,
+                    tensor_workers,
+                    bump_weight_version=bump_weight_version,
+                )
+            else:
+                self.param_sync.update_weights()
+        finally:
+            # Ensure model is offloaded even on sync failure to avoid GPU memory leak
+            if self.actor_worker._is_offload_param:
+                offload_megatron_model_to_cpu(self.actor_worker.actor_module)
+                get_torch_device().empty_cache()
 
     def _get_regular_rollout_workers(self) -> list:
         if self.rollout_manager is None:

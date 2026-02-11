@@ -422,6 +422,32 @@ class SglangEngine:
         response.raise_for_status()
         return response
 
+    def release_memory_occupation(self, tags: list[str] | None = None):
+        """Release GPU memory occupation (weights/kv_cache) for colocated mode.
+
+        Tells the SGLang server to free specified GPU memory regions so that the
+        trainer can load its model onto the same GPU without OOM.
+
+        Args:
+            tags: Memory region tags to release. Supported: ["weights", "kv_cache", "cuda_graph"].
+                  If None, releases all regions.
+        """
+        payload = {"tags": tags} if tags is not None else {}
+        return self._make_request("release_memory_occupation", payload)
+
+    def resume_memory_occupation(self, tags: list[str] | None = None):
+        """Resume GPU memory occupation (weights/kv_cache) after colocated training.
+
+        Tells the SGLang server to re-allocate specified GPU memory regions after
+        the trainer has offloaded its model back to CPU.
+
+        Args:
+            tags: Memory region tags to resume. Supported: ["weights", "kv_cache", "cuda_graph"].
+                  If None, resumes all regions.
+        """
+        payload = {"tags": tags} if tags is not None else {}
+        return self._make_request("resume_memory_occupation", payload)
+
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request to the specified endpoint with the given payload.
 

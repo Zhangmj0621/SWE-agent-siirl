@@ -436,9 +436,53 @@ class ParamSyncColocated(ParamSyncDistributed):
         tensor_rollout_workers: Sequence[ActorHandle] | None = None,
         bump_weight_version: bool = True,
     ) -> None:
+        """Colocated weight sync: skip NCCL, skip pause/flush/continue.
+
+        GPU memory lifecycle (release/resume) is managed by the trainer via
+        rollout_manager.offload_for_train() / resume_after_sync() BEFORE and
+        AFTER this method is called.  This method only does:
+          1. version bump
+          2. barrier
+          3. mbridge export + IPC bucket sync
+          4. barrier + version check
+          5. barrier
+        """
         all_workers = self._normalize_rollout_workers([*rollout_workers, *(tensor_rollout_workers or [])])
         self._refresh_sync_context()
-        super().update_weights_mixed(all_workers, [], bump_weight_version=bump_weight_version)
+
+        if self.param_sync_unhealthy:
+            raise RuntimeError("Param sync group is unhealthy; refusing to sync rollout weights")
+
+        self.rollout_workers = list(all_workers)
+        self.tensor_rollout_workers = []
+        if not all_workers:
+            return
+
+        sync_started_at = time.monotonic()
+        sync_success = False
+        self._current_sync_bucket_count = 0
+        try:
+            if bump_weight_version:
+                self.weight_version += 1
+
+            # No pause_generation / flush_cache here — already released by trainer
+            dist.barrier(group=get_gloo_group())
+
+            if self.bridge is not None:
+                self._update_weights_use_mbridge()
+            else:
+                raise NotImplementedError("Colocated mode requires use_mbridge=True")
+
+            dist.barrier(group=get_gloo_group())
+            if dist.get_rank() == 0:
+                self._check_weight_version()
+            # No continue_generation here — will be resumed by trainer
+            dist.barrier(group=get_gloo_group())
+            sync_success = True
+        finally:
+            if dist.get_rank() == 0:
+                elapsed_ms = (time.monotonic() - sync_started_at) * 1000
+                self._log_sync_metrics(elapsed_ms, success=sync_success)
 
     def _update_bucket_weights(
         self,

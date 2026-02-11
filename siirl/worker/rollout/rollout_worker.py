@@ -376,5 +376,13 @@ class RolloutWorker:
     def continue_generation(self):
         return self.engine.continue_generation()
 
+    def offload_memory(self, tags: list[str] | None = None):
+        """Release GPU memory occupation for colocated mode."""
+        return self.engine.release_memory_occupation(tags)
+
+    def onload_memory(self, tags: list[str] | None = None):
+        """Resume GPU memory occupation for colocated mode."""
+        return self.engine.resume_memory_occupation(tags)
+
     def weight_version(self):
         return self.engine._weight_version

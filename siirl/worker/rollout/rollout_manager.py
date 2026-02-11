@@ -455,6 +455,69 @@ class RolloutManager:
                 result.append(self.worker_handle[worker_idx])
         return result
 
+    def offload_for_train(self, timeout_s: int = 120):
+        """Release rollout GPU memory (weights + kv_cache) before trainer loads model.
+
+        Must be called BEFORE load_megatron_model_to_gpu to avoid OOM in colocated mode.
+        Drains pending requests first because SGLang release_memory_occupation
+        asserts no in-progress requests.
+        """
+        from loguru import logger
+
+        tp0_workers = self.get_rollout_worker_on_tp0()
+        if not tp0_workers:
+            return
+        tags = ["kv_cache", "weights"]
+        logger.info(f"[RolloutManager] offload_for_train: releasing {tags} on {len(tp0_workers)} TP0 workers")
+        t0 = time.monotonic()
+        pause_succeeded = False
+        try:
+            # Drain pending requests before release (SGLang asserts no in-progress requests)
+            ray.get([w.pause_generation.remote() for w in tp0_workers], timeout=timeout_s)
+            pause_succeeded = True
+            ray.get([w.flush_cache.remote() for w in tp0_workers], timeout=timeout_s)
+            # Now safe to release
+            ray.get([w.offload_memory.remote(tags) for w in tp0_workers], timeout=timeout_s)
+        except Exception:
+            if pause_succeeded:
+                # Best-effort unpause to avoid leaving engines paused on retry paths.
+                with contextlib.suppress(Exception):
+                    ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
+            logger.exception("[RolloutManager] offload_for_train failed")
+            raise
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(f"[RolloutManager] offload_for_train completed in {elapsed_ms:.1f}ms")
+
+    def resume_after_sync(self, timeout_s: int = 120):
+        """Resume rollout GPU memory (weights then kv_cache) after weight sync.
+
+        Weights must be resumed before kv_cache because SGLang may need the model
+        to be loaded before allocating KV cache.  Calls continue_generation at the
+        end to match the pause_generation issued in offload_for_train.
+        """
+        from loguru import logger
+
+        tp0_workers = self.get_rollout_worker_on_tp0()
+        if not tp0_workers:
+            return
+        t0 = time.monotonic()
+        try:
+            # Step 1: resume weights first
+            logger.info(f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers")
+            ray.get([w.onload_memory.remote(["weights"]) for w in tp0_workers], timeout=timeout_s)
+
+            # Step 2: resume kv_cache after weights are loaded
+            logger.info(f"[RolloutManager] resume_after_sync: resuming kv_cache on {len(tp0_workers)} TP0 workers")
+            ray.get([w.onload_memory.remote(["kv_cache"]) for w in tp0_workers], timeout=timeout_s)
+
+            # Step 3: resume generation after all memory is back
+            ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
+        except Exception:
+            logger.exception("[RolloutManager] resume_after_sync failed")
+            raise
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(f"[RolloutManager] resume_after_sync completed in {elapsed_ms:.1f}ms")
+
     def get_validate_reuse_sync_workers(self, trainer_rank: int):
         if not self._validate_reuse_coordinator.sync_required:
             return []
