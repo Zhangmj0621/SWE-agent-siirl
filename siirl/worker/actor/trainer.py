@@ -29,7 +29,7 @@ from siirl.algorithm.advantage import compute_advantage
 from siirl.data_coordinator.sample import Samples2Dict
 from siirl.engine.actor.megatron_actor import ActorWorker, CriticWorker, ReferenceWorker
 from siirl.engine.actor.utils import set_random_seed
-from siirl.engine.param_sync.update_weight import ParamSyncDistributed
+from siirl.engine.param_sync.update_weight import ParamSyncColocated, ParamSyncDistributed
 from siirl.params import SiiRLArguments, TrainingArguments
 from siirl.utils.backend.device import get_nccl_backend, get_torch_device
 from siirl.utils.distributed_utils import init_gloo_group
@@ -296,12 +296,14 @@ class Trainer:
     def setup_param_sync(self):
         assert self.actor_worker is not None, "must init models first"
         assert self.rollout_manager is not None, "must set rollout_manager"
-        self.param_sync = ParamSyncDistributed(
+        cls = ParamSyncColocated if self.config.trainer.colocate else ParamSyncDistributed
+        self.param_sync = cls(
             config=self.config,
             model=self.actor_worker.actor_module,
             bridge=self.actor_worker.bridge,
         )
         init_gloo_group()
+        logger.info(f"[Trainer rank={self.rank}] param_sync={cls.__name__} (colocate={self.config.trainer.colocate})")
         self._maybe_init_validate_reuse_sync()
 
     # @timer

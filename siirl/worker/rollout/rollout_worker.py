@@ -358,8 +358,11 @@ class RolloutWorker:
         serialized_named_tensors,
         flush_cache=False,
         weight_version: str | None = None,
+        load_format: str | None = None,
     ):
-        return self.engine.param_sync_from_tensor(serialized_named_tensors, flush_cache=flush_cache, weight_version=weight_version)
+        return self.engine.param_sync_from_tensor(
+            serialized_named_tensors, flush_cache=flush_cache, weight_version=weight_version, load_format=load_format
+        )
 
     def destroy_weights_update_group(self, group_name):
         return self.engine.destroy_weights_update_group(group_name)

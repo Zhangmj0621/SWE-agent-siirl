@@ -490,13 +490,26 @@ class SglangEngine:
         serialized_named_tensors,
         flush_cache=True,
         weight_version: str | None = None,
+        load_format: str | None = None,
     ):
+        import base64
+
+        # HTTP JSON boundary: bytes must be base64-encoded; str passes through.
+        encoded = []
+        for item in serialized_named_tensors:
+            if isinstance(item, (bytes, bytearray)):
+                encoded.append(base64.b64encode(item).decode("ascii"))
+            else:
+                encoded.append(item)
+
         payload = {
-            "serialized_named_tensors": serialized_named_tensors,
+            "serialized_named_tensors": encoded,
             "flush_cache": flush_cache,
         }
         if weight_version is not None:
             payload["weight_version"] = weight_version
+        if load_format is not None:
+            payload["load_format"] = load_format
         result = self._make_request("update_weights_from_tensor", payload)
         if weight_version:
             self._weight_version = int(weight_version)

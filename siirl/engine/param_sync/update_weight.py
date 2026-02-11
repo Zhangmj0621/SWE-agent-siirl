@@ -1,5 +1,7 @@
 import socket
+import time
 from abc import abstractmethod
+from collections import defaultdict, deque
 from collections.abc import Sequence
 from datetime import timedelta
 
@@ -16,6 +18,61 @@ from siirl.params.training_args import SiiRLArguments
 from siirl.utils.distributed_utils import get_gloo_group, init_process_group
 
 from . import mbridge_patch  # noqa: F401
+
+
+def _import_flattened_tensor_bucket():
+    """Import FlattenedTensorBucket with dual-path compatibility."""
+    try:
+        from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
+    except ImportError:
+        from sglang.srt.model_executor.model_runner import FlattenedTensorBucket
+    return FlattenedTensorBucket
+
+
+def _ensure_monkey_patched():
+    """Apply monkey_patch_torch_reductions once so tensor serialization uses CUDA IPC handles."""
+    if getattr(_ensure_monkey_patched, "_done", False):
+        return
+    try:
+        from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+    except ImportError:
+        from sglang.srt.utils import monkey_patch_torch_reductions
+    monkey_patch_torch_reductions()
+    _ensure_monkey_patched._done = True
+
+
+def _serialize_bucket_ipc(
+    named_tensors: Sequence[tuple[str, torch.Tensor]],
+) -> tuple[list[bytes], list[dict[str, object]]]:
+    """Serialize a bucket of named tensors via FlattenedTensorBucket + IPC handles.
+
+    Returns serialized payloads and long-lived flattened bucket objects.
+    """
+    from sglang.srt.utils.common import MultiprocessingSerializer
+
+    _ensure_monkey_patched()
+    FlattenedTensorBucket = _import_flattened_tensor_bucket()
+
+    # Group tensors by dtype (unless FlattenedTensorBucket handles mixed dtypes).
+    if getattr(FlattenedTensorBucket, "supports_multi_dtypes", False):
+        groups: dict[str, list[tuple[str, torch.Tensor]]] = {"mixed": list(named_tensors)}
+    else:
+        groups = defaultdict(list)
+        for name, tensor in named_tensors:
+            groups[tensor.dtype].append((name, tensor))
+
+    serialized: list[bytes] = []
+    long_lived_buckets: list[dict[str, object]] = []
+    for _dtype_key, tensors in groups.items():
+        bucket = FlattenedTensorBucket(named_tensors=tensors)
+        flattened_data = {
+            "flattened_tensor": bucket.get_flattened_tensor(),
+            "metadata": bucket.get_metadata(),
+        }
+        long_lived_buckets.append(flattened_data)
+        # output_str=False -> bytes with CUDA IPC handle (no base64 overhead)
+        serialized.append(MultiprocessingSerializer.serialize(flattened_data, output_str=False))
+    return serialized, long_lived_buckets
 
 
 class ParamSyncInterface:
@@ -44,9 +101,49 @@ class ParamSyncDistributed(ParamSyncInterface):
         self._connected_rollout_workers: list[ActorHandle] = []
         self._connected_rollout_worker_ids: set[str] = set()
         self.param_sync_unhealthy = False
+        self._current_sync_bucket_count = 0
+        self._sync_total_ms_samples = deque(maxlen=256)
+        self._sync_success_count = 0
+        self._sync_failure_count = 0
 
     def _rpc_timeout_s(self) -> int:
         return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+
+    def _sync_metric_group_name(self) -> str:
+        return getattr(self, "_group_name", self.__class__.__name__)
+
+    def _record_sync_bucket(self) -> None:
+        self._current_sync_bucket_count += 1
+
+    @staticmethod
+    def _percentile(values: Sequence[float], quantile: float) -> float:
+        if not values:
+            return 0.0
+        if len(values) == 1:
+            return values[0]
+        sorted_values = sorted(values)
+        idx = int(round((len(sorted_values) - 1) * quantile))
+        idx = max(0, min(idx, len(sorted_values) - 1))
+        return sorted_values[idx]
+
+    def _log_sync_metrics(self, elapsed_ms: float, success: bool) -> None:
+        self._sync_total_ms_samples.append(elapsed_ms)
+        if success:
+            self._sync_success_count += 1
+        else:
+            self._sync_failure_count += 1
+        total = self._sync_success_count + self._sync_failure_count
+        failure_rate = self._sync_failure_count / max(1, total)
+        p50 = self._percentile(self._sync_total_ms_samples, 0.50)
+        p95 = self._percentile(self._sync_total_ms_samples, 0.95)
+        logger.info(
+            f"[{self._sync_metric_group_name()}] "
+            f"sync_total_ms={elapsed_ms:.2f} "
+            f"sync_total_ms_p50={p50:.2f} "
+            f"sync_total_ms_p95={p95:.2f} "
+            f"sync_failure_rate={failure_rate:.4f} "
+            f"sync_bucket_count={self._current_sync_bucket_count}"
+        )
 
     def _normalize_rollout_workers(self, rollout_workers: Sequence[ActorHandle]) -> list[ActorHandle]:
         deduped_workers: list[ActorHandle] = []
@@ -192,30 +289,39 @@ class ParamSyncDistributed(ParamSyncInterface):
         if not all_workers:
             return
 
+        sync_started_at = time.monotonic()
+        sync_success = False
+        self._current_sync_bucket_count = 0
         timeout_s = self._rpc_timeout_s()
-        if bump_weight_version:
-            self.weight_version += 1
-        if dist.get_rank() == 0:
-            if self.tensor_rollout_workers:
-                logger.info(
-                    f"[ParamSyncDistributed] Mixed weight sync: distributed_workers={len(self.rollout_workers)} "
-                    f"tensor_workers={len(self.tensor_rollout_workers)} "
-                    f"weight_version={self.weight_version} bump={bump_weight_version}"
-                )
-            ray.get([worker.pause_generation.remote() for worker in all_workers], timeout=timeout_s)
-            ray.get([worker.flush_cache.remote() for worker in all_workers], timeout=timeout_s)
-        dist.barrier(group=get_gloo_group())
+        try:
+            if bump_weight_version:
+                self.weight_version += 1
+            if dist.get_rank() == 0:
+                if self.tensor_rollout_workers:
+                    logger.info(
+                        f"[ParamSyncDistributed] Mixed weight sync: distributed_workers={len(self.rollout_workers)} "
+                        f"tensor_workers={len(self.tensor_rollout_workers)} "
+                        f"weight_version={self.weight_version} bump={bump_weight_version}"
+                    )
+                ray.get([worker.pause_generation.remote() for worker in all_workers], timeout=timeout_s)
+                ray.get([worker.flush_cache.remote() for worker in all_workers], timeout=timeout_s)
+            dist.barrier(group=get_gloo_group())
 
-        if self.bridge is not None:
-            self._update_weights_use_mbridge()
-        else:
-            self._update_weights_naive()
+            if self.bridge is not None:
+                self._update_weights_use_mbridge()
+            else:
+                self._update_weights_naive()
 
-        dist.barrier(group=get_gloo_group())
-        if dist.get_rank() == 0:
-            self._check_weight_version()
-            ray.get([worker.continue_generation.remote() for worker in all_workers], timeout=timeout_s)
-        dist.barrier(group=get_gloo_group())
+            dist.barrier(group=get_gloo_group())
+            if dist.get_rank() == 0:
+                self._check_weight_version()
+                ray.get([worker.continue_generation.remote() for worker in all_workers], timeout=timeout_s)
+            dist.barrier(group=get_gloo_group())
+            sync_success = True
+        finally:
+            if dist.get_rank() == 0:
+                elapsed_ms = (time.monotonic() - sync_started_at) * 1000
+                self._log_sync_metrics(elapsed_ms, success=sync_success)
 
     def _check_weight_version(self):
         workers = self._all_target_workers()
@@ -273,6 +379,93 @@ class ParamSyncDistributed(ParamSyncInterface):
 
         if refs:
             ray.get(refs, timeout=self._rpc_timeout_s())
+            self._record_sync_bucket()
+        converted_named_tensors.clear()
+        if pbar is not None:
+            pbar.update(1)
+
+
+class ParamSyncColocated(ParamSyncDistributed):
+    """Colocated weight sync uses IPC handles and skips NCCL group setup."""
+
+    _MAX_SYNC_RETRIES = 2
+
+    def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
+        super().__init__(config, model, bridge)
+        self._refresh_sync_context()
+
+    def _refresh_sync_context(self):
+        self._is_pp_src_rank = mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
+        pp_rank = mpu.get_pipeline_model_parallel_rank()
+        self._group_name = f"param_sync_colocated-pp_{pp_rank}"
+
+    def _sync_ipc_bucket_with_retry(self, serialized_named_tensors: list[bytes], timeout_s: int) -> None:
+        for attempt in range(1, self._MAX_SYNC_RETRIES + 2):
+            refs = [
+                worker.param_sync_from_tensor.remote(
+                    serialized_named_tensors=serialized_named_tensors,
+                    flush_cache=False,
+                    weight_version=str(self.weight_version),
+                    load_format="flattened_bucket",
+                )
+                for worker in self.rollout_workers
+            ]
+            try:
+                ray.get(refs, timeout=timeout_s)
+                return
+            except Exception:
+                if attempt > self._MAX_SYNC_RETRIES:
+                    logger.exception(f"[{self._group_name}] IPC bucket sync failed after retries. " f"retry_limit={self._MAX_SYNC_RETRIES}")
+                    raise
+                logger.warning(f"[{self._group_name}] IPC bucket sync retry {attempt}/{self._MAX_SYNC_RETRIES} after failure")
+
+    def setup_param_sync_group(self, rollout_workers: Sequence[ActorHandle]):
+        normalized_workers = self._normalize_rollout_workers(rollout_workers)
+        self.rollout_workers = normalized_workers
+        self._refresh_sync_context()
+        self.rollout_worker_connected.clear()
+        self.update_rollout_worker_connected(normalized_workers)
+        self._connected_rollout_workers = list(normalized_workers)
+        self._connected_rollout_worker_ids = {w._actor_id.hex() for w in normalized_workers}
+        logger.info(f"[{self._group_name}] Colocated param sync group: {len(normalized_workers)} workers (IPC path)")
+
+    @torch.no_grad()
+    def update_weights_mixed(
+        self,
+        rollout_workers: Sequence[ActorHandle],
+        tensor_rollout_workers: Sequence[ActorHandle] | None = None,
+        bump_weight_version: bool = True,
+    ) -> None:
+        all_workers = self._normalize_rollout_workers([*rollout_workers, *(tensor_rollout_workers or [])])
+        self._refresh_sync_context()
+        super().update_weights_mixed(all_workers, [], bump_weight_version=bump_weight_version)
+
+    def _update_bucket_weights(
+        self,
+        converted_named_tensors: list[tuple[str, torch.Tensor]],
+        pbar: tqdm | None = None,
+    ) -> None:
+        if not self._is_pp_src_rank or not self.rollout_workers:
+            converted_named_tensors.clear()
+            if pbar is not None:
+                pbar.update(1)
+            return
+
+        tp_size = max(1, self.config.rollout.tensor_model_parallel_size)
+        timeout_s = self._rpc_timeout_s()
+
+        serialized_parts, long_lived_buckets = _serialize_bucket_ipc(converted_named_tensors)
+        try:
+            t0 = time.monotonic()
+            for part in serialized_parts:
+                serialized_named_tensors = [part for _ in range(tp_size)]
+                self._sync_ipc_bucket_with_retry(serialized_named_tensors, timeout_s=timeout_s)
+                self._record_sync_bucket()
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            logger.debug(f"[{self._group_name}] IPC bucket sync: {len(converted_named_tensors)} params, {elapsed_ms:.1f}ms")
+        finally:
+            long_lived_buckets.clear()
+
         converted_named_tensors.clear()
         if pbar is not None:
             pbar.update(1)
