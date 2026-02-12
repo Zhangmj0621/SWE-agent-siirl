@@ -489,7 +489,7 @@ class RolloutManager:
                 # Best-effort unpause to avoid leaving engines paused on retry paths.
                 with contextlib.suppress(Exception):
                     ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
-            logger.exception("[RolloutManager] offload_for_train failed")
+            logger.error("[RolloutManager] offload_for_train failed\n" + traceback.format_exc())
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] offload_for_train completed in {elapsed_ms:.1f}ms")
@@ -513,7 +513,7 @@ class RolloutManager:
             ray.get([w.onload_memory.remote(["weights"]) for w in tp0_workers], timeout=timeout_s)
             self._weights_onloaded_for_sync = True
         except Exception:
-            logger.exception("[RolloutManager] onload_weights_for_sync failed")
+            logger.error("[RolloutManager] onload_weights_for_sync failed\n" + traceback.format_exc())
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] onload_weights_for_sync completed in {elapsed_ms:.1f}ms")
@@ -542,7 +542,7 @@ class RolloutManager:
             # Resume generation after memory is back.
             ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
         except Exception:
-            logger.exception("[RolloutManager] resume_after_sync failed")
+            logger.error("[RolloutManager] resume_after_sync failed\n" + traceback.format_exc())
             raise
         finally:
             self._weights_onloaded_for_sync = False

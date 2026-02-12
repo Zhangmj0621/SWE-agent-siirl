@@ -394,7 +394,7 @@ class SglangEngine:
 
     def flush_cache(self):
         """Flush the cache of the server."""
-        if self.rank != 0:
+        if self.sgl_args.node_rank != 0:
             return
         timeout_s = self._rpc_timeout_s()
         # flush cache will not return status_code 200 when there are pending requests
@@ -462,13 +462,42 @@ class SglangEngine:
             return
 
         url = f"{self.sgl_args.url()}/{endpoint}"
-        response = requests.post(url, json=payload or {}, timeout=self._rpc_timeout_s())
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError:
-            logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
-            raise
-        return response.json()
+        retryable_endpoints = {
+            "update_weights_from_tensor",
+            "update_weights_from_distributed",
+            "release_memory_occupation",
+            "resume_memory_occupation",
+        }
+        max_retries = 2 if endpoint in retryable_endpoints else 0
+        last_error: Exception | None = None
+
+        for attempt in range(max_retries + 1):
+            process = getattr(self, "process", None)
+            if process is not None and not process.is_alive():
+                raise RuntimeError(
+                    f"SGLang process on {self.ip}:{self.port} is dead (exitcode={process.exitcode}); " f"cannot call /{endpoint}"
+                )
+            try:
+                response = requests.post(url, json=payload or {}, timeout=self._rpc_timeout_s())
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.HTTPError:
+                logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
+                raise
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                last_error = e
+                if attempt >= max_retries:
+                    raise
+                delay_s = min(1.0 * (2**attempt), 4.0)
+                logger.warning(
+                    f"[SglangEngine] request /{endpoint} failed on {self.ip}:{self.port}, "
+                    f"retry {attempt + 1}/{max_retries} in {delay_s:.1f}s: {e}"
+                )
+                time.sleep(delay_s)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Unexpected request failure for endpoint /{endpoint}")
 
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         return self._make_request(
