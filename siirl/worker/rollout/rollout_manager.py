@@ -456,7 +456,7 @@ class RolloutManager:
         return result
 
     def offload_for_train(self, timeout_s: int = 120):
-        """Release rollout GPU memory (weights + kv_cache) before trainer loads model.
+        """Release rollout GPU memory before trainer loads model.
 
         Must be called BEFORE load_megatron_model_to_gpu to avoid OOM in colocated mode.
         Drains pending requests first because SGLang release_memory_occupation
@@ -467,7 +467,13 @@ class RolloutManager:
         tp0_workers = self.get_rollout_worker_on_tp0()
         if not tp0_workers:
             return
-        tags = ["kv_cache", "weights"]
+        # Default to KV-only offload for compatibility with update_weights_from_tensor.
+        # Some SGLang versions cannot safely update weights while WEIGHTS tag is paused.
+        offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
+        self._weights_onloaded_for_sync = False
+        tags = ["kv_cache"]
+        if offload_weights:
+            tags.append("weights")
         logger.info(f"[RolloutManager] offload_for_train: releasing {tags} on {len(tp0_workers)} TP0 workers")
         t0 = time.monotonic()
         pause_succeeded = False
@@ -488,11 +494,34 @@ class RolloutManager:
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] offload_for_train completed in {elapsed_ms:.1f}ms")
 
-    def resume_after_sync(self, timeout_s: int = 120):
-        """Resume rollout GPU memory (weights then kv_cache) after weight sync.
+    def onload_weights_for_sync(self, timeout_s: int = 120):
+        """Ensure weights are resident before IPC weight update in colocated mode."""
+        from loguru import logger
 
-        Weights must be resumed before kv_cache because SGLang may need the model
-        to be loaded before allocating KV cache.  Calls continue_generation at the
+        if not bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False)):
+            return
+        if getattr(self, "_weights_onloaded_for_sync", False):
+            return
+
+        tp0_workers = self.get_rollout_worker_on_tp0()
+        if not tp0_workers:
+            return
+
+        logger.info(f"[RolloutManager] onload_weights_for_sync: resuming weights on {len(tp0_workers)} TP0 workers")
+        t0 = time.monotonic()
+        try:
+            ray.get([w.onload_memory.remote(["weights"]) for w in tp0_workers], timeout=timeout_s)
+            self._weights_onloaded_for_sync = True
+        except Exception:
+            logger.exception("[RolloutManager] onload_weights_for_sync failed")
+            raise
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(f"[RolloutManager] onload_weights_for_sync completed in {elapsed_ms:.1f}ms")
+
+    def resume_after_sync(self, timeout_s: int = 120):
+        """Resume rollout GPU memory after weight sync.
+
+        Calls continue_generation at the
         end to match the pause_generation issued in offload_for_train.
         """
         from loguru import logger
@@ -500,21 +529,23 @@ class RolloutManager:
         tp0_workers = self.get_rollout_worker_on_tp0()
         if not tp0_workers:
             return
+        offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
         t0 = time.monotonic()
         try:
-            # Step 1: resume weights first
-            logger.info(f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers")
-            ray.get([w.onload_memory.remote(["weights"]) for w in tp0_workers], timeout=timeout_s)
+            if offload_weights and not getattr(self, "_weights_onloaded_for_sync", False):
+                logger.info(f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers")
+                ray.get([w.onload_memory.remote(["weights"]) for w in tp0_workers], timeout=timeout_s)
 
-            # Step 2: resume kv_cache after weights are loaded
             logger.info(f"[RolloutManager] resume_after_sync: resuming kv_cache on {len(tp0_workers)} TP0 workers")
             ray.get([w.onload_memory.remote(["kv_cache"]) for w in tp0_workers], timeout=timeout_s)
 
-            # Step 3: resume generation after all memory is back
+            # Resume generation after memory is back.
             ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
         except Exception:
             logger.exception("[RolloutManager] resume_after_sync failed")
             raise
+        finally:
+            self._weights_onloaded_for_sync = False
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] resume_after_sync completed in {elapsed_ms:.1f}ms")
 

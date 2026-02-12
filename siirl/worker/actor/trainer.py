@@ -386,6 +386,23 @@ class Trainer:
 
             load_megatron_model_to_gpu(self.actor_worker.actor_module, load_grad=False)
 
+        # If rollout WEIGHTS were released, onload them before IPC update.
+        # update_weights_from_tensor requires destination weights to be resident.
+        is_colocate = self.config.trainer.colocate and isinstance(self.param_sync, ParamSyncColocated)
+        offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
+        if is_colocate and offload_weights:
+            rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+            onload_error = None
+            if self.rank == 0:
+                try:
+                    ray.get(self.rollout_manager.onload_weights_for_sync.remote(timeout_s=rpc_timeout_s))
+                except Exception as e:
+                    logger.error(f"[Trainer rank=0] onload_weights_for_sync failed: {e}")
+                    onload_error = e
+            onload_error = self._broadcast_rank0_error(onload_error)
+            if onload_error is not None:
+                raise onload_error
+
         try:
             if isinstance(self.param_sync, ParamSyncDistributed):
                 if rollout_workers and any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
