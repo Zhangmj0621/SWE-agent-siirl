@@ -184,6 +184,18 @@ class ActorWorker:
         )
 
     def init_model(self):
+        # Install routing replay patches BEFORE model construction so TopKRouter
+        # __init__ hooks are captured during make_megatron_module().
+        self._routing_replay_enabled = getattr(self.actor_ref_config.actor, "enable_routing_replay", False)
+        if self._routing_replay_enabled:
+            from siirl.utils.routing_replay import RoutingReplayManager
+
+            self._routing_replay_mgr = RoutingReplayManager.get()
+            self._routing_replay_mgr.install()
+            logger.info("[ActorWorker] Routing replay patches installed")
+        else:
+            self._routing_replay_mgr = None
+
         override_model_config = self.actor_ref_config.model.override_config
         override_transformer_config = self.actor_ref_config.actor.megatron.override_transformer_config or OmegaConf.create()
         override_ddp_config = self.actor_ref_config.actor.megatron.override_ddp_config or OmegaConf.create()
@@ -205,6 +217,10 @@ class ActorWorker:
             override_transformer_config=override_transformer_config,
             override_ddp_config=override_ddp_config,
         )
+
+        if self._routing_replay_enabled:
+            n_caches = len(self._routing_replay_mgr.caches)
+            logger.info(f"[ActorWorker] Routing replay: {n_caches} MoE router caches registered")
 
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)

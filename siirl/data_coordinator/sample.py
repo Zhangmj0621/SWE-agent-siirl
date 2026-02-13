@@ -38,6 +38,7 @@ class Sample(BaseModel):
     old_log_probs: np.ndarray | None = Field(default=None)
     ref_log_prob: np.ndarray | None = Field(default=None)
     rollout_log_prob: np.ndarray | None = Field(default=None)
+    rollout_routed_experts: np.ndarray | None = Field(default=None, metadata={"help": "MoE routing decisions from rollout"})
     # from  non_tensor_batch of Dataproto
     raw_prompt: list[str] = Field(default_factory=list)
     raw_prompt_ids: list[int] = Field(default_factory=list)
@@ -128,6 +129,7 @@ def Dict2Samples(data: TensorDict, async_mode: bool = False) -> list[Sample] | a
         local_sample.old_log_probs = data["old_log_probs"][index].numpy() if "old_log_probs" in data else None
         local_sample.ref_log_prob = data["ref_log_prob"][index].numpy() if "ref_log_prob" in data else None
         local_sample.extra_info = data["extra_info"][index] if "extra_info" in data else None
+        local_sample.rollout_routed_experts = data["rollout_routed_experts"][index].numpy() if "rollout_routed_experts" in data else None
         if "multi_modal_inputs" in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
         local_sample.uid = data["uid"][index].item() if isinstance(data["uid"][index], torch.Tensor) else data["uid"][index]

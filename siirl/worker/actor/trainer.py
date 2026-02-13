@@ -436,8 +436,41 @@ class Trainer:
         # Optional memory profiling (enabled via SIIRL_MEMORY_PROFILE=1)
         memory_profiler = MemoryProfiler.create_if_enabled(self.global_step, self.rank)
 
+        # Routing replay stage management for MoE models
+        rr_mgr = getattr(self.actor_worker, "_routing_replay_mgr", None)
+        use_rollout_rr = getattr(self.config.actor_ref.actor, "enable_rollout_routing_replay", False)
+
         with timers["step"]:
+            # --- Routing replay: fill caches from rollout data if available ---
+            if rr_mgr and use_rollout_rr and "rollout_routed_experts" in batch_data:
+                from siirl.utils.routing_replay import RoutingReplayStage
+
+                rollout_experts = batch_data["rollout_routed_experts"]
+                if hasattr(rollout_experts, "data"):
+                    rollout_experts = rollout_experts.data
+                rr_mgr.fill_from_rollout(
+                    rollout_routed_experts=rollout_experts,
+                    micro_batches=batch_data,
+                    model_modules=self.actor_worker.actor_module,
+                    sequence_parallel=self.config.trainer.sequence_parallel,
+                )
+
+            # --- Stage 1: compute_log_prob (actor forward-only) ---
+            # RECORD: compute routing from scratch and cache for replay
+            # REPLAY_FORWARD: replay routing from rollout-captured data
+            if rr_mgr:
+                from siirl.utils.routing_replay import RoutingReplayStage
+
+                log_prob_stage = (
+                    RoutingReplayStage.REPLAY_FORWARD if use_rollout_rr else RoutingReplayStage.RECORD
+                )
+                rr_mgr.set_stage(log_prob_stage)
+
             data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
+
+            if rr_mgr and use_rollout_rr:
+                # Reset forward indices so backward pass can re-read the same cached data
+                rr_mgr.reset_all_forward()
 
             # Compute entropy from log probs
             entropy_loss = None
@@ -455,9 +488,16 @@ class Trainer:
                 offload_megatron_model_to_cpu(self.actor_worker.actor_module)
                 get_torch_device().empty_cache()
 
+            # --- Stage 2: compute_ref_log_prob (ref forward-only) ---
+            # FALLTHROUGH: ref model uses its own routing, no replay
+            if rr_mgr:
+                rr_mgr.set_stage(RoutingReplayStage.FALLTHROUGH)
+
             with timers["ref"]:
                 data_with_ref = self.ref_worker.compute_ref_log_prob(data_with_logprobs)
 
+            # --- Stage 2b: compute_values (critic forward-only) ---
+            # FALLTHROUGH: critic uses its own routing, no replay
             if self.use_critic:
                 with timers["values"]:
                     data_with_values = self.critic_worker.compute_values(data_with_ref)
@@ -477,8 +517,18 @@ class Trainer:
                     lam=lam,
                 )
 
+            # --- Stage 3: update_actor (forward+backward) ---
+            # REPLAY_BACKWARD: replay cached routing for gradient consistency
+            if rr_mgr:
+                rr_mgr.set_stage(RoutingReplayStage.REPLAY_BACKWARD)
+
             with timers["update_actor"]:
                 actor_result = self.actor_worker.update_actor(data_for_update)
+
+            # --- Cleanup: clear routing replay caches ---
+            if rr_mgr:
+                rr_mgr.set_stage(RoutingReplayStage.DISABLED)
+                rr_mgr.clear_all()
 
             # Extract metrics from TensorDict (stored in data["metrics"] by update_actor)
             actor_metrics = actor_result.get("metrics", {})

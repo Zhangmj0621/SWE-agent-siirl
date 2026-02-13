@@ -18,6 +18,8 @@ import multiprocessing
 import os
 import time
 
+import numpy as np
+import pybase64
 import requests
 from loguru import logger
 from sglang.srt.entrypoints.http_server import launch_server
@@ -230,7 +232,7 @@ class SglangEngine:
             return f"http://{self.router_address}/generate"
         return f"http://{self.ip}:{self.port}/generate"
 
-    async def generate(self, input_ids: list[int], is_validate: bool, use_router: bool = False):
+    async def generate(self, input_ids: list[int], is_validate: bool, use_router: bool = False, return_routed_experts: bool = False):
         """Single sample generation with optional router load balancing."""
         sampling_params = self._get_sampling_params(is_validate, len(input_ids))
         url = self._get_generate_url(use_router=use_router)
@@ -240,10 +242,17 @@ class SglangEngine:
             "sampling_params": sampling_params,
             "return_logprob": True,
         }
+        if return_routed_experts:
+            payload["return_routed_experts"] = True
         output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
         responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-        return output["text"], responses, rollout_log_prob
+        routed_experts = None
+        if return_routed_experts and "routed_experts" in output["meta_info"]:
+            routed_experts = np.frombuffer(
+                pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")), dtype=np.int32
+            )
+        return output["text"], responses, rollout_log_prob, routed_experts
 
     async def generate_batch(
         self,
@@ -253,7 +262,8 @@ class SglangEngine:
         show_progress: bool = True,
         progress_desc: str = "Validate",
         sort_by_length: bool = True,
-    ) -> list[tuple[str, list[int], list[float]]]:
+        return_routed_experts: bool = False,
+    ) -> list[tuple[str, list[int], list[float], np.ndarray | None]]:
         """
         Batch generation for single-turn scenarios (no multi-turn/tool calls).
         Uses router for load balancing across multiple engines.
@@ -269,7 +279,7 @@ class SglangEngine:
             sort_by_length: If True, sort requests by prompt length to optimize batching.
 
         Returns:
-            List of (text, response_ids, log_probs) tuples for each input.
+            List of (text, response_ids, log_probs, routed_experts_or_None) tuples for each input.
         """
         if not batch_input_ids:
             return []
@@ -311,10 +321,17 @@ class SglangEngine:
                     "sampling_params": sampling_params,
                     "return_logprob": True,
                 }
+                if return_routed_experts:
+                    payload["return_routed_experts"] = True
                 output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
             responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
             log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-            return output["text"], responses, log_probs
+            routed_experts = None
+            if return_routed_experts and "routed_experts" in output["meta_info"]:
+                routed_experts = np.frombuffer(
+                    pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")), dtype=np.int32
+                )
+            return output["text"], responses, log_probs, routed_experts
 
         # SGLang handles continuous batching internally
         tasks = [_generate_one(ids) for ids in sorted_input_ids]
