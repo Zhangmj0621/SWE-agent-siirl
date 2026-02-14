@@ -420,6 +420,24 @@ class Trainer:
                 offload_megatron_model_to_cpu(self.actor_worker.actor_module)
                 get_torch_device().empty_cache()
 
+    def _offload_rollout_before_train_step(self):
+        """In colocated mode, release rollout memory before actor/ref/critic forward."""
+        is_colocate = self.config.trainer.colocate and isinstance(self.param_sync, ParamSyncColocated)
+        if not is_colocate:
+            return
+
+        rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+        offload_error = None
+        if self.rank == 0:
+            try:
+                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=rpc_timeout_s))
+            except Exception as e:
+                logger.error(f"[Trainer rank=0] pre-train offload_for_train failed: {e}")
+                offload_error = e
+        offload_error = self._broadcast_rank0_error(offload_error)
+        if offload_error is not None:
+            raise offload_error
+
     def _get_regular_rollout_workers(self) -> list:
         if self.rollout_manager is None:
             return []
@@ -858,6 +876,10 @@ class Trainer:
                         time.sleep(SYNC_RETRY_SLEEP_S)
                         continue
                     break
+
+                # Important for colocated mode: generation just finished, rollout memory is hot.
+                # Offload before train_step to avoid actor/ref/critic OOM on shared GPUs.
+                self._offload_rollout_before_train_step()
 
                 # compare
                 self.train_step(batch_data)
