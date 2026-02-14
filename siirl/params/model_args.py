@@ -176,6 +176,10 @@ class RolloutArguments:
     free_cache_engine: bool = field(default=True, metadata={"help": "Free GPU cache"})
     load_format: str = field(default="dummy_dtensor", metadata={"help": "Weight loading format"})
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism"})
+    colocate_param_sync_backend: str = field(
+        default="tensor",
+        metadata={"help": "Colocated param sync backend: tensor or flattened_bucket"},
+    )
     max_num_batched_tokens: int = field(default=8192, metadata={"help": "Max batched tokens"})
     max_model_len: int | None = field(default=None, metadata={"help": "Max model length"})
     max_num_seqs: int = field(default=1024, metadata={"help": "Max concurrent sequences"})

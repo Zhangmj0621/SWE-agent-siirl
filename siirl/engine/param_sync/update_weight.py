@@ -1,5 +1,6 @@
 import socket
 import time
+import traceback
 from abc import abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -388,11 +389,42 @@ class ParamSyncDistributed(ParamSyncInterface):
 class ParamSyncColocated(ParamSyncDistributed):
     """Colocated weight sync uses IPC handles and skips NCCL group setup."""
 
+    _SUPPORTED_BACKENDS = {"tensor", "flattened_bucket"}
     _MAX_SYNC_RETRIES = 2
 
     def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
         super().__init__(config, model, bridge)
+        self._sync_backend = self._resolve_sync_backend()
+        self._fallback_to_tensor = True
+        self._max_sync_retries = self._MAX_SYNC_RETRIES
+        self._tensor_path_logged = False
         self._refresh_sync_context()
+
+    def _resolve_sync_backend(self) -> str:
+        backend = getattr(self.config.rollout, "colocate_param_sync_backend", "tensor")
+
+        backend = str(backend).strip().lower()
+        alias = {
+            "legacy_tensor": "tensor",
+            "tensor_rpc": "tensor",
+            "flattened": "flattened_bucket",
+            "bucket": "flattened_bucket",
+        }
+        backend = alias.get(backend, backend)
+        if backend not in self._SUPPORTED_BACKENDS:
+            logger.warning(f"[ParamSyncColocated] Unknown rollout.colocate_param_sync_backend={backend!r}, " "falling back to 'tensor'.")
+            backend = "tensor"
+        return backend
+
+    def _using_flattened_bucket(self) -> bool:
+        return self._sync_backend == "flattened_bucket"
+
+    def _switch_backend_to_tensor(self, reason: str) -> None:
+        if self._sync_backend == "tensor":
+            return
+        self._sync_backend = "tensor"
+        self._tensor_path_logged = False
+        logger.warning(f"[{self._group_name}] Switched colocated param sync backend to tensor. reason={reason}")
 
     def _refresh_sync_context(self):
         self._is_pp_src_rank = mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
@@ -400,7 +432,8 @@ class ParamSyncColocated(ParamSyncDistributed):
         self._group_name = f"param_sync_colocated-pp_{pp_rank}"
 
     def _sync_ipc_bucket_with_retry(self, serialized_named_tensors: list[bytes], timeout_s: int) -> None:
-        for attempt in range(1, self._MAX_SYNC_RETRIES + 2):
+        retry_limit = self._max_sync_retries
+        for attempt in range(1, retry_limit + 2):
             refs = [
                 worker.param_sync_from_tensor.remote(
                     serialized_named_tensors=serialized_named_tensors,
@@ -414,10 +447,39 @@ class ParamSyncColocated(ParamSyncDistributed):
                 ray.get(refs, timeout=timeout_s)
                 return
             except Exception:
-                if attempt > self._MAX_SYNC_RETRIES:
-                    logger.exception(f"[{self._group_name}] IPC bucket sync failed after retries. " f"retry_limit={self._MAX_SYNC_RETRIES}")
+                if attempt > retry_limit:
+                    logger.error(
+                        f"[{self._group_name}] IPC bucket sync failed after retries. retry_limit={retry_limit}\n"
+                        f"{traceback.format_exc()}"
+                    )
                     raise
-                logger.warning(f"[{self._group_name}] IPC bucket sync retry {attempt}/{self._MAX_SYNC_RETRIES} after failure")
+                logger.warning(f"[{self._group_name}] IPC bucket sync retry {attempt}/{retry_limit} after failure")
+
+    def _sync_bucket_with_tensor_path(
+        self,
+        converted_named_tensors: list[tuple[str, torch.Tensor]],
+        timeout_s: int,
+        pbar: tqdm | None = None,
+    ) -> None:
+        if dist.get_rank() == 0 and not self._tensor_path_logged:
+            logger.warning(
+                f"[{self._group_name}] Using tensor sync backend for colocated mode "
+                "(set rollout.colocate_param_sync_backend=flattened_bucket to opt into IPC bucket path)."
+            )
+            self._tensor_path_logged = True
+
+        refs = update_weights_from_tensor(
+            self.weight_version,
+            self.rollout_workers,
+            converted_named_tensors,
+            self.config.rollout.tensor_model_parallel_size,
+        )
+        if refs:
+            ray.get(refs, timeout=timeout_s)
+            self._record_sync_bucket()
+        converted_named_tensors.clear()
+        if pbar is not None:
+            pbar.update(1)
 
     def setup_param_sync_group(self, rollout_workers: Sequence[ActorHandle]):
         normalized_workers = self._normalize_rollout_workers(rollout_workers)
@@ -427,7 +489,7 @@ class ParamSyncColocated(ParamSyncDistributed):
         self.update_rollout_worker_connected(normalized_workers)
         self._connected_rollout_workers = list(normalized_workers)
         self._connected_rollout_worker_ids = {w._actor_id.hex() for w in normalized_workers}
-        logger.info(f"[{self._group_name}] Colocated param sync group: {len(normalized_workers)} workers (IPC path)")
+        logger.info(f"[{self._group_name}] Colocated param sync group: {len(normalized_workers)} workers ({self._sync_backend} backend)")
 
     @torch.no_grad()
     def update_weights_mixed(
@@ -495,20 +557,31 @@ class ParamSyncColocated(ParamSyncDistributed):
                 pbar.update(1)
             return
 
-        tp_size = max(1, self.config.rollout.tensor_model_parallel_size)
         timeout_s = self._rpc_timeout_s()
 
-        serialized_parts, long_lived_buckets = _serialize_bucket_ipc(converted_named_tensors)
+        if not self._using_flattened_bucket():
+            self._sync_bucket_with_tensor_path(converted_named_tensors, timeout_s=timeout_s, pbar=pbar)
+            return
+
         try:
-            t0 = time.monotonic()
-            for part in serialized_parts:
-                serialized_named_tensors = [part for _ in range(tp_size)]
-                self._sync_ipc_bucket_with_retry(serialized_named_tensors, timeout_s=timeout_s)
-                self._record_sync_bucket()
-            elapsed_ms = (time.monotonic() - t0) * 1000
-            logger.debug(f"[{self._group_name}] IPC bucket sync: {len(converted_named_tensors)} params, {elapsed_ms:.1f}ms")
-        finally:
-            long_lived_buckets.clear()
+            tp_size = max(1, self.config.rollout.tensor_model_parallel_size)
+            serialized_parts, long_lived_buckets = _serialize_bucket_ipc(converted_named_tensors)
+            try:
+                t0 = time.monotonic()
+                for part in serialized_parts:
+                    serialized_named_tensors = [part for _ in range(tp_size)]
+                    self._sync_ipc_bucket_with_retry(serialized_named_tensors, timeout_s=timeout_s)
+                    self._record_sync_bucket()
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                logger.debug(f"[{self._group_name}] IPC bucket sync: {len(converted_named_tensors)} params, {elapsed_ms:.1f}ms")
+            finally:
+                long_lived_buckets.clear()
+        except Exception as exc:
+            if not self._fallback_to_tensor:
+                raise
+            self._switch_backend_to_tensor(reason=f"{type(exc).__name__}: {exc}")
+            self._sync_bucket_with_tensor_path(converted_named_tensors, timeout_s=timeout_s, pbar=pbar)
+            return
 
         converted_named_tensors.clear()
         if pbar is not None:
