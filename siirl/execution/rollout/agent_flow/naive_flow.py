@@ -223,7 +223,7 @@ class NaiveFlow:
         return env_response
 
     async def _handle_generating_state(self, agent_data: AgentData, is_validate=False):
-        _, response_ids, rollout_log_prob = await self.engine.generate(agent_data.prompts_ids, is_validate, use_router=self.use_router)
+        _, response_ids, rollout_log_prob, _ = await self.engine.generate(agent_data.prompts_ids, is_validate, use_router=self.use_router)
         agent_data.response_ids = response_ids
         agent_data.rollout_log_prob += rollout_log_prob
         agent_data.prompts_ids += response_ids

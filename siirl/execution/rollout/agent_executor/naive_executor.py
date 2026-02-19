@@ -450,7 +450,7 @@ class NaiveExecutor:
 
         # 3. Reward + postprocess (direct loop, millisecond-level)
         with Timer("reward_and_postprocess") as reward_time:
-            for sample, (_, response_ids, log_probs) in zip(samples, results, strict=False):
+            for sample, (_, response_ids, log_probs, _routed) in zip(samples, results, strict=False):
                 sample.responses = response_ids
                 sample.response_mask = [1] * len(response_ids)
                 sample.rollout_log_prob = np.array(log_probs, dtype=np.float32)

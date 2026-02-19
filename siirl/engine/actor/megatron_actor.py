@@ -32,6 +32,16 @@ from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, mask
 from siirl.utils.timer import Timer
 
 
+class DictWithDevice(dict):
+    """A dictionary that exposes a .device attribute from its values."""
+
+    @property
+    def device(self):
+        for v in self.values():
+            if isinstance(v, torch.Tensor):
+                return v.device
+        return torch.device("cpu")
+
 class ActorWorker:
     def __init__(self, config: SiiRLArguments):
         assert isinstance(config, SiiRLArguments)
@@ -987,17 +997,27 @@ class MegatronPPOActor:
         partitions = None
         metric_weights = None
         use_dynamic_batch = getattr(self.actor_config, "use_dynamic_batch", False)
+        routing_replay_enabled = getattr(self.actor_config, "enable_routing_replay", False)
         if use_dynamic_batch:
-            from siirl.engine.actor.dynamic_batch import rearrange_micro_batches
+            if routing_replay_enabled:
+                logger.warning(
+                    "[RoutingReplay] use_dynamic_batch is incompatible with routing replay: "
+                    "dynamic batching may produce different micro-batch compositions between "
+                    "RECORD and REPLAY phases. Falling back to static micro-batch splitting."
+                )
+                assert micro_batch_size is not None
+                micro_batches = mini_batch.split(micro_batch_size)
+            else:
+                from siirl.engine.actor.dynamic_batch import rearrange_micro_batches
 
-            micro_batches, partitions = rearrange_micro_batches(
-                batch=mini_batch,
-                max_token_len=self.actor_config.max_tokens_per_gpu,
-                dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
-                vpp_size=len(self.actor_module),
-                sync_micro_num=True,
-                optimize_bubble=self.actor_config.use_workload_balance,
-            )
+                micro_batches, partitions = rearrange_micro_batches(
+                    batch=mini_batch,
+                    max_token_len=self.actor_config.max_tokens_per_gpu,
+                    dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
+                    vpp_size=len(self.actor_module),
+                    sync_micro_num=True,
+                    optimize_bubble=self.actor_config.use_workload_balance,
+                )
         else:
             assert micro_batch_size is not None
             micro_batches = mini_batch.split(micro_batch_size)
@@ -1100,6 +1120,9 @@ class MegatronPPOActor:
                 logits_processor=logits_processor,
                 logits_processor_args=logits_processor_args,
             )
+
+            if isinstance(output, dict) and not hasattr(output, "device"):
+                output = DictWithDevice(output)
 
             return output, partial(loss_func, data=batch)
 

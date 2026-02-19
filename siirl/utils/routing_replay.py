@@ -115,6 +115,10 @@ class RoutingReplayCache:
         """Reset forward replay index (for re-reading same data)."""
         self._forward_idx = 0
 
+    def reset_backward(self) -> None:
+        """Reset backward replay index."""
+        self._backward_idx = 0
+
     def clear(self) -> None:
         """Release all cached entries and reset indices."""
         self._forward_idx = 0
@@ -216,144 +220,57 @@ class RoutingReplayManager:
         for cache in self._caches:
             cache.reset_forward()
 
+    def reset_all_backward(self) -> None:
+        """Reset backward indices on all caches."""
+        for cache in self._caches:
+            cache.reset_backward()
+
+    def reset_all_indices(self) -> None:
+        """Reset both forward and backward indices on all caches."""
+        for cache in self._caches:
+            cache.reset_forward()
+            cache.reset_backward()
+
     # --- Megatron patching ---
 
     def install(self) -> None:
         """
         Monkey-patch Megatron's MoE routing to support routing replay.
 
-        Patches two places:
-        1. TopKRouter.__init__: Adds a RoutingReplayCache + forward pre-hook to each router
-        2. topk_routing_with_score_function: Wraps compute_topk for record/replay
+        Patches TopKRouter:
+        1. __init__: Adds a RoutingReplayCache + forward pre-hook to each router instance
+        2. routing(): Wraps the routing method to intercept top_indices for record/replay
+
+        The routing() patch is version-adaptive: works regardless of whether Megatron
+        uses topk_routing_with_score_function or inline topk logic.
 
         Safe to call multiple times (idempotent).
         """
         if self._installed:
             return
-        self._patch_topk_routing()
         self._patch_topk_router_init()
         self._installed = True
         logger.info("[RoutingReplay] Installed Megatron MoE patches")
 
-    def _patch_topk_routing(self) -> None:
-        """Wrap compute_topk inside topk_routing_with_score_function."""
-        try:
-            import megatron.core.transformer.moe.moe_utils as moe_utils
-        except ImportError:
-            logger.warning("[RoutingReplay] megatron.core not found, skipping compute_topk patch")
-            return
-
-        original_fn = moe_utils.topk_routing_with_score_function
-        manager = self  # Capture reference for the closure
-
-        def patched_topk_routing_with_score_function(
-            logits,
-            topk,
-            score_function,
-            use_pre_softmax=False,
-            num_groups=None,
-            group_topk=None,
-        ):
-            """
-            Patched version that wraps the inner compute_topk with routing replay.
-
-            For DISABLED/FALLTHROUGH stages, delegates entirely to the original
-            Megatron implementation to stay compatible with upstream changes.
-
-            For RECORD/REPLAY stages, we re-implement the score function application
-            and intercept the topk selection to record/replay expert indices.
-            """
-            stage = manager.current_stage
-            cache = manager.active_cache
-
-            # Fast path: delegate to original for non-replay stages or non-MoE layers
-            if (
-                stage == RoutingReplayStage.DISABLED
-                or stage == RoutingReplayStage.FALLTHROUGH
-                or cache is None
-            ):
-                return original_fn(
-                    logits, topk, score_function,
-                    use_pre_softmax=use_pre_softmax,
-                    num_groups=num_groups, group_topk=group_topk,
-                )
-
-            # Slow path: intercept compute_topk for record/replay
-            # Re-implement score function application (same as Megatron's logic)
-            if score_function == "softmax":
-                if use_pre_softmax:
-                    scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
-                else:
-                    scores = logits
-            elif score_function == "sigmoid":
-                scores = torch.sigmoid(logits)
-            else:
-                raise ValueError(f"Unsupported score function: {score_function}")
-
-            # Original compute_topk logic
-            def _compute_topk(scores, topk, num_groups=None, group_topk=None):
-                if num_groups is not None and group_topk is not None:
-                    num_experts = scores.shape[1]
-                    experts_per_group = num_experts // num_groups
-                    scores_grouped = scores.view(-1, num_groups, experts_per_group)
-                    group_scores = scores_grouped.topk(group_topk, dim=-1).values.sum(dim=-1)
-                    group_indices = group_scores.topk(num_groups, dim=-1, sorted=False).indices
-                    group_mask = torch.zeros_like(group_scores)
-                    group_mask.scatter_(1, group_indices, 1)
-                    score_mask = (
-                        group_mask.unsqueeze(-1).expand(-1, -1, experts_per_group).reshape(-1, num_experts)
-                    )
-                    scores = scores * score_mask
-                    return torch.topk(scores, k=topk, dim=1)
-                else:
-                    return torch.topk(scores, k=topk, dim=1)
-
-            if stage == RoutingReplayStage.RECORD:
-                probs, top_indices = _compute_topk(scores, topk, num_groups=num_groups, group_topk=group_topk)
-                cache.record(top_indices)
-                return probs, top_indices
-
-            elif stage in (RoutingReplayStage.REPLAY_FORWARD, RoutingReplayStage.REPLAY_BACKWARD):
-                if stage == RoutingReplayStage.REPLAY_FORWARD:
-                    top_indices = cache.pop_forward()
-                else:
-                    top_indices = cache.pop_backward()
-                assert top_indices.shape[0] == scores.shape[0] and top_indices.shape[1] == topk, (
-                    f"[RoutingReplay] Shape mismatch: cached {top_indices.shape} vs "
-                    f"scores {scores.shape}, topk={topk}"
-                )
-                probs = scores.gather(1, top_indices)
-                return probs, top_indices
-
-            # Should not reach here, but fallback to original
-            return original_fn(
-                logits, topk, score_function,
-                use_pre_softmax=use_pre_softmax,
-                num_groups=num_groups, group_topk=group_topk,
-            )
-
-        moe_utils.topk_routing_with_score_function = patched_topk_routing_with_score_function
-
-        # Also patch the reference in router.py, which may have imported the function
-        # by name (from moe_utils import topk_routing_with_score_function).
-        # Without this, router.py's local binding would still point to the original.
-        try:
-            import megatron.core.transformer.moe.router as router_module
-
-            if hasattr(router_module, "topk_routing_with_score_function"):
-                router_module.topk_routing_with_score_function = patched_topk_routing_with_score_function
-        except ImportError:
-            pass
-
     def _patch_topk_router_init(self) -> None:
-        """Patch TopKRouter.__init__ to register a RoutingReplayCache per router."""
+        """
+        Patch TopKRouter to support routing replay.
+
+        Two patches per router instance:
+        1. __init__: Creates a RoutingReplayCache and registers a forward pre-hook
+           to set the active cache before each forward pass.
+        2. routing(): Wraps the routing method to intercept (scores, top_indices).
+           In RECORD mode, caches top_indices. In REPLAY mode, substitutes cached
+           top_indices and recomputes scores via gather.
+        """
         try:
             from megatron.core.transformer.moe.router import TopKRouter
         except ImportError:
-            logger.warning("[RoutingReplay] megatron.core.transformer.moe.router not found, skipping router patch")
+            logger.warning("[RoutingReplay] megatron.core.transformer.moe.router not found, skipping")
             return
 
         original_init = TopKRouter.__init__
+        original_routing = TopKRouter.routing
         manager = self
 
         def patched_init(self_router, *args, **kwargs):
@@ -370,7 +287,100 @@ class RoutingReplayManager:
 
             self_router.register_forward_pre_hook(_pre_hook)
 
+        def patched_routing(self_router, logits):
+            """
+            Wraps TopKRouter.routing() to intercept expert routing decisions.
+
+            TopKRouter.routing() returns (scores, routing_map) where:
+            - scores: expert probabilities (may be 2D or 3D depending on Megatron version)
+            - routing_map: token-to-expert assignment (binary mask or index map)
+
+            We cache routing_map (the routing decision) and replay it to ensure
+            consistent expert assignment across forward/backward passes. Scores are
+            recomputed from current logits in replay mode to maintain gradient flow
+            through the router weights.
+
+            Gradient checkpointing compatibility:
+            With recompute_granularity="full", each layer's forward runs twice per
+            micro-batch during update_actor:
+              1. Checkpointed forward: inside torch.no_grad() → is_grad_enabled()=False
+              2. Backward recompute: inside torch.enable_grad() → is_grad_enabled()=True
+            Both calls must return the SAME cached entry. We use separate indices
+            (forward_idx for #1, backward_idx for #2) that advance in lockstep.
+            Without checkpointing, only the grad-enabled path (#2) is taken.
+            """
+            stage = manager.current_stage
+            cache = manager.active_cache
+
+            # Fast path: delegate to original
+            if (
+                stage == RoutingReplayStage.DISABLED
+                or stage == RoutingReplayStage.FALLTHROUGH
+                or cache is None
+            ):
+                return original_routing(self_router, logits)
+
+            if stage == RoutingReplayStage.RECORD:
+                scores, routing_map = original_routing(self_router, logits)
+                cache.record(routing_map)
+                return scores, routing_map
+
+            # REPLAY_FORWARD or REPLAY_BACKWARD: use cached routing_map
+            if stage == RoutingReplayStage.REPLAY_FORWARD:
+                routing_map = cache.pop_forward()
+            elif stage == RoutingReplayStage.REPLAY_BACKWARD:
+                # Distinguish checkpointed forward vs backward recompute:
+                # - Checkpointed forward runs inside torch.no_grad() → pop_forward
+                # - Backward recompute runs inside torch.enable_grad() → pop_backward
+                # - Non-checkpointed forward has grad enabled → pop_backward (no recompute follows)
+                # Both indices advance in lockstep, returning the same entry[i] for micro-batch i.
+                if not torch.is_grad_enabled():
+                    routing_map = cache.pop_forward()
+                else:
+                    routing_map = cache.pop_backward()
+            else:
+                return original_routing(self_router, logits)
+
+            # Recompute scores from current logits for gradient flow.
+            # Apply the router's score function (softmax/sigmoid) to get per-expert scores,
+            # then mask by the cached routing_map so only selected experts have nonzero scores.
+            score_function = getattr(self_router, "routing_score_function", None) or getattr(
+                self_router.config, "moe_router_score_function", "softmax"
+            )
+            use_pre_softmax = getattr(self_router.config, "moe_router_pre_softmax", True)
+
+            if score_function == "softmax":
+                if use_pre_softmax:
+                    scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
+                else:
+                    scores = logits
+            elif score_function == "sigmoid":
+                scores = torch.sigmoid(logits)
+            else:
+                scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
+
+            # Mask scores by routing_map: zero out non-selected experts.
+            # routing_map is [num_tokens, num_experts] (2D).
+            # scores may be 2D or 3D depending on logits shape; flatten to 2D first.
+            if scores.dim() == 3:
+                scores = scores.view(-1, scores.shape[-1])  # [tokens, num_experts]
+
+            if scores.shape[0] != routing_map.shape[0]:
+                raise RuntimeError(
+                    f"[RoutingReplay] Token count mismatch in layer {cache.layer_id}: "
+                    f"scores {scores.shape} vs routing_map {routing_map.shape}. "
+                    f"Stage={stage.value}, grad_enabled={torch.is_grad_enabled()}, "
+                    f"fwd_idx={cache._forward_idx}, bwd_idx={cache._backward_idx}, "
+                    f"entries={len(cache)}. This usually means micro-batch formation "
+                    f"differs between RECORD and REPLAY phases."
+                )
+
+            scores = scores * (routing_map != 0).to(scores.dtype)
+
+            return scores, routing_map
+
         TopKRouter.__init__ = patched_init
+        TopKRouter.routing = patched_routing
 
     # --- Rollout routing replay support ---
 
