@@ -200,11 +200,11 @@ class Trainer:
             self.critic_worker.init_model()
             logger.info(f"[Trainer.init_models] rank={self.rank} CriticWorker initialized")
 
-        # Use with_context_parallel=True for dp_rank/dp_world_size:
+        # Use with_context_parallel=False for dp_rank/dp_world_size:
         # - Ensures CP group ranks have the same dp_rank (they process the same batch's different sequence parts)
         # - Matches the DP group used in _sync_batch_availability
-        self.dp_rank = mpu.get_data_parallel_rank(with_context_parallel=True)
-        self.dp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
+        self.dp_rank = mpu.get_data_parallel_rank(with_context_parallel=False)
+        self.dp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
         self.tp_rank = mpu.get_tensor_model_parallel_rank()
         self.pp_rank = mpu.get_pipeline_model_parallel_rank()
         self.cp_rank = mpu.get_context_parallel_rank()
