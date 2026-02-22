@@ -26,8 +26,10 @@ import torch
 from loguru import logger
 
 from siirl.data_coordinator.sample import Sample, SampleInfo
+from siirl.execution.rollout.concurrency import resolve_rollout_concurrency
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.model_utils.model import compute_position_id_with_mask
+from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient
 from siirl.utils.timer import Timer
 
 
@@ -55,7 +57,11 @@ class NaiveExecutor:
         self.engine = engine  # Inference engine for text generation
         # TODO: use validation arguments here
         self.train_batch_size = train_batch_size  # Target batch size for rollout samples
-        self.max_concurrency_size = train_batch_size * config.rollout.n
+        target_concurrency = max(1, int(train_batch_size) * int(config.rollout.n))
+        train_limits = resolve_rollout_concurrency(config, phase="train", use_router=False)
+        self.max_concurrency_size = min(target_concurrency, int(train_limits["effective"]))
+        self._train_target_concurrency = target_concurrency
+        self._train_concurrency_limits = train_limits
         self.tasks: set[asyncio.Task] = set()  # Track active generation tasks for cleanup
         self.finish_group_samples: dict[str, list[Any]] = {}  # Save result of finish samples until reach n group
         self.pending_queue = deque()
@@ -360,6 +366,13 @@ class NaiveExecutor:
         self.running = True
         stats_task = None
         if self._dp_rank == 0:
+            limits = self._train_concurrency_limits
+            logger.info(
+                "Rollout train concurrency: "
+                f"target={self._train_target_concurrency}, "
+                f"base_key={limits['base_key']}, base={limits['base']}, "
+                f"max_num_seqs={limits['max_num_seqs']}, effective={self.max_concurrency_size}"
+            )
             stats_task = asyncio.create_task(self.rollout_status())
 
         while self.running:
@@ -481,22 +494,14 @@ class NaiveExecutor:
         return idx, result
 
     def _resolve_validate_concurrency(self, use_router: bool) -> int:
-        """Resolve validate concurrency for multi-turn path with a hard upper bound."""
-        max_num_seqs = max(1, int(getattr(self.config.rollout, "max_num_seqs", 1)))
-        if use_router:
-            base = max(1, int(getattr(self.config.rollout, "server_concurrency", 1)))
-            rollout_gpus = max(1, int(getattr(self.config.trainer, "rollout_gpus", 1)))
-            tp_size = max(1, int(getattr(self.config.rollout, "tensor_model_parallel_size", 1)))
-            num_engines = max(1, rollout_gpus // tp_size)
-            resolved = base * num_engines
-        else:
-            resolved = max(1, int(getattr(self.config.rollout, "validate_server_concurrency", 64)))
-        effective = min(resolved, max_num_seqs)
+        limits = resolve_rollout_concurrency(self.config, phase="validate", use_router=use_router)
         logger.debug(
-            f"Validate multi-turn concurrency: use_router={use_router}, resolved={resolved}, "
-            f"max_num_seqs={max_num_seqs}, effective={effective}"
+            "Validate multi-turn concurrency: "
+            f"use_router={use_router}, base_key={limits['base_key']}, base={limits['base']}, "
+            f"num_engines={limits['num_engines']}, resolved={limits['resolved']}, "
+            f"max_num_seqs={limits['max_num_seqs']}, effective={limits['effective']}"
         )
-        return effective
+        return int(limits["effective"])
 
     async def _validate_multi_turn(
         self,
@@ -589,8 +594,18 @@ class NaiveExecutor:
         while True:
             await asyncio.sleep(interval)
             current_status = len(self.tasks)
-            if last_status != current_status:
-                logger.info(f"rank_{self._rank} active generate tasks: {current_status}, {len(self.pending_queue)} left in pending_queue")
+            http_metrics = GlobalAsyncHTTPClient.drain_metrics()
+            attempts = int(http_metrics.get("attempts", 0))
+            timeouts = int(http_metrics.get("timeouts", 0))
+            timeout_rate = (timeouts / attempts) if attempts > 0 else 0.0
+
+            if last_status != current_status or timeouts > 0:
+                logger.info(
+                    f"rank_{self._rank} active generate tasks: {current_status}, "
+                    f"{len(self.pending_queue)} left in pending_queue, "
+                    f"sem_limit={self.max_concurrency_size}, "
+                    f"http_attempts={attempts}, http_timeouts={timeouts}, http_timeout_rate={timeout_rate:.3f}"
+                )
                 last_status = current_status
 
     async def stop(self):

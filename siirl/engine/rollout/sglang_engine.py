@@ -25,6 +25,7 @@ from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from urllib3.exceptions import NewConnectionError
 
+from siirl.execution.rollout.concurrency import resolve_rollout_concurrency
 from siirl.models.loader import load_tokenizer
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient, wait_until_ok
@@ -251,29 +252,15 @@ class SglangEngine:
         return output["text"], responses, rollout_log_prob
 
     def _resolve_batch_concurrency(self, use_router: bool) -> int:
-        """Compute the effective semaphore limit for generate_batch.
-
-        Router path: ``server_concurrency * num_engines`` — the router
-        distributes requests across all engines so the total budget scales.
-        Local/validate path: ``validate_server_concurrency`` — each worker
-        talks to a single engine directly, no multiplier.
-        Both paths are capped by ``max_num_seqs`` to prevent overloading the
-        SGLang scheduler.
-        """
-        max_num_seqs = max(1, int(self.config.rollout.max_num_seqs))
-        if use_router:
-            base = max(1, int(self.config.rollout.server_concurrency))
-            rollout_gpus = max(1, int(getattr(self.config.trainer, "rollout_gpus", 1)))
-            tp_size = max(1, int(getattr(self.config.rollout, "tensor_model_parallel_size", 1)))
-            num_engines = max(1, rollout_gpus // tp_size)
-            resolved = base * num_engines
-        else:
-            resolved = max(1, int(getattr(self.config.rollout, "validate_server_concurrency", 64)))
-        effective = min(resolved, max_num_seqs)
+        limits = resolve_rollout_concurrency(self.config, phase="validate", use_router=use_router)
         logger.debug(
-            f"Batch concurrency: use_router={use_router}, resolved={resolved}, " f"max_num_seqs={max_num_seqs}, effective={effective}"
+            "Batch concurrency: "
+            f"phase={limits['phase']}, use_router={bool(limits['use_router'])}, "
+            f"base_key={limits['base_key']}, base={limits['base']}, "
+            f"num_engines={limits['num_engines']}, resolved={limits['resolved']}, "
+            f"max_num_seqs={limits['max_num_seqs']}, effective={limits['effective']}"
         )
-        return effective
+        return int(limits["effective"])
 
     async def generate_batch(
         self,

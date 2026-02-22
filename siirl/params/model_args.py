@@ -183,6 +183,10 @@ class RolloutArguments:
         default=512,
         metadata={"help": "Max concurrent client requests per rollout engine during batch generation"},
     )
+    train_server_concurrency: int = field(
+        default=256,
+        metadata={"help": "Max concurrent client requests per worker during training rollout"},
+    )
     validate_server_concurrency: int = field(
         default=64,
         metadata={"help": "Max concurrent client requests per worker during validation (local, no router)"},

@@ -129,6 +129,35 @@ class GlobalAsyncHTTPClient:
     """
 
     _connect_timeout: float = 10.0  # Connection timeout in seconds
+    _metrics_lock = threading.Lock()
+    _metrics = {
+        "attempts": 0,
+        "success": 0,
+        "timeouts": 0,
+        "errors": 0,
+    }
+
+    @classmethod
+    def _record_metrics(cls, *, attempts: int = 0, success: int = 0, timeouts: int = 0, errors: int = 0) -> None:
+        if attempts == 0 and success == 0 and timeouts == 0 and errors == 0:
+            return
+        with cls._metrics_lock:
+            cls._metrics["attempts"] += int(attempts)
+            cls._metrics["success"] += int(success)
+            cls._metrics["timeouts"] += int(timeouts)
+            cls._metrics["errors"] += int(errors)
+
+    @classmethod
+    def drain_metrics(cls) -> dict[str, int]:
+        with cls._metrics_lock:
+            current = dict(cls._metrics)
+            cls._metrics = {
+                "attempts": 0,
+                "success": 0,
+                "timeouts": 0,
+                "errors": 0,
+            }
+        return current
 
     @classmethod
     async def _get_client(cls) -> httpx.AsyncClient:
@@ -187,6 +216,10 @@ class GlobalAsyncHTTPClient:
             asyncio.CancelledError: If the request task is cancelled.
         """
         client = await cls._get_client()
+        attempts = 0
+        success = 0
+        timeouts = 0
+        errors = 0
 
         # Use provided parameters or fall back to defaults
         use_max_attempts = max_attempts or DEFAULT_MAX_ATTEMPTS
@@ -198,47 +231,79 @@ class GlobalAsyncHTTPClient:
             pool=None,
         )
 
-        for attempt in range(use_max_attempts):
-            attempt_num = attempt + 1
-            try:
-                response = await client.request(method=method, url=url, json=payload or {}, timeout=use_timeout)
-                response.raise_for_status()
-                logger.debug(f"Request to {url} succeeded (attempt {attempt_num}/{use_max_attempts})")
-                return response.json()
+        try:
+            for attempt in range(use_max_attempts):
+                attempt_num = attempt + 1
+                attempts += 1
+                try:
+                    response = await client.request(method=method, url=url, json=payload or {}, timeout=use_timeout)
+                    response.raise_for_status()
+                    success += 1
+                    logger.debug(f"Request to {url} succeeded (attempt {attempt_num}/{use_max_attempts})")
+                    return response.json()
 
-            except httpx.HTTPStatusError as e:
-                status_code = e.response.status_code if e.response is not None else None
-                if status_code in {408, 425, 429, 500, 502, 503, 504}:
+                except httpx.HTTPStatusError as e:
+                    errors += 1
+                    status_code = e.response.status_code if e.response is not None else None
+                    if status_code in {408, 425, 429, 500, 502, 503, 504}:
+                        logger.warning(
+                            f"Transient HTTP error for {url} (attempt {attempt_num}/{use_max_attempts}): "
+                            f"status={status_code}, detail={e!r}"
+                        )
+                    else:
+                        logger.error(
+                            f"HTTP error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"status={status_code}, detail={e!r}"
+                        )
+                        raise
+
+                except httpx.ConnectTimeout as e:
+                    timeouts += 1
+                    errors += 1
                     logger.warning(
-                        f"Transient HTTP error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"status={status_code}, detail={e!r}"
+                        f"Request error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"{type(e).__name__}, detail={e!r}"
                     )
-                else:
-                    logger.error(f"HTTP error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"status={status_code}, detail={e!r}")
+
+                except httpx.ReadTimeout as e:
+                    timeouts += 1
+                    errors += 1
+                    logger.warning(
+                        f"Request error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"{type(e).__name__}, detail={e!r}"
+                    )
+
+                except httpx.TimeoutException as e:
+                    timeouts += 1
+                    errors += 1
+                    logger.warning(
+                        f"Request error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"{type(e).__name__}, detail={e!r}"
+                    )
+
+                except (httpx.ConnectError, httpx.RequestError) as e:
+                    errors += 1
+                    logger.warning(
+                        f"Request error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"{type(e).__name__}, detail={e!r}"
+                    )
+
+                except asyncio.CancelledError:
                     raise
 
-            except (
-                httpx.ReadTimeout,
-                httpx.ConnectTimeout,
-                httpx.ConnectError,
-                httpx.TimeoutException,
-                httpx.RequestError,
-            ) as e:
-                logger.warning(f"Request error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"{type(e).__name__}, detail={e!r}")
+                except Exception as e:
+                    errors += 1
+                    logger.error(
+                        f"Unknown error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"{type(e).__name__}, detail={e!r}"
+                    )
+                    if attempt == use_max_attempts - 1:
+                        raise
 
-            except asyncio.CancelledError:
-                raise
+                if attempt < use_max_attempts - 1:
+                    sleep_time = use_retry_delay * (2**attempt)
+                    logger.debug(
+                        f"Retrying request to {url} in {sleep_time:.2f} seconds " f"(attempt {attempt_num + 1}/{use_max_attempts})"
+                    )
+                    await asyncio.sleep(sleep_time)
 
-            except Exception as e:
-                logger.error(f"Unknown error for {url} (attempt {attempt_num}/{use_max_attempts}): " f"{type(e).__name__}, detail={e!r}")
-                if attempt == use_max_attempts - 1:
-                    raise
-
-            if attempt < use_max_attempts - 1:
-                sleep_time = use_retry_delay * (2**attempt)
-                logger.debug(f"Retrying request to {url} in {sleep_time:.2f} seconds (attempt {attempt_num + 1}/{use_max_attempts})")
-                await asyncio.sleep(sleep_time)
-
-        raise RuntimeError(f"Request to {url} failed after {use_max_attempts} attempts")
+            raise RuntimeError(f"Request to {url} failed after {use_max_attempts} attempts")
+        finally:
+            cls._record_metrics(attempts=attempts, success=success, timeouts=timeouts, errors=errors)
 
     @classmethod
     async def close(cls):

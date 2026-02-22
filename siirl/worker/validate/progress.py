@@ -121,7 +121,7 @@ class ValidateProgressMonitor:
                     desc=f"Validate@step{step}",
                     unit="sample",
                     dynamic_ncols=True,
-                    leave=True,
+                    leave=False,
                     file=sys.stdout,
                 )
                 self.last_progress_rollout_index = rollout_index
