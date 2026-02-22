@@ -183,6 +183,14 @@ class RolloutArguments:
         default=512,
         metadata={"help": "Max concurrent client requests per rollout engine during batch generation"},
     )
+    validate_server_concurrency: int = field(
+        default=64,
+        metadata={"help": "Max concurrent client requests per worker during validation (local, no router)"},
+    )
+    validate_chunk_size: int = field(
+        default=256,
+        metadata={"help": "Number of samples per validation chunk to limit peak concurrency"},
+    )
     do_sample: bool = field(default=True, metadata={"help": "Enable sampling"})
     n: int = field(default=1, metadata={"help": "Number of responses"})
     enable_chunked_prefill: bool = field(default=True, metadata={"help": "Whether or not enable chunked prefill"})

@@ -480,6 +480,24 @@ class NaiveExecutor:
         result = await self.generate(sample, is_validate=True)
         return idx, result
 
+    def _resolve_validate_concurrency(self, use_router: bool) -> int:
+        """Resolve validate concurrency for multi-turn path with a hard upper bound."""
+        max_num_seqs = max(1, int(getattr(self.config.rollout, "max_num_seqs", 1)))
+        if use_router:
+            base = max(1, int(getattr(self.config.rollout, "server_concurrency", 1)))
+            rollout_gpus = max(1, int(getattr(self.config.trainer, "rollout_gpus", 1)))
+            tp_size = max(1, int(getattr(self.config.rollout, "tensor_model_parallel_size", 1)))
+            num_engines = max(1, rollout_gpus // tp_size)
+            resolved = base * num_engines
+        else:
+            resolved = max(1, int(getattr(self.config.rollout, "validate_server_concurrency", 64)))
+        effective = min(resolved, max_num_seqs)
+        logger.debug(
+            f"Validate multi-turn concurrency: use_router={use_router}, resolved={resolved}, "
+            f"max_num_seqs={max_num_seqs}, effective={effective}"
+        )
+        return effective
+
     async def _validate_multi_turn(
         self,
         samples: list[Sample],
@@ -493,18 +511,31 @@ class NaiveExecutor:
         """
         # Enable router on rollout_flow for validate duration
         self.rollout_flow.use_router = use_router
+        max_concurrent = self._resolve_validate_concurrency(use_router)
+        validate_semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def _indexed_generate_limited(idx: int, sample: Sample):
+            async with validate_semaphore:
+                return await self._indexed_generate(idx, sample)
+
+        tasks: list[asyncio.Task] = []
         try:
             results = [None] * len(samples)
-            tasks = [self._indexed_generate(i, s) for i, s in enumerate(samples)]
+            tasks = [asyncio.create_task(_indexed_generate_limited(i, s)) for i, s in enumerate(samples)]
 
-            for coro in asyncio.as_completed(tasks):
-                idx, result = await coro
+            for task in asyncio.as_completed(tasks):
+                idx, result = await task
                 results[idx] = result
                 if progress_callback is not None:
                     progress_callback(1)
 
             return results
         finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             self.rollout_flow.use_router = False
 
     async def validate(self, val_batch_size: int) -> tuple[list[Sample], dict]:

@@ -1048,20 +1048,28 @@ class MegatronPPOActor:
         log_batch_info(data, micro_batch_size, len(micro_batches), forward_only)
         forward_backward_func = get_forward_backward_func()
 
-        def loss_func(output, data, non_loss_data=False):
+        def loss_func(output_tensor, data, non_loss_data=False):
+            # Prefer queued dict payload; fallback keeps backward compatibility.
+            if _payload_channel:
+                output = _payload_channel.pop(0)
+            elif isinstance(output_tensor, dict):
+                output = output_tensor
+            else:
+                raise TypeError(
+                    f"loss_func expected dict payload from side-channel or output_tensor, "
+                    f"got {type(output_tensor).__name__}. This indicates a forward_step "
+                    f"contract violation — logits_processor output was not properly routed."
+                )
+
             device = output["log_probs"].device
             responses = data["responses"]
             response_length = responses.size(1)
 
-            # Check output format:
-            # - Response-only: shape is [batch, response_length], use directly
-            # - Packed/full: shape is [batch, seq_len], extract response part
+            # Support both response-only and full-sequence log-prob layouts.
             log_probs_shape = output["log_probs"].shape
             if log_probs_shape[-1] == response_length:
-                # Response-only format: already [batch, response_length]
                 log_prob = output["log_probs"].contiguous()
             else:
-                # Full sequence format: [batch, seq_len], extract response part
                 log_prob = output["log_probs"][:, -response_length - 1 : -1].contiguous()
 
             model_output = {"log_probs": log_prob}
@@ -1104,6 +1112,9 @@ class MegatronPPOActor:
                 "sum_metrics_reduce": "sum" if use_sum_reduce else "mean",
             }
             return scaled_loss, metric_payload
+
+        # Keep dict payloads for loss_func while returning tensor output to Megatron schedule.
+        _payload_channel: list[dict] = []
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
@@ -1161,7 +1172,14 @@ class MegatronPPOActor:
                 logits_processor_args=logits_processor_args,
             )
 
-            return output, partial(loss_func, data=batch)
+            # Return tensor for schedule hooks and queue dict payload for loss_func.
+            if isinstance(output, dict):
+                _payload_channel.append(output)
+                output_tensor = output["log_probs"]
+            else:
+                output_tensor = output
+
+            return output_tensor, partial(loss_func, data=batch)
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 

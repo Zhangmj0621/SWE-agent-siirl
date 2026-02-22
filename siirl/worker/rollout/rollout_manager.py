@@ -676,14 +676,24 @@ class RolloutManager:
     def get_validate_progress_snapshot(self):
         return self._validate_progress.snapshot()
 
-    async def _monitor_validate_progress(self, assigned_workers: list[tuple], total_samples: int):
+    async def _monitor_validate_progress(
+        self,
+        assigned_workers: list[tuple],
+        *,
+        total_samples: int,
+        chunk_samples: int,
+        done_offset: int = 0,
+    ):
         total_samples = max(0, int(total_samples))
+        chunk_samples = max(0, int(chunk_samples))
+        done_offset = max(0, int(done_offset))
         worker_total = len(assigned_workers)
-        if total_samples <= 0 or worker_total <= 0:
+        initial_done = min(done_offset, total_samples)
+        if total_samples <= 0 or chunk_samples <= 0 or worker_total <= 0:
             self._set_validate_progress_state(
-                active=False,
+                active=initial_done < total_samples,
                 total=total_samples,
-                done=total_samples,
+                done=initial_done,
                 workers_active=0,
                 workers_total=worker_total,
             )
@@ -692,11 +702,12 @@ class RolloutManager:
         self._set_validate_progress_state(
             active=True,
             total=total_samples,
-            done=0,
+            done=initial_done,
             workers_active=worker_total,
             workers_total=worker_total,
         )
 
+        last_global_done = initial_done
         try:
             while True:
                 progress_refs = [worker.get_validate_progress.remote() for worker, _ in assigned_workers]
@@ -710,23 +721,25 @@ class RolloutManager:
                     if progress.get("active", False):
                         workers_active += 1
 
-                done_samples = min(done_samples, total_samples)
+                done_samples = min(done_samples, chunk_samples)
+                global_done = min(done_offset + done_samples, total_samples)
+                last_global_done = global_done
                 self._set_validate_progress_state(
-                    active=done_samples < total_samples,
+                    active=global_done < total_samples,
                     total=total_samples,
-                    done=done_samples,
+                    done=global_done,
                     workers_active=workers_active,
                     workers_total=worker_total,
                 )
 
-                if done_samples >= total_samples:
+                if done_samples >= chunk_samples:
                     return
                 await asyncio.sleep(PROGRESS_POLL_INTERVAL_S)
         finally:
             self._set_validate_progress_state(
-                active=False,
+                active=last_global_done < total_samples,
                 total=total_samples,
-                done=total_samples,
+                done=last_global_done,
                 workers_active=0,
                 workers_total=worker_total,
             )
@@ -777,6 +790,8 @@ class RolloutManager:
 
             logger.info("Starting validate rollout...")
             validate_workers = self.get_rollout_worker_on_tp0() + self._validate_reuse_pool.tp0_workers
+
+            # Drain all validation samples from the data coordinator.
             all_val_samples = []
             drain_batch_size = max(val_batch_size * val_num_batch, len(validate_workers))
             while True:
@@ -785,31 +800,65 @@ class RolloutManager:
                     break
                 all_val_samples.extend(val_batch)
 
-            shards = split_validate_samples(all_val_samples, len(validate_workers))
-            logger.info(
-                f"Validate dispatch: workers={len(validate_workers)}, "
-                f"samples={len(all_val_samples)}, shard_sizes={[len(shard) for shard in shards]}"
-            )
-            assigned_workers = [(worker, len(shards[idx])) for idx, worker in enumerate(validate_workers) if shards[idx]]
-            futures = [
-                worker.validate_assigned.remote(shards[idx], self.global_steps)
-                for idx, worker in enumerate(validate_workers)
-                if shards[idx]
-            ]
-            progress_task = None
-            if assigned_workers:
-                progress_task = asyncio.create_task(self._monitor_validate_progress(assigned_workers, len(all_val_samples)))
-            try:
-                results = await asyncio.gather(*futures) if futures else []
-            finally:
-                if progress_task is not None:
-                    if not progress_task.done():
-                        progress_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await progress_task
+            total_samples = len(all_val_samples)
+            chunk_size = max(1, int(getattr(self.config.rollout, "validate_chunk_size", 256)))
+            # Ensure chunk_size is at least num_workers so every worker gets work per chunk.
+            chunk_size = max(chunk_size, len(validate_workers))
+
+            logger.info(f"Validate dispatch: workers={len(validate_workers)}, " f"samples={total_samples}, chunk_size={chunk_size}")
+
             all_samples = []
-            for samples, _ in results:
-                all_samples.extend(samples)
+            dispatched = 0
+            for chunk_start in range(0, total_samples, chunk_size):
+                chunk = all_val_samples[chunk_start : chunk_start + chunk_size]
+                chunk_samples = len(chunk)
+                shards = split_validate_samples(chunk, len(validate_workers))
+                assigned_workers = [(worker, len(shards[idx])) for idx, worker in enumerate(validate_workers) if shards[idx]]
+                futures = [
+                    worker.validate_assigned.remote(shards[idx], self.global_steps)
+                    for idx, worker in enumerate(validate_workers)
+                    if shards[idx]
+                ]
+                progress_task = None
+                if assigned_workers:
+                    progress_task = asyncio.create_task(
+                        self._monitor_validate_progress(
+                            assigned_workers,
+                            total_samples=total_samples,
+                            chunk_samples=chunk_samples,
+                            done_offset=dispatched,
+                        )
+                    )
+                try:
+                    results = await asyncio.gather(*futures) if futures else []
+                finally:
+                    if progress_task is not None:
+                        try:
+                            await asyncio.wait_for(progress_task, timeout=max(PROGRESS_POLL_INTERVAL_S * 2, 2.0))
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                f"Validate progress monitor timeout after chunk "
+                                f"step={self.global_steps}, dispatched={dispatched}, chunk={chunk_samples}"
+                            )
+                            progress_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await progress_task
+
+                for samples, _ in results:
+                    all_samples.extend(samples)
+
+                dispatched += chunk_samples
+                self._set_validate_progress_state(
+                    active=dispatched < total_samples,
+                    total=total_samples,
+                    done=dispatched,
+                    workers_active=0,
+                    workers_total=len(assigned_workers),
+                )
+                logger.info(
+                    f"Validate@step{self.global_steps} chunk done: "
+                    f"{dispatched}/{total_samples} ({100 * dispatched / total_samples:.1f}%)"
+                )
             raw_val_metrics = aggregate_and_log_validation_metrics(all_samples)
             val_metrics = raw_val_metrics
             if self.metric_worker is not None and raw_val_metrics:

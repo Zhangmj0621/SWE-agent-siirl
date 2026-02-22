@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import multiprocessing
+import os
 import threading
 import time
 from typing import Any, Literal
@@ -26,6 +27,53 @@ from requests.exceptions import RequestException
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 _thread_local = threading.local()
+
+_DEFAULT_MAX_CONNECTIONS = 256
+_DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 64
+_DEFAULT_KEEPALIVE_EXPIRY = 30.0
+
+
+def _parse_positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        logger.warning(f"Invalid {name}={raw!r}, fallback to default={default}")
+        return default
+    if parsed <= 0:
+        logger.warning(f"Invalid {name}={raw!r}, expected positive integer, fallback to default={default}")
+        return default
+    return parsed
+
+
+def _parse_non_negative_float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        logger.warning(f"Invalid {name}={raw!r}, fallback to default={default}")
+        return default
+    if parsed < 0:
+        logger.warning(f"Invalid {name}={raw!r}, expected non-negative float, fallback to default={default}")
+        return default
+    return parsed
+
+
+def _load_http_client_limits() -> tuple[int, int, float]:
+    max_conn = _parse_positive_int_env("SIIRL_HTTP_MAX_CONNECTIONS", _DEFAULT_MAX_CONNECTIONS)
+    max_keepalive = _parse_positive_int_env("SIIRL_HTTP_MAX_KEEPALIVE_CONNECTIONS", _DEFAULT_MAX_KEEPALIVE_CONNECTIONS)
+    keepalive_expiry = _parse_non_negative_float_env("SIIRL_HTTP_KEEPALIVE_EXPIRY", _DEFAULT_KEEPALIVE_EXPIRY)
+    if max_keepalive > max_conn:
+        logger.warning(
+            f"SIIRL_HTTP_MAX_KEEPALIVE_CONNECTIONS={max_keepalive} exceeds "
+            f"SIIRL_HTTP_MAX_CONNECTIONS={max_conn}, clamp keepalive to {max_conn}"
+        )
+        max_keepalive = max_conn
+    return max_conn, max_keepalive, keepalive_expiry
 
 
 def wait_until_ok(
@@ -91,16 +139,21 @@ class GlobalAsyncHTTPClient:
             httpx.AsyncClient: The thread-local HTTP client instance.
         """
         if not hasattr(_thread_local, "client"):
+            max_conn, max_keepalive, keepalive_expiry = _load_http_client_limits()
             _thread_local.client = httpx.AsyncClient(
-                limits=httpx.Limits(max_connections=None),  # Unlimited connections (adjust based on your needs)
+                limits=httpx.Limits(
+                    max_connections=max_conn,
+                    max_keepalive_connections=max_keepalive,
+                    keepalive_expiry=keepalive_expiry,
+                ),
                 timeout=httpx.Timeout(
                     connect=cls._connect_timeout,
                     read=None,  # Disable read timeout for long-running operations (e.g., model generation)
                     write=None,
                     pool=None,
                 ),
-                http2=False,  # Disable HTTP/2 for wider compatibility
-                follow_redirects=True,  # Automatically follow HTTP redirects
+                http2=False,
+                follow_redirects=True,
             )
         return _thread_local.client
 
