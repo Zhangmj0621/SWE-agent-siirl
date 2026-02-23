@@ -83,6 +83,10 @@ class ValidateProgressMonitor:
             tqdm = None
         self.tqdm = tqdm
         self.use_tqdm = self.tqdm is not None and bool(getattr(sys.stdout, "isatty", lambda: False)())
+        self._text_progress_interval_s = 5.0
+        self._last_text_progress_ts = 0.0
+        self._last_text_done = -1
+        self._last_text_rollout_index = -1
 
     def close(self):
         if self.progress_bar is not None:
@@ -136,12 +140,36 @@ class ValidateProgressMonitor:
                 self.progress_bar.refresh()
             self.close()
 
-        if not self.use_tqdm and total > 0 and not active and rollout_index > self.last_completed_rollout_index:
+        if not self.use_tqdm and total > 0:
+            if rollout_index != self._last_text_rollout_index:
+                self._last_text_rollout_index = rollout_index
+                self._last_text_progress_ts = 0.0
+                self._last_text_done = -1
+
             done_clamped = min(done, total)
             pct = 100.0 * done_clamped / total
-            print(
-                f"Validate@step{step} done: {done_clamped}/{total} ({pct:.1f}%), "
-                f"workers_active={workers_active}/{workers_total}, rollout_index={rollout_index}",
-                flush=True,
-            )
-            self.last_completed_rollout_index = rollout_index
+
+            if active:
+                now = time.time()
+                should_print = self._last_text_done < 0
+                if done_clamped > self._last_text_done and now - self._last_text_progress_ts >= self._text_progress_interval_s:
+                    should_print = True
+                if should_print:
+                    print(
+                        f"Validate@step{step} progress: {done_clamped}/{total} ({pct:.1f}%), "
+                        f"workers_active={workers_active}/{workers_total}, rollout_index={rollout_index}",
+                        flush=True,
+                    )
+                    self._last_text_progress_ts = now
+                    self._last_text_done = done_clamped
+                return
+
+            if rollout_index > self.last_completed_rollout_index:
+                print(
+                    f"Validate@step{step} done: {done_clamped}/{total} ({pct:.1f}%), "
+                    f"workers_active={workers_active}/{workers_total}, rollout_index={rollout_index}",
+                    flush=True,
+                )
+                self.last_completed_rollout_index = rollout_index
+                self._last_text_progress_ts = 0.0
+                self._last_text_done = -1

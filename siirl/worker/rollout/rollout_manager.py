@@ -856,11 +856,15 @@ class RolloutManager:
                     workers_total=len(assigned_workers),
                 )
                 train_step = rollout_to_train_step(self.global_steps)
-                logger.info(
+                message = (
                     f"Validate@step{train_step} chunk done: "
                     f"{dispatched}/{total_samples} ({100 * dispatched / total_samples:.1f}%), "
                     f"rollout_index={self.global_steps}"
                 )
+                if dispatched >= total_samples:
+                    logger.info(message)
+                else:
+                    logger.debug(message)
             raw_val_metrics = aggregate_and_log_validation_metrics(all_samples)
             val_metrics = raw_val_metrics
             if self.metric_worker is not None and raw_val_metrics:

@@ -145,15 +145,26 @@ class ParamSyncDistributed(ParamSyncInterface):
 
         buffer_size = 0
         converted_named_tensors = []
-        pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_pp_src_rank else None
+        pbar = (
+            tqdm(
+                desc=f"[{self._group_name}] Update weights",
+                total=0,
+                dynamic_ncols=True,
+                leave=False,
+            )
+            if self._is_pp_src_rank
+            else None
+        )
+        try:
+            generator = self.bridge._export_weights_in_current_pipeline_stage(self.model)
+            for name, param in generator:
+                buffer_size = self._update_param_sync_bucket(name, param, converted_named_tensors, buffer_size, pbar)
 
-        generator = self.bridge._export_weights_in_current_pipeline_stage(self.model)
-
-        for name, param in generator:
-            buffer_size = self._update_param_sync_bucket(name, param, converted_named_tensors, buffer_size, pbar)
-
-        if converted_named_tensors:
-            self._update_bucket_weights(converted_named_tensors, pbar=pbar)
+            if converted_named_tensors:
+                self._update_bucket_weights(converted_named_tensors, pbar=pbar)
+        finally:
+            if pbar is not None:
+                pbar.close()
 
     def _update_weights_naive(self) -> None:
         raise NotImplementedError("_update_weights_naive is not implemented, please set use_mbridge=True")

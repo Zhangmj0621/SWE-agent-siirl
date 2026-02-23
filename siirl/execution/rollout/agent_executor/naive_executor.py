@@ -73,6 +73,7 @@ class NaiveExecutor:
         self.rollout_flow = None  # Rollout flow function for sample generation
         self._rank = int(os.environ.get("RANK"))
         self._dp_rank = dp_rank  # Data parallel rank for logging
+        self._verbose_validate_logs = os.environ.get("SIIRL_VERBOSE_VALIDATE_LOGS", "0") == "1"
         # Load custom reward function if configured
         if config.custom_reward_function.path:
             from siirl.utils.reward_score.custom_reward import load_custom_reward_function
@@ -480,11 +481,15 @@ class NaiveExecutor:
 
         # Log timing breakdown (rank 0 only)
         if self._dp_rank == 0:
-            logger.info(
+            message = (
                 f"Validate timing: preprocess={preprocess_time.elapsed:.2f}s, "
                 f"generate={generate_time.elapsed:.2f}s, "
                 f"reward_postprocess={reward_time.elapsed:.2f}s"
             )
+            if self._verbose_validate_logs:
+                logger.info(message)
+            else:
+                logger.debug(message)
 
         return samples
 
@@ -600,12 +605,18 @@ class NaiveExecutor:
             timeout_rate = (timeouts / attempts) if attempts > 0 else 0.0
 
             if last_status != current_status or timeouts > 0:
-                logger.info(
+                message = (
                     f"rank_{self._rank} active generate tasks: {current_status}, "
                     f"{len(self.pending_queue)} left in pending_queue, "
                     f"sem_limit={self.max_concurrency_size}, "
                     f"http_attempts={attempts}, http_timeouts={timeouts}, http_timeout_rate={timeout_rate:.3f}"
                 )
+                if timeouts > 0:
+                    logger.warning(message)
+                elif self._verbose_validate_logs:
+                    logger.info(message)
+                else:
+                    logger.debug(message)
                 last_status = current_status
 
     async def stop(self):
