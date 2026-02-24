@@ -342,40 +342,57 @@ class RoutingReplayManager:
                 return original_routing(self_router, logits)
 
             # Recompute scores from current logits for gradient flow.
-            # Apply the router's score function (softmax/sigmoid) to get per-expert scores,
-            # then mask by the cached routing_map so only selected experts have nonzero scores.
+            # Must replicate the exact score computation that Megatron's
+            # topk_routing_with_score_function performs, so that expert outputs
+            # are weighted identically to the original (non-replay) forward pass.
             score_function = getattr(self_router, "routing_score_function", None) or getattr(
                 self_router.config, "moe_router_score_function", "softmax"
             )
-            use_pre_softmax = getattr(self_router.config, "moe_router_pre_softmax", True)
+            use_pre_softmax = getattr(self_router.config, "moe_router_pre_softmax", False)
 
-            if score_function == "softmax":
-                if use_pre_softmax:
-                    scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
-                else:
-                    scores = logits
-            elif score_function == "sigmoid":
-                scores = torch.sigmoid(logits)
-            else:
-                scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
+            # Flatten logits to 2D [num_tokens, num_experts] to match routing_map shape.
+            orig_logits = logits
+            if logits.dim() == 3:
+                logits = logits.view(-1, logits.shape[-1])
 
-            # Mask scores by routing_map: zero out non-selected experts.
-            # routing_map is [num_tokens, num_experts] (2D).
-            # scores may be 2D or 3D depending on logits shape; flatten to 2D first.
-            if scores.dim() == 3:
-                scores = scores.view(-1, scores.shape[-1])  # [tokens, num_experts]
-
-            if scores.shape[0] != routing_map.shape[0]:
+            if logits.shape[0] != routing_map.shape[0]:
                 raise RuntimeError(
                     f"[RoutingReplay] Token count mismatch in layer {cache.layer_id}: "
-                    f"scores {scores.shape} vs routing_map {routing_map.shape}. "
+                    f"logits {logits.shape} vs routing_map {routing_map.shape}. "
                     f"Stage={stage.value}, grad_enabled={torch.is_grad_enabled()}, "
                     f"fwd_idx={cache._forward_idx}, bwd_idx={cache._backward_idx}, "
                     f"entries={len(cache)}. This usually means micro-batch formation "
                     f"differs between RECORD and REPLAY phases."
                 )
 
-            scores = scores * (routing_map != 0).to(scores.dtype)
+            top_mask = routing_map.bool()
+
+            if score_function == "softmax":
+                if use_pre_softmax:
+                    # Pre-softmax: softmax over ALL experts, then mask to selected.
+                    scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(orig_logits)
+                    scores = scores * top_mask.to(scores.dtype)
+                else:
+                    # Post-softmax: softmax only among selected top-k experts.
+                    # Megatron selects top-k logits then applies softmax to
+                    # normalize among them. We replicate this by masking
+                    # non-selected positions to -inf before softmax.
+                    masked_logits = logits.masked_fill(~top_mask, float('-inf'))
+                    scores = torch.softmax(masked_logits, dim=-1, dtype=torch.float32).type_as(orig_logits)
+            elif score_function == "sigmoid":
+                scores = torch.sigmoid(logits).type_as(orig_logits)
+                scores = scores * top_mask.to(scores.dtype)
+                # Megatron normalizes sigmoid scores among selected experts.
+                score_sum = scores.sum(dim=-1, keepdim=True) + 1e-20
+                scores = scores / score_sum
+            else:
+                scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(orig_logits)
+                scores = scores * top_mask.to(scores.dtype)
+
+            # Apply optional scaling factor (e.g. DeepSeek-V3 style).
+            scaling_factor = getattr(self_router.config, "moe_router_topk_scaling_factor", None)
+            if scaling_factor:
+                scores = scores * scaling_factor
 
             return scores, routing_map
 
