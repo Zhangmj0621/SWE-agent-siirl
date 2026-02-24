@@ -38,7 +38,7 @@ def resolve_rollout_concurrency(
             base = max(1, int(getattr(config.rollout, base_key, 256)))
         elif phase == "validate":
             base_key = "validate_server_concurrency"
-            base = max(1, int(getattr(config.rollout, base_key, 64)))
+            base = max(1, int(getattr(config.rollout, base_key, 256)))
         else:
             raise ValueError(f"Unsupported phase: {phase}")
         resolved = base

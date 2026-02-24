@@ -801,7 +801,7 @@ class RolloutManager:
                 all_val_samples.extend(val_batch)
 
             total_samples = len(all_val_samples)
-            chunk_size = max(1, int(getattr(self.config.rollout, "validate_chunk_size", 256)))
+            chunk_size = max(1, int(getattr(self.config.rollout, "validate_chunk_size", 1024)))
             # Ensure chunk_size is at least num_workers so every worker gets work per chunk.
             chunk_size = max(chunk_size, len(validate_workers))
 

@@ -104,6 +104,32 @@ class ValidateProgressMonitor:
             snapshot = ray.get(self.rollout_manager.get_validate_progress_snapshot.remote(), timeout=1)
             self._update(snapshot)
 
+    def _emit_done_line(
+        self,
+        *,
+        step: int,
+        done: int,
+        total: int,
+        workers_active: int,
+        workers_total: int,
+        rollout_index: int,
+    ) -> None:
+        if total <= 0 or rollout_index <= self.last_completed_rollout_index:
+            return
+        done_clamped = min(max(0, int(done)), int(total))
+        pct = 100.0 * done_clamped / total
+        message = (
+            f"Validate@step{step} done: {done_clamped}/{total} ({pct:.1f}%), "
+            f"workers_active={workers_active}/{workers_total}, rollout_index={rollout_index}"
+        )
+        if self.use_tqdm and self.tqdm:
+            self.tqdm.write(message, file=sys.stdout)
+        else:
+            print(message, flush=True)
+        self.last_completed_rollout_index = rollout_index
+        self._last_text_progress_ts = 0.0
+        self._last_text_done = -1
+
     def _update(self, snapshot: dict):
         total = max(0, int(snapshot.get("total", 0)))
         done = max(0, int(snapshot.get("done", 0)))
@@ -138,9 +164,30 @@ class ValidateProgressMonitor:
             if total > 0:
                 self.progress_bar.n = total if not active else min(done, total)
                 self.progress_bar.refresh()
+                if not active:
+                    self._emit_done_line(
+                        step=step,
+                        done=done,
+                        total=total,
+                        workers_active=workers_active,
+                        workers_total=workers_total,
+                        rollout_index=rollout_index,
+                    )
             self.close()
 
-        if not self.use_tqdm and total > 0:
+        if self.use_tqdm:
+            if not active and total > 0:
+                self._emit_done_line(
+                    step=step,
+                    done=done,
+                    total=total,
+                    workers_active=workers_active,
+                    workers_total=workers_total,
+                    rollout_index=rollout_index,
+                )
+            return
+
+        if total > 0:
             if rollout_index != self._last_text_rollout_index:
                 self._last_text_rollout_index = rollout_index
                 self._last_text_progress_ts = 0.0
@@ -164,12 +211,11 @@ class ValidateProgressMonitor:
                     self._last_text_done = done_clamped
                 return
 
-            if rollout_index > self.last_completed_rollout_index:
-                print(
-                    f"Validate@step{step} done: {done_clamped}/{total} ({pct:.1f}%), "
-                    f"workers_active={workers_active}/{workers_total}, rollout_index={rollout_index}",
-                    flush=True,
-                )
-                self.last_completed_rollout_index = rollout_index
-                self._last_text_progress_ts = 0.0
-                self._last_text_done = -1
+            self._emit_done_line(
+                step=step,
+                done=done,
+                total=total,
+                workers_active=workers_active,
+                workers_total=workers_total,
+                rollout_index=rollout_index,
+            )
