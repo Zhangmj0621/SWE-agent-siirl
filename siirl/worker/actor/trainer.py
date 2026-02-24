@@ -439,6 +439,7 @@ class Trainer:
         # Routing replay stage management for MoE models
         rr_mgr = getattr(self.actor_worker, "_routing_replay_mgr", None)
         use_rollout_rr = getattr(self.config.actor_ref.actor, "enable_rollout_routing_replay", False)
+        rollout_rr_filled = False  # Whether rollout routing data was successfully loaded
 
         with timers["step"]:
             # --- Routing replay: fill caches from rollout data if available ---
@@ -448,27 +449,32 @@ class Trainer:
                 rollout_experts = batch_data["rollout_routed_experts"]
                 if hasattr(rollout_experts, "data"):
                     rollout_experts = rollout_experts.data
+                # Get micro_batch_size and num_experts from actor config
+                micro_batch_size = self.config.actor_ref.actor.ppo_micro_batch_size_per_gpu
+                model_config = self.actor_worker.actor_model_config
+                num_experts = getattr(model_config, "num_moe_experts", 0)
                 rr_mgr.fill_from_rollout(
                     rollout_routed_experts=rollout_experts,
-                    micro_batches=batch_data,
-                    model_modules=self.actor_worker.actor_module,
+                    micro_batch_size=micro_batch_size,
+                    num_experts=num_experts,
                     sequence_parallel=self.config.trainer.sequence_parallel,
                 )
+                rollout_rr_filled = True
 
             # --- Stage 1: compute_log_prob (actor forward-only) ---
-            # RECORD: compute routing from scratch and cache for replay
-            # REPLAY_FORWARD: replay routing from rollout-captured data
+            # REPLAY_FORWARD: replay routing from rollout-captured data (R3)
+            # RECORD: compute routing from scratch and cache for replay (R2)
             if rr_mgr:
                 from siirl.utils.routing_replay import RoutingReplayStage
 
                 log_prob_stage = (
-                    RoutingReplayStage.REPLAY_FORWARD if use_rollout_rr else RoutingReplayStage.RECORD
+                    RoutingReplayStage.REPLAY_FORWARD if rollout_rr_filled else RoutingReplayStage.RECORD
                 )
                 rr_mgr.set_stage(log_prob_stage)
 
             data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
 
-            if rr_mgr and use_rollout_rr:
+            if rr_mgr and rollout_rr_filled:
                 # Reset forward indices so backward pass can re-read the same cached data
                 rr_mgr.reset_all_forward()
 

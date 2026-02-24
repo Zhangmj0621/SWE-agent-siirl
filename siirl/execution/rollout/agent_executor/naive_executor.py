@@ -230,6 +230,26 @@ class NaiveExecutor:
             elif current_len > max_len:
                 sample.rollout_log_prob = sample.rollout_log_prob[:max_len].astype(np.float32)
 
+        # Pad rollout_routed_experts to match padded sequence length [max_seq_len, moe_dim].
+        # Left-pad for prompt (matching left-padded prompt_ids) and right-pad for response.
+        if sample.rollout_routed_experts is not None:
+            max_prompt_len = self.config.data.max_prompt_length
+            max_response_len = self.config.data.max_response_length
+            max_seq_len = max_prompt_len + max_response_len
+            actual_prompt_len = len(sample.prompts) if hasattr(sample.prompts, '__len__') else 0
+            actual_response_len = len(sample.responses) if hasattr(sample.responses, '__len__') else 0
+            routing_data = sample.rollout_routed_experts  # [n_real_tokens, moe_dim]
+            if routing_data.ndim == 2:
+                moe_dim = routing_data.shape[1]
+                padded = np.zeros((max_seq_len, moe_dim), dtype=routing_data.dtype)
+                # Place real routing data at the correct position (after left-pad)
+                prompt_start = max_prompt_len - actual_prompt_len
+                n_real = min(routing_data.shape[0], actual_prompt_len + actual_response_len)
+                padded[prompt_start : prompt_start + n_real] = routing_data[:n_real]
+                sample.rollout_routed_experts = padded
+            else:
+                sample.rollout_routed_experts = None
+
         # Validate tensor shape consistency
         assert (
             response_ids.shape == response_mask.shape

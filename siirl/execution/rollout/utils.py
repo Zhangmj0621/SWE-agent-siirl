@@ -28,6 +28,7 @@ class AgentData:
         self.state = AgentState.PENDING
         self.env_kwargs = {}
         self.env_rewards = []
+        self.routed_experts = None  # Raw flat np.int32 array from SGLang MoE routing
 
 
 def format_gpt_oss_tool_response_manually(tool_response: str, tool_call_name: str) -> str:

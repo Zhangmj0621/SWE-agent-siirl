@@ -46,6 +46,7 @@ class NaiveFlow:
         self.env_response_truncate_side = self.multiturn_config.env_response_truncate_side
         self.env = None
         self.use_router = False  # Set True during validate to use router load balancing
+        self._return_routed_experts = getattr(config.actor_ref.actor, "enable_rollout_routing_replay", False)
         self.init_env()
 
     def init_env(self):
@@ -99,6 +100,33 @@ class NaiveFlow:
         sample.prompts = prompt_ids
         sample.response_mask = agent_data.response_mask
         sample.rollout_log_prob = np.array(agent_data.rollout_log_prob, dtype=np.float32)
+
+        # Store MoE routing decisions from rollout for routing replay (R3).
+        # Reshape flat int32 array → [n_real_tokens, moe_dim] where moe_dim = num_moe_layers * topk.
+        if agent_data.routed_experts is not None:
+            n_real_tokens = len(agent_data.prompts_ids)  # prompt + response
+            flat_len = len(agent_data.routed_experts)
+            if n_real_tokens > 0 and flat_len >= n_real_tokens:
+                moe_dim = flat_len // n_real_tokens
+                sample.rollout_routed_experts = agent_data.routed_experts[:n_real_tokens * moe_dim].reshape(
+                    n_real_tokens, moe_dim
+                )
+            else:
+                # Fallback: try response-only routing
+                n_response = len(agent_data.response_ids)
+                if n_response > 0 and flat_len >= n_response:
+                    moe_dim = flat_len // n_response
+                    routing = agent_data.routed_experts[:n_response * moe_dim].reshape(n_response, moe_dim)
+                    # Prepend zeros for prompt tokens (they'll be computed live)
+                    n_prompt = n_real_tokens - n_response
+                    sample.rollout_routed_experts = np.concatenate([
+                        np.zeros((n_prompt, moe_dim), dtype=np.int32), routing
+                    ], axis=0)
+                else:
+                    logger.warning(
+                        f"[RoutingReplay] Unexpected routed_experts length {flat_len}, "
+                        f"total_tokens={n_real_tokens}, response_tokens={len(agent_data.response_ids)}"
+                    )
 
         # Track reward computation time
         reward_start = time.time()
@@ -223,12 +251,17 @@ class NaiveFlow:
         return env_response
 
     async def _handle_generating_state(self, agent_data: AgentData, is_validate=False):
-        _, response_ids, rollout_log_prob, _ = await self.engine.generate(agent_data.prompts_ids, is_validate, use_router=self.use_router)
+        _, response_ids, rollout_log_prob, routed_experts = await self.engine.generate(
+            agent_data.prompts_ids, is_validate, use_router=self.use_router,
+            return_routed_experts=self._return_routed_experts,
+        )
         agent_data.response_ids = response_ids
         agent_data.rollout_log_prob += rollout_log_prob
         agent_data.prompts_ids += response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
         agent_data.assistant_turns += 1
+        if routed_experts is not None:
+            agent_data.routed_experts = routed_experts
 
         if len(agent_data.response_mask) >= self.max_response_length:
             return AgentState.TERMINATED

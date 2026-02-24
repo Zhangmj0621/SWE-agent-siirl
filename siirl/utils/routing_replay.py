@@ -404,8 +404,8 @@ class RoutingReplayManager:
     def fill_from_rollout(
         self,
         rollout_routed_experts: torch.Tensor,
-        micro_batches: list,
-        model_modules: nn.ModuleList,
+        micro_batch_size: int,
+        num_experts: int,
         sequence_parallel: bool = False,
     ) -> None:
         """
@@ -416,61 +416,75 @@ class RoutingReplayManager:
         during training to ensure exact consistency with the rollout.
 
         Args:
-            rollout_routed_experts: Tensor of shape [batch_size, num_tokens, num_moe_layers, topk]
-                Expert indices captured during rollout inference.
-            micro_batches: List of micro-batches (TensorDicts) for iteration count.
-            model_modules: The Megatron model module list (for VPP stage iteration).
+            rollout_routed_experts: Tensor of shape [batch_size, max_seq_len, moe_dim]
+                Expert indices captured during rollout inference (padded to max_seq_len).
+                moe_dim = num_moe_layers * topk (flattened).
+            micro_batch_size: Number of samples per micro-batch (for splitting).
+            num_experts: Total number of MoE experts (for routing_map construction).
             sequence_parallel: Whether sequence parallel is enabled (requires TP slicing).
         """
         from megatron.core import parallel_state as mpu
 
-        try:
-            from megatron.core.transformer.transformer_block import get_num_layers_to_build
-            from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
-        except ImportError:
-            logger.error("[RoutingReplay] Cannot import Megatron layer utilities")
+        num_moe_layers = len(self._caches)
+        if num_moe_layers == 0:
+            logger.warning("[RoutingReplay] No MoE caches registered, skipping fill_from_rollout")
             return
+
+        batch_size = rollout_routed_experts.shape[0]
+        max_seq_len = rollout_routed_experts.shape[1]
+        moe_dim = rollout_routed_experts.shape[2]
+        topk = moe_dim // num_moe_layers
+
+        if topk * num_moe_layers != moe_dim:
+            raise ValueError(
+                f"[RoutingReplay] moe_dim ({moe_dim}) is not divisible by "
+                f"num_moe_layers ({num_moe_layers}). topk would be {moe_dim / num_moe_layers}"
+            )
+
+        # Reshape to [batch_size, max_seq_len, num_moe_layers, topk]
+        routing_4d = rollout_routed_experts.reshape(batch_size, max_seq_len, num_moe_layers, topk)
 
         tp_rank = mpu.get_tensor_model_parallel_rank()
         tp_size = mpu.get_tensor_model_parallel_world_size()
 
-        # Process each micro-batch's routing data
-        for mb_idx in range(len(micro_batches)):
-            # rollout_routed_experts: [seq_len, num_layers, topk] per micro-batch
-            # This tensor comes from the rollout engine with shape per sample
-            mb_routing = rollout_routed_experts[mb_idx]
-            if not isinstance(mb_routing, torch.Tensor):
-                mb_routing = torch.tensor(mb_routing, dtype=torch.int64)
+        # Split into micro-batches along batch dimension
+        n_micro_batches = (batch_size + micro_batch_size - 1) // micro_batch_size
+        for mb_idx in range(n_micro_batches):
+            mb_start = mb_idx * micro_batch_size
+            mb_end = min(mb_start + micro_batch_size, batch_size)
+            # [mb_size, max_seq_len, num_moe_layers, topk]
+            mb_routing = routing_4d[mb_start:mb_end]
+            mb_size = mb_routing.shape[0]
 
-            # Handle sequence parallel: slice along sequence dimension
-            if sequence_parallel and tp_size > 1:
-                seq_len = mb_routing.shape[0]
-                assert seq_len % tp_size == 0, f"seq_len {seq_len} not divisible by tp_size {tp_size}"
-                chunk_size = seq_len // tp_size
-                mb_routing = mb_routing[tp_rank * chunk_size : (tp_rank + 1) * chunk_size]
+            for layer_idx in range(num_moe_layers):
+                # [mb_size, max_seq_len, topk]
+                layer_indices = mb_routing[:, :, layer_idx, :]
 
-            # Distribute to per-layer caches following VPP stage ordering
-            cache_offset = 0
-            for vp_stage, model_chunk in enumerate(model_modules):
-                config = model_chunk.module.config if hasattr(model_chunk, "module") else model_chunk.config
-                num_layers_to_build = get_num_layers_to_build(config, vp_stage=vp_stage)
-                offset = get_transformer_layer_offset(config, vp_stage=vp_stage)
+                # Handle sequence parallel: slice along sequence dimension per sample
+                if sequence_parallel and tp_size > 1:
+                    assert max_seq_len % tp_size == 0, (
+                        f"max_seq_len {max_seq_len} not divisible by tp_size {tp_size}"
+                    )
+                    chunk = max_seq_len // tp_size
+                    layer_indices = layer_indices[:, tp_rank * chunk : (tp_rank + 1) * chunk, :]
+                    tokens_per_sample = chunk
+                else:
+                    tokens_per_sample = max_seq_len
 
-                for layer_id in range(offset, offset + num_layers_to_build):
-                    # Skip non-MoE layers
-                    moe_layer_freq = getattr(config, "moe_layer_freq", 1)
-                    if isinstance(moe_layer_freq, int):
-                        if moe_layer_freq > 0 and layer_id % moe_layer_freq != 0:
-                            continue
-                    elif isinstance(moe_layer_freq, list):
-                        if moe_layer_freq[layer_id] == 0:
-                            continue
+                # Flatten to [mb_size * tokens_per_sample, topk]
+                flat_indices = layer_indices.reshape(-1, topk).to(torch.int64)
 
-                    layer_routing = mb_routing[:, layer_id]  # [seq_len, topk]
-                    self._caches[cache_offset].record(layer_routing)
-                    cache_offset += 1
+                # Convert expert indices → routing_map [n_tokens, num_experts]
+                n_tokens = flat_indices.shape[0]
+                routing_map = torch.zeros(n_tokens, num_experts, dtype=torch.float32)
+                # Clamp to valid expert range (padding tokens have index 0, which is valid)
+                flat_indices = flat_indices.clamp(0, num_experts - 1)
+                routing_map.scatter_(1, flat_indices, 1.0)
 
-            assert cache_offset == len(self._caches), (
-                f"[RoutingReplay] Cache count mismatch: filled {cache_offset}, "
-                f"registered {len(self._caches)}"
-            )
+                self._caches[layer_idx].record(routing_map)
+
+        logger.debug(
+            f"[RoutingReplay] Filled {n_micro_batches} micro-batches × {num_moe_layers} layers "
+            f"from rollout data (batch={batch_size}, seq={max_seq_len}, topk={topk}, "
+            f"num_experts={num_experts})"
+        )
