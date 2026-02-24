@@ -137,6 +137,10 @@ class RolloutManager:
         self._validate_reuse_coordinator = ValidateReuseCoordinator(trainer_world_size=self._trainer_world_size)
         self._validate_reuse_pool = ValidateReuseWorkerPool()
 
+        # Colocated lifecycle guard: prevents non-idempotent SGLang calls
+        # (pause_generation, offload_memory, resume) from being invoked twice.
+        self._train_offloaded = False
+
         # Cache for dist_init_addr (used in cross-node TP)
         self._dist_init_addrs = {}
 
@@ -458,17 +462,19 @@ class RolloutManager:
     def offload_for_train(self, timeout_s: int = 120):
         """Release rollout GPU memory before trainer loads model.
 
-        Must be called BEFORE load_megatron_model_to_gpu to avoid OOM in colocated mode.
+        Idempotent: repeated calls while already offloaded are no-ops.
         Drains pending requests first because SGLang release_memory_occupation
         asserts no in-progress requests.
         """
         from loguru import logger
 
+        if self._train_offloaded:
+            logger.debug("[RolloutManager] offload_for_train: already offloaded, skipping")
+            return
+
         tp0_workers = self.get_rollout_worker_on_tp0()
         if not tp0_workers:
             return
-        # Default to KV-only offload for compatibility with update_weights_from_tensor.
-        # Some SGLang versions cannot safely update weights while WEIGHTS tag is paused.
         offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
         self._weights_onloaded_for_sync = False
         tags = ["kv_cache"]
@@ -478,15 +484,13 @@ class RolloutManager:
         t0 = time.monotonic()
         pause_succeeded = False
         try:
-            # Drain pending requests before release (SGLang asserts no in-progress requests)
             ray.get([w.pause_generation.remote() for w in tp0_workers], timeout=timeout_s)
             pause_succeeded = True
             ray.get([w.flush_cache.remote() for w in tp0_workers], timeout=timeout_s)
-            # Now safe to release
             ray.get([w.offload_memory.remote(tags) for w in tp0_workers], timeout=timeout_s)
+            self._train_offloaded = True
         except Exception:
             if pause_succeeded:
-                # Best-effort unpause to avoid leaving engines paused on retry paths.
                 with contextlib.suppress(Exception):
                     ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
             logger.error("[RolloutManager] offload_for_train failed\n" + traceback.format_exc())
@@ -521,10 +525,14 @@ class RolloutManager:
     def resume_after_sync(self, timeout_s: int = 120):
         """Resume rollout GPU memory after weight sync.
 
-        Calls continue_generation at the
-        end to match the pause_generation issued in offload_for_train.
+        Idempotent: repeated calls while not offloaded are no-ops.
+        Calls continue_generation to match the pause_generation from offload_for_train.
         """
         from loguru import logger
+
+        if not self._train_offloaded:
+            logger.debug("[RolloutManager] resume_after_sync: not offloaded, skipping")
+            return
 
         tp0_workers = self.get_rollout_worker_on_tp0()
         if not tp0_workers:
@@ -539,8 +547,8 @@ class RolloutManager:
             logger.info(f"[RolloutManager] resume_after_sync: resuming kv_cache on {len(tp0_workers)} TP0 workers")
             ray.get([w.onload_memory.remote(["kv_cache"]) for w in tp0_workers], timeout=timeout_s)
 
-            # Resume generation after memory is back.
             ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
+            self._train_offloaded = False
         except Exception:
             logger.error("[RolloutManager] resume_after_sync failed\n" + traceback.format_exc())
             raise

@@ -180,6 +180,11 @@ class RolloutArguments:
         default="tensor",
         metadata={"help": "Colocated param sync backend: tensor or flattened_bucket"},
     )
+    colocate_release_weights_during_sync: bool = field(
+        default=False,
+        metadata={"help": "Release rollout weights (not just KV cache) during colocated offload. "
+                  "Frees more GPU memory but requires onload before IPC weight sync."},
+    )
     max_num_batched_tokens: int = field(default=8192, metadata={"help": "Max batched tokens"})
     max_model_len: int | None = field(default=None, metadata={"help": "Max model length"})
     max_num_seqs: int = field(default=1024, metadata={"help": "Max concurrent sequences"})

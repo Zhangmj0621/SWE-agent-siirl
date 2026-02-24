@@ -310,15 +310,25 @@ def _allocate_colocated(config: SiiRLArguments) -> dict[str, GPUResources]:
     return {"actor": shared, "rollout": shared}
 
 
+def _coerce_int(value, field_name: str, default: int) -> int:
+    """Convert a config value to int, falling back to *default* for None."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"colocate: {field_name}={value!r} is not a valid integer") from None
+
+
 def validate_colocated_topology(config: SiiRLArguments, total_gpus: int) -> None:
     cfg = config.trainer
-    tp = cfg.tensor_model_parallel_size
-    pp = cfg.pipeline_model_parallel_size
-    cp = cfg.context_parallel_size
-    ep = cfg.expert_model_parallel_size
-    etp = cfg.expert_tensor_parallel_size
-    rollout_tp = config.rollout.tensor_model_parallel_size
-    n_gpus_per_node = cfg.n_gpus_per_node
+    tp = _coerce_int(cfg.tensor_model_parallel_size, "trainer.tensor_model_parallel_size", 1)
+    pp = _coerce_int(cfg.pipeline_model_parallel_size, "trainer.pipeline_model_parallel_size", 1)
+    cp = _coerce_int(cfg.context_parallel_size, "trainer.context_parallel_size", 1)
+    ep = _coerce_int(cfg.expert_model_parallel_size, "trainer.expert_model_parallel_size", 1)
+    etp = _coerce_int(cfg.expert_tensor_parallel_size, "trainer.expert_tensor_parallel_size", 1)
+    rollout_tp = _coerce_int(config.rollout.tensor_model_parallel_size, "rollout.tensor_model_parallel_size", 1)
+    n_gpus_per_node = _coerce_int(cfg.n_gpus_per_node, "trainer.n_gpus_per_node", 8)
 
     if total_gpus <= 0:
         raise ValueError(f"colocate: total_gpus must be > 0, got {total_gpus}")

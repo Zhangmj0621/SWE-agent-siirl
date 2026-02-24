@@ -287,7 +287,9 @@ class TrainerGroup:
     def put_weight(self):
         """
         Extract trained model parameters from actor and update to RolloutManager.
-        Supports model weight synchronization for rollout/inference.
+
+        In colocated mode, wraps sync with offload/resume to avoid OOM when
+        both SGLang and trainer share the same GPU.
         """
         logger.info("Extracting model weights from actor workers")
 
@@ -299,6 +301,17 @@ class TrainerGroup:
             logger.warning("RolloutManager not set, cannot update weights")
             return
 
-        futures = [trainer.update_rollout_weight.remote() for trainer in self.trainers]
-        ray.get(futures)
+        is_colocate = getattr(self.config.trainer, "colocate", False)
+        rpc_timeout = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+        offloaded = False
+        try:
+            if is_colocate:
+                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=rpc_timeout), timeout=rpc_timeout)
+                offloaded = True
+            futures = [trainer.update_rollout_weight.remote() for trainer in self.trainers]
+            ray.get(futures)
+        finally:
+            if offloaded:
+                ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=rpc_timeout), timeout=rpc_timeout)
+
         logger.info("Weight update completed")

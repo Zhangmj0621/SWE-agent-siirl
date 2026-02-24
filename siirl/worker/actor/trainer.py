@@ -324,55 +324,76 @@ class Trainer:
             return local_error
         return RuntimeError(f"[Trainer rank={self.rank}] rank 0 reported failure (see rank 0 logs)")
 
-    # @timer
-    def update_rollout_weight(self):
-        rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
+    @property
+    def _is_colocate(self) -> bool:
+        return self.config.trainer.colocate and isinstance(self.param_sync, ParamSyncColocated)
 
-        # Colocated mode: release rollout GPU memory BEFORE loading trainer model
-        # to avoid OOM when both SGLang and trainer share the same GPU.
-        is_colocate = self.config.trainer.colocate and isinstance(self.param_sync, ParamSyncColocated)
-        rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+    @property
+    def _rpc_timeout_s(self) -> int:
+        return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
 
-        # Phase 1: offload (rank 0 only, broadcast error to all ranks)
-        if is_colocate:
-            offload_error = None
-            if self.rank == 0:
-                try:
-                    ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=rpc_timeout_s))
-                except Exception as e:
-                    logger.error(f"[Trainer rank=0] offload_for_train failed: {e}")
-                    offload_error = e
-            offload_error = self._broadcast_rank0_error(offload_error)
-            if offload_error is not None:
-                raise offload_error
+    def _wait_validate_gate(self):
+        """Block until validate-reuse gate allows proceeding."""
+        while True:
+            if self._validate_reuse_sync is not None:
+                self._validate_reuse_sync.try_sync()
+            gate_decision = self._validate_reuse_sync.wait_idle() if self._validate_reuse_sync is not None else ValidateGateDecision.PROCEED
+            if gate_decision is ValidateGateDecision.RETRY_SYNC:
+                time.sleep(SYNC_RETRY_SLEEP_S)
+                continue
+            break
 
-        # Phase 2: sync — capture exception so finally can decide what to raise
-        sync_error = None
+    def _colocate_offload(self):
+        """Rank-0 calls offload_for_train, broadcasts errors to all ranks."""
+        error = None
+        if self.rank == 0:
+            try:
+                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=self._rpc_timeout_s))
+            except Exception as e:
+                logger.error(f"[Trainer rank=0] offload_for_train failed: {e}")
+                error = e
+        error = self._broadcast_rank0_error(error)
+        if error is not None:
+            raise error
+
+    def _colocate_resume(self):
+        """Rank-0 calls resume_after_sync, broadcasts errors to all ranks."""
+        error = None
+        if self.rank == 0:
+            try:
+                ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=self._rpc_timeout_s))
+            except Exception as e:
+                logger.error(f"[Trainer rank=0] resume_after_sync failed: {e}")
+                error = e
+        error = self._broadcast_rank0_error(error)
+        if error is not None:
+            raise error
+
+    @contextlib.contextmanager
+    def _colocate_offload_scope(self, label: str):
+        """Ensure colocated rollout memory is resumed after offload."""
+        self._colocate_offload()
+        primary_error = None
         try:
-            self._sync_rollout_workers(rollout_workers)
+            yield
         except Exception as e:
-            sync_error = e
+            primary_error = e
+            raise
         finally:
-            # Phase 3: resume (rank 0 only, broadcast error to all ranks)
-            if is_colocate:
-                resume_error = None
-                if self.rank == 0:
-                    try:
-                        ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=rpc_timeout_s))
-                    except Exception as e:
-                        logger.error(f"[Trainer rank=0] resume_after_sync failed: {e}")
-                        resume_error = e
-                resume_error = self._broadcast_rank0_error(resume_error)
+            try:
+                self._colocate_resume()
+            except Exception as resume_error:
+                if primary_error is None:
+                    raise
+                logger.error(f"[Trainer rank={self.rank}] resume_after_sync failed during {label} cleanup: {resume_error}")
 
-                # Decide which exception to surface
-                if sync_error is not None and resume_error is not None:
-                    # Both failed: preserve sync as primary, log resume
-                    logger.error(f"[Trainer rank={self.rank}] resume_after_sync also failed (suppressed): {resume_error}")
-                elif resume_error is not None:
-                    sync_error = resume_error
+    def update_rollout_weight(self):
+        """Sync trainer weights to rollout workers.
 
-        if sync_error is not None:
-            raise sync_error  # noqa: B012
+        In colocated mode the train loop manages offload/resume around this call.
+        """
+        rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
+        self._sync_rollout_workers(rollout_workers)
 
     def _sync_rollout_workers(self, rollout_workers, tensor_workers=None, bump_weight_version=True):
         assert self.param_sync is not None, "must setup param sync first"
@@ -419,24 +440,6 @@ class Trainer:
             if self.actor_worker._is_offload_param:
                 offload_megatron_model_to_cpu(self.actor_worker.actor_module)
                 get_torch_device().empty_cache()
-
-    def _offload_rollout_before_train_step(self):
-        """In colocated mode, release rollout memory before actor/ref/critic forward."""
-        is_colocate = self.config.trainer.colocate and isinstance(self.param_sync, ParamSyncColocated)
-        if not is_colocate:
-            return
-
-        rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
-        offload_error = None
-        if self.rank == 0:
-            try:
-                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=rpc_timeout_s))
-            except Exception as e:
-                logger.error(f"[Trainer rank=0] pre-train offload_for_train failed: {e}")
-                offload_error = e
-        offload_error = self._broadcast_rank0_error(offload_error)
-        if offload_error is not None:
-            raise offload_error
 
     def _get_regular_rollout_workers(self) -> list:
         if self.rollout_manager is None:
@@ -826,6 +829,12 @@ class Trainer:
         total_training_steps = int(getattr(self.config.actor_ref.actor.optim, "total_training_steps", 0) or 0)
 
         try:
+            # Colocated bootstrap: push trainer weights to rollout before the first
+            # generation so that a resumed checkpoint doesn't produce stale data.
+            if self._is_colocate:
+                logger.info(f"[Trainer rank={self.rank}] Colocated bootstrap: syncing weights before first generation")
+                with self._colocate_offload_scope("bootstrap"):
+                    self.update_rollout_weight()
             while True:
                 # Check stop signal
                 if self._check_should_stop():
@@ -842,47 +851,62 @@ class Trainer:
 
                 train_e2e_start_time = time.time()
 
-                # Update rollout weights and record timing
-                with Timer("weight_sync") as weight_sync_timer:
-                    self.update_rollout_weight()
+                if self._is_colocate:
+                    # Colocated: generate -> offload -> train -> sync -> resume
+                    # Rollout uses weights synced at the end of the previous step.
+                    if self.rank == 0:
+                        ray.get(self.rollout_manager.next_rollout.remote())
 
-                # run dataloader for train
-                if self.rank == 0:
-                    ray.get(self.rollout_manager.next_rollout.remote())
-
-                if self._validate_reuse_sync is not None:
-                    self._validate_reuse_sync.try_sync()
-
-                # Record get_batch timing
-                with Timer("get_batch") as get_batch_timer:
-                    while (batch_data := self.get_batch(batch_size)) is None:
-                        did_sync = self._validate_reuse_sync.try_sync() if self._validate_reuse_sync is not None else False
-                        gate_decision = (
-                            self._validate_reuse_sync.wait_idle() if self._validate_reuse_sync is not None else ValidateGateDecision.PROCEED
-                        )
-                        if gate_decision is ValidateGateDecision.RETRY_SYNC:
-                            time.sleep(SYNC_RETRY_SLEEP_S)
-                            continue
-                        if not did_sync:
-                            time.sleep(TRAIN_NO_BATCH_BACKOFF_S)
-
-                while True:
                     if self._validate_reuse_sync is not None:
                         self._validate_reuse_sync.try_sync()
-                    gate_decision = (
-                        self._validate_reuse_sync.wait_idle() if self._validate_reuse_sync is not None else ValidateGateDecision.PROCEED
-                    )
-                    if gate_decision is ValidateGateDecision.RETRY_SYNC:
-                        time.sleep(SYNC_RETRY_SLEEP_S)
-                        continue
-                    break
 
-                # Important for colocated mode: generation just finished, rollout memory is hot.
-                # Offload before train_step to avoid actor/ref/critic OOM on shared GPUs.
-                self._offload_rollout_before_train_step()
+                    with Timer("get_batch") as get_batch_timer:
+                        while (batch_data := self.get_batch(batch_size)) is None:
+                            did_sync = self._validate_reuse_sync.try_sync() if self._validate_reuse_sync is not None else False
+                            gate_decision = (
+                                self._validate_reuse_sync.wait_idle()
+                                if self._validate_reuse_sync is not None
+                                else ValidateGateDecision.PROCEED
+                            )
+                            if gate_decision is ValidateGateDecision.RETRY_SYNC:
+                                time.sleep(SYNC_RETRY_SLEEP_S)
+                                continue
+                            if not did_sync:
+                                time.sleep(TRAIN_NO_BATCH_BACKOFF_S)
 
-                # compare
-                self.train_step(batch_data)
+                    self._wait_validate_gate()
+                    with self._colocate_offload_scope(f"step={self.global_step}"):
+                        self.train_step(batch_data)
+
+                        with Timer("weight_sync") as weight_sync_timer:
+                            self.update_rollout_weight()
+                else:
+                    # Separated: sync -> generate -> get_batch -> train (original order)
+                    with Timer("weight_sync") as weight_sync_timer:
+                        self.update_rollout_weight()
+
+                    if self.rank == 0:
+                        ray.get(self.rollout_manager.next_rollout.remote())
+
+                    if self._validate_reuse_sync is not None:
+                        self._validate_reuse_sync.try_sync()
+
+                    with Timer("get_batch") as get_batch_timer:
+                        while (batch_data := self.get_batch(batch_size)) is None:
+                            did_sync = self._validate_reuse_sync.try_sync() if self._validate_reuse_sync is not None else False
+                            gate_decision = (
+                                self._validate_reuse_sync.wait_idle()
+                                if self._validate_reuse_sync is not None
+                                else ValidateGateDecision.PROCEED
+                            )
+                            if gate_decision is ValidateGateDecision.RETRY_SYNC:
+                                time.sleep(SYNC_RETRY_SLEEP_S)
+                                continue
+                            if not did_sync:
+                                time.sleep(TRAIN_NO_BATCH_BACKOFF_S)
+
+                    self._wait_validate_gate()
+                    self.train_step(batch_data)
 
                 # Wait for all metric submissions and aggregate (rank=0 does the logging)
                 # Only TP rank 0 and PP rank 0 submit metrics, so only they need to wait
