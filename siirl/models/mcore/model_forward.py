@@ -2,10 +2,11 @@
 
 import torch
 
+from siirl.utils.backend.device import get_torch_device
 from siirl.utils.megatron.megatron_utils import unwrap_model
 
 from .util import postprocess_packed_seqs, preprocess_packed_seqs, recover_left_padding, remove_left_padding
-from siirl.utils.backend.device import get_device_id, get_torch_device
+
 
 def gptmodel_forward(
     model,

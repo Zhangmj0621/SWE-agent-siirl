@@ -182,8 +182,10 @@ class RolloutArguments:
     )
     colocate_release_weights_during_sync: bool = field(
         default=False,
-        metadata={"help": "Release rollout weights (not just KV cache) during colocated offload. "
-                  "Frees more GPU memory but requires onload before IPC weight sync."},
+        metadata={
+            "help": "Release rollout weights (not just KV cache) during colocated offload. "
+            "Frees more GPU memory but requires onload before IPC weight sync."
+        },
     )
     max_num_batched_tokens: int = field(default=8192, metadata={"help": "Max batched tokens"})
     max_model_len: int | None = field(default=None, metadata={"help": "Max model length"})
