@@ -270,6 +270,7 @@ def main() -> None:
         runner = MainRunner.remote()
         rollout_manager_name = f"siirl_rollout_manager_{time.time_ns()}"
         progress_monitor = ValidateProgressMonitor(rollout_manager_name)
+        run_completed = False
         try:
             run_ref = runner.run.remote(siirl_args, rollout_manager_name)
             while True:
@@ -277,9 +278,11 @@ def main() -> None:
                 progress_monitor.poll_once()
                 if ready_refs:
                     ray.get(ready_refs[0])
+                    run_completed = True
+                    progress_monitor.poll_once()
                     break
         finally:
-            progress_monitor.close()
+            progress_monitor.close(force_complete=run_completed)
         logger.success("MainRunner has completed its execution.")
 
     except KeyboardInterrupt:
