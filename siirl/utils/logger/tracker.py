@@ -20,13 +20,14 @@ multiple backends (console, wandb, tensorboard) simultaneously.
 """
 
 import contextlib
+import math
 from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
 
 from .backends import BackendConfig, BackendRegistry
-from .backends.base import LoggerBackend
+from .backends.base import LoggerBackend, NumericScalar
 
 
 @dataclass
@@ -45,6 +46,88 @@ class GenerationSample:
     output_text: str
     score: float
     metadata: dict[str, Any] | None = None
+
+
+def _std_from_stats(sum_val: float, sum_sq: float, count: int, use_sample_var: bool) -> float:
+    if count <= 0:
+        return 0.0
+    if use_sample_var:
+        if count <= 1:
+            return 0.0
+        variance = (sum_sq - (sum_val**2) / count) / (count - 1)
+    else:
+        mean_val = sum_val / count
+        variance = (sum_sq / count) - (mean_val**2)
+    return math.sqrt(max(variance, 0.0))
+
+
+def sanitize_metrics_for_logging(data: dict[str, Any]) -> dict[str, NumericScalar]:
+    """
+    Convert metrics to scalar values accepted by logger backends.
+    """
+    sanitized: dict[str, NumericScalar] = {}
+    step_metric_keys = {"training/global_step", "training/global_step_1based"}
+
+    for key, value in data.items():
+        if key in step_metric_keys:
+            if isinstance(value, bool):
+                sanitized[key] = int(value)
+                continue
+            if isinstance(value, int):
+                sanitized[key] = value
+                continue
+            if isinstance(value, float) and math.isfinite(value):
+                sanitized[key] = int(value)
+                continue
+            if hasattr(value, "item") and callable(value.item):
+                try:
+                    scalar = value.item()
+                    if isinstance(scalar, bool):
+                        sanitized[key] = int(scalar)
+                        continue
+                    if isinstance(scalar, int):
+                        sanitized[key] = scalar
+                        continue
+                    if isinstance(scalar, float) and math.isfinite(scalar):
+                        sanitized[key] = int(scalar)
+                        continue
+                except Exception:
+                    pass
+            logger.warning(f"Drop non-scalar step metric for logging: key={key}, type={type(value)}")
+            continue
+
+        if isinstance(value, bool):
+            sanitized[key] = float(int(value))
+            continue
+        if isinstance(value, int | float):
+            sanitized[key] = float(value)
+            continue
+
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                scalar = value.item()
+                if isinstance(scalar, int | float):
+                    sanitized[key] = float(scalar)
+                    continue
+            except Exception:
+                pass
+
+        # Handle StdStats-like objects and dicts.
+        sum_val = getattr(value, "sum", None)
+        sum_sq = getattr(value, "sum_sq", None)
+        count = getattr(value, "count", None)
+        if isinstance(value, dict):
+            sum_val = value.get("sum")
+            sum_sq = value.get("sum_sq")
+            count = value.get("count")
+        if sum_val is not None and sum_sq is not None and count is not None:
+            use_sample_var = "pooled_std" in key
+            sanitized[key] = _std_from_stats(float(sum_val), float(sum_sq), int(count), use_sample_var)
+            continue
+
+        logger.warning(f"Drop non-scalar metric for logging: key={key}, type={type(value)}")
+
+    return sanitized
 
 
 class MetricTracker:
@@ -217,7 +300,7 @@ class MetricTracker:
 
     def log(
         self,
-        data: dict[str, float],
+        data: dict[str, NumericScalar],
         step: int,
         backends: list[str] | None = None,
     ) -> None:
@@ -231,6 +314,10 @@ class MetricTracker:
         """
         if self._closed:
             logger.warning("MetricTracker is closed, ignoring log call")
+            return
+
+        data = sanitize_metrics_for_logging(data)
+        if not data:
             return
 
         for name, backend in self._backends.items():

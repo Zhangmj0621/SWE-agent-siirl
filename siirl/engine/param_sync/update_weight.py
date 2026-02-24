@@ -1,6 +1,7 @@
 import socket
 from abc import abstractmethod
 from collections.abc import Sequence
+from datetime import timedelta
 
 import ray
 import torch
@@ -38,6 +39,25 @@ class ParamSyncDistributed(ParamSyncInterface):
     def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
         super().__init__(config, model, bridge)
         self.rollout_worker_connected = set()
+        self.rollout_workers = []
+        self.tensor_rollout_workers = []
+        self._connected_rollout_workers: list[ActorHandle] = []
+        self._connected_rollout_worker_ids: set[str] = set()
+        self.param_sync_unhealthy = False
+
+    def _rpc_timeout_s(self) -> int:
+        return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+
+    def _normalize_rollout_workers(self, rollout_workers: Sequence[ActorHandle]) -> list[ActorHandle]:
+        deduped_workers: list[ActorHandle] = []
+        seen_actor_ids: set[str] = set()
+        for worker in rollout_workers:
+            actor_id_hex = worker._actor_id.hex()
+            if actor_id_hex in seen_actor_ids:
+                continue
+            seen_actor_ids.add(actor_id_hex)
+            deduped_workers.append(worker)
+        return deduped_workers
 
     def has_connected_to_actor(self, actor: ActorHandle):
         return actor._actor_id.hex() in self.rollout_worker_connected
@@ -52,18 +72,70 @@ class ParamSyncDistributed(ParamSyncInterface):
     def setup_param_sync_group(self, rollout_workers: Sequence[ActorHandle]):
         # from Train DP 0 to all worker
         # each pp rank has its own group
-        self.rollout_workers = rollout_workers
+        normalized_workers = self._normalize_rollout_workers(rollout_workers)
+        self.rollout_workers = normalized_workers
         self._is_pp_src_rank = mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         if self._is_pp_src_rank:
             self._group_name = f"param_sync-pp_{pp_rank}"
 
         if self._is_pp_src_rank:
-            if self._model_update_groups is not None:
-                disconnect_rollout_workers_from_distributed(self._group_name, self._model_update_groups, rollout_workers)
-            self._model_update_groups = connect_rollout_workers_from_distributed(self.config, self._group_name, rollout_workers)
-            self.rollout_worker_connected.clear()
-            self.update_rollout_worker_connected(rollout_workers)
+            if self.param_sync_unhealthy:
+                raise RuntimeError(f"[{self._group_name}] Param sync is unhealthy and requires process restart")
+
+            new_worker_ids = {worker._actor_id.hex() for worker in normalized_workers}
+            if self._model_update_groups is not None and new_worker_ids == self._connected_rollout_worker_ids:
+                return
+
+            old_workers = list(self._connected_rollout_workers)
+            old_worker_ids = set(self._connected_rollout_worker_ids)
+            old_group = self._model_update_groups
+            timeout_s = self._rpc_timeout_s()
+
+            try:
+                if old_group is not None:
+                    disconnect_rollout_workers_from_distributed(self._group_name, old_group, old_workers, timeout_s=timeout_s)
+                    self._model_update_groups = None
+
+                self._model_update_groups = connect_rollout_workers_from_distributed(
+                    self.config,
+                    self._group_name,
+                    normalized_workers,
+                    timeout_s=timeout_s,
+                )
+                self._connected_rollout_workers = list(normalized_workers)
+                self._connected_rollout_worker_ids = new_worker_ids
+                self.rollout_worker_connected.clear()
+                self.update_rollout_worker_connected(normalized_workers)
+            except Exception:
+                logger.exception(f"[{self._group_name}] Failed to setup param sync group")
+                rollback_ok = False
+
+                if old_workers:
+                    try:
+                        self._model_update_groups = connect_rollout_workers_from_distributed(
+                            self.config,
+                            self._group_name,
+                            old_workers,
+                            timeout_s=timeout_s,
+                        )
+                        self._connected_rollout_workers = old_workers
+                        self._connected_rollout_worker_ids = old_worker_ids
+                        self.rollout_worker_connected.clear()
+                        self.update_rollout_worker_connected(old_workers)
+                        rollback_ok = True
+                        logger.warning(f"[{self._group_name}] Rolled back to previous param sync workers")
+                    except Exception:
+                        logger.exception(f"[{self._group_name}] Rollback failed after setup_param_sync_group failure")
+
+                if not rollback_ok:
+                    self._model_update_groups = None
+                    self._connected_rollout_workers = []
+                    self._connected_rollout_worker_ids.clear()
+                    self.rollout_worker_connected.clear()
+                    self.param_sync_unhealthy = True
+                    logger.error(f"[{self._group_name}] Marked param sync as unhealthy after unrecoverable setup failure")
+                raise
             logger.info(f"self._model_update_groups=={self._model_update_groups.size()}")
 
     def _update_weights_use_mbridge(self) -> None:
@@ -73,25 +145,65 @@ class ParamSyncDistributed(ParamSyncInterface):
 
         buffer_size = 0
         converted_named_tensors = []
-        pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_pp_src_rank else None
+        pbar = (
+            tqdm(
+                desc=f"[{self._group_name}] Update weights",
+                total=0,
+                dynamic_ncols=True,
+                leave=False,
+            )
+            if self._is_pp_src_rank
+            else None
+        )
+        try:
+            generator = self.bridge._export_weights_in_current_pipeline_stage(self.model)
+            for name, param in generator:
+                buffer_size = self._update_param_sync_bucket(name, param, converted_named_tensors, buffer_size, pbar)
 
-        generator = self.bridge._export_weights_in_current_pipeline_stage(self.model)
-
-        for name, param in generator:
-            buffer_size = self._update_param_sync_bucket(name, param, converted_named_tensors, buffer_size, pbar)
-
-        if converted_named_tensors:
-            self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
+            if converted_named_tensors:
+                self._update_bucket_weights(converted_named_tensors, pbar=pbar)
+        finally:
+            if pbar is not None:
+                pbar.close()
 
     def _update_weights_naive(self) -> None:
         raise NotImplementedError("_update_weights_naive is not implemented, please set use_mbridge=True")
 
     @torch.no_grad()
     def update_weights(self) -> None:
-        self.weight_version += 1
+        self.update_weights_mixed(self.rollout_workers, [])
+
+    def _all_target_workers(self) -> list[ActorHandle]:
+        return [*self.rollout_workers, *self.tensor_rollout_workers]
+
+    @torch.no_grad()
+    def update_weights_mixed(
+        self,
+        rollout_workers: Sequence[ActorHandle],
+        tensor_rollout_workers: Sequence[ActorHandle] | None = None,
+        bump_weight_version: bool = True,
+    ) -> None:
+        if self.param_sync_unhealthy:
+            raise RuntimeError("Param sync group is unhealthy; refusing to sync rollout weights")
+
+        self.rollout_workers = list(rollout_workers)
+        self.tensor_rollout_workers = list(tensor_rollout_workers or [])
+        all_workers = self._all_target_workers()
+        if not all_workers:
+            return
+
+        timeout_s = self._rpc_timeout_s()
+        if bump_weight_version:
+            self.weight_version += 1
         if dist.get_rank() == 0:
-            ray.get([worker.pause_generation.remote() for worker in self.rollout_workers])
-            ray.get([worker.flush_cache.remote() for worker in self.rollout_workers])
+            if self.tensor_rollout_workers:
+                logger.info(
+                    f"[ParamSyncDistributed] Mixed weight sync: distributed_workers={len(self.rollout_workers)} "
+                    f"tensor_workers={len(self.tensor_rollout_workers)} "
+                    f"weight_version={self.weight_version} bump={bump_weight_version}"
+                )
+            ray.get([worker.pause_generation.remote() for worker in all_workers], timeout=timeout_s)
+            ray.get([worker.flush_cache.remote() for worker in all_workers], timeout=timeout_s)
         dist.barrier(group=get_gloo_group())
 
         if self.bridge is not None:
@@ -102,11 +214,12 @@ class ParamSyncDistributed(ParamSyncInterface):
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
             self._check_weight_version()
-            ray.get([worker.continue_generation.remote() for worker in self.rollout_workers])
+            ray.get([worker.continue_generation.remote() for worker in all_workers], timeout=timeout_s)
         dist.barrier(group=get_gloo_group())
 
     def _check_weight_version(self):
-        version_list = ray.get([worker.weight_version.remote() for worker in self.rollout_workers])
+        workers = self._all_target_workers()
+        version_list = ray.get([worker.weight_version.remote() for worker in workers], timeout=self._rpc_timeout_s())
         for idx, v in enumerate(version_list):
             if v != self.weight_version:
                 raise ValueError(
@@ -123,36 +236,53 @@ class ParamSyncDistributed(ParamSyncInterface):
         pbar: tqdm | None = None,
     ):
         if not self._is_pp_src_rank:
-            return
+            return buffer_size
         param_size = param.numel() * param.element_size()
         if buffer_size + param_size > self.config.trainer.param_sync_buffer_size:
-            self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
+            self._update_bucket_weights(converted_named_tensors, pbar=pbar)
             buffer_size = 0
         converted_named_tensors.append((name, param))
         buffer_size += param_size
         return buffer_size
 
-    def _update_bucket_weights_from_distributed(
+    def _update_bucket_weights(
         self,
         converted_named_tensors: list[tuple[str, torch.Tensor]],
         pbar: tqdm | None = None,
     ) -> None:
+        refs = []
+        if self._is_pp_src_rank and self.rollout_workers:
+            refs.extend(
+                update_weights_from_distributed(
+                    self._group_name,
+                    self._model_update_groups,
+                    self.weight_version,
+                    self.rollout_workers,
+                    converted_named_tensors,
+                )
+            )
+        if self._is_pp_src_rank and self.tensor_rollout_workers:
+            refs.extend(
+                update_weights_from_tensor(
+                    self.weight_version,
+                    self.tensor_rollout_workers,
+                    converted_named_tensors,
+                    self.config.rollout.tensor_model_parallel_size,
+                )
+            )
 
-        refs = update_weights_from_distributed(
-            self._group_name,
-            self._model_update_groups,
-            self.weight_version,
-            self.rollout_workers,
-            converted_named_tensors,
-        )
-
-        ray.get(refs)
+        if refs:
+            ray.get(refs, timeout=self._rpc_timeout_s())
         converted_named_tensors.clear()
-        pbar.update(1)
+        if pbar is not None:
+            pbar.update(1)
 
 
 def connect_rollout_workers_from_distributed(
-    args: SiiRLArguments, group_name: str, rollout_workers: Sequence[ActorHandle]
+    args: SiiRLArguments,
+    group_name: str,
+    rollout_workers: Sequence[ActorHandle],
+    timeout_s: int | None = None,
 ) -> dist.ProcessGroup:
     """
     Create NCCL group: training rank 0 + all worker GPUs. Blocks until joined.
@@ -162,7 +292,9 @@ def connect_rollout_workers_from_distributed(
         sock.bind(("", 0))
         master_port = sock.getsockname()[1]
     rollout_worker_num = len(rollout_workers)
-    rollout_gpu_per_worker = args.trainer.rollout_gpus // rollout_worker_num
+    if rollout_worker_num <= 0:
+        raise ValueError(f"{group_name}: rollout_workers is empty")
+    rollout_gpu_per_worker = max(1, args.rollout.tensor_model_parallel_size)
     world_size = len(rollout_workers) * rollout_gpu_per_worker + 1
     logger.info(f"Group {group_name} is connecting to {rollout_workers}")
     refs = [
@@ -182,18 +314,25 @@ def connect_rollout_workers_from_distributed(
         world_size=world_size,
         rank=0,
         group_name=group_name,
+        timeout=timedelta(seconds=timeout_s) if timeout_s else None,
     )
-    ray.get(refs)
+    ray.get(refs, timeout=timeout_s)
     return model_update_groups
 
 
-def disconnect_rollout_workers_from_distributed(group_name, model_update_groups, rollout_workers):
+def disconnect_rollout_workers_from_distributed(
+    group_name,
+    model_update_groups,
+    rollout_workers,
+    timeout_s: int | None = None,
+):
     """
     Destroy NCCL on training and workers.
     """
     refs = [worker.destroy_weights_update_group.remote(group_name) for worker in rollout_workers]
     dist.destroy_process_group(model_update_groups)
-    ray.get(refs)
+    if refs:
+        ray.get(refs, timeout=timeout_s)
 
 
 def update_weights_from_distributed(
@@ -224,3 +363,30 @@ def update_weights_from_distributed(
         handle.wait()
 
     return refs
+
+
+def update_weights_from_tensor(
+    weight_version: int,
+    rollout_workers: Sequence[ActorHandle],
+    converted_named_tensors: Sequence[tuple[str, torch.Tensor]],
+    tensor_model_parallel_size: int,
+) -> list[ray.ObjectRef]:
+    if not rollout_workers:
+        return []
+
+    serialized_bucket = serialize_named_tensors(converted_named_tensors)
+    serialized_named_tensors = [serialized_bucket for _ in range(max(1, tensor_model_parallel_size))]
+    return [
+        worker.param_sync_from_tensor.remote(
+            serialized_named_tensors=serialized_named_tensors,
+            flush_cache=False,
+            weight_version=str(weight_version),
+        )
+        for worker in rollout_workers
+    ]
+
+
+def serialize_named_tensors(named_tensors: Sequence[tuple[str, torch.Tensor]]) -> str:
+    from sglang.srt.utils.common import MultiprocessingSerializer
+
+    return MultiprocessingSerializer.serialize(list(named_tensors), output_str=True)

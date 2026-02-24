@@ -17,6 +17,7 @@ import copy
 import multiprocessing
 import os
 import time
+from collections.abc import Callable
 
 import requests
 from loguru import logger
@@ -24,6 +25,7 @@ from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from urllib3.exceptions import NewConnectionError
 
+from siirl.execution.rollout.concurrency import resolve_rollout_concurrency
 from siirl.models.loader import load_tokenizer
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient, wait_until_ok
@@ -74,6 +76,7 @@ class SglangEngine:
         self.port = port
         self.nccl_port = nccl_port
         self.ip = ip
+        self.router_address = None
         self._weight_version = 0
         # GPU placement parameters (directly passed, not calculated)
         self.base_gpu_id = base_gpu_id
@@ -209,6 +212,9 @@ class SglangEngine:
     def set_router(self, router_address):
         self.router_address = router_address
 
+    def _rpc_timeout_s(self) -> int:
+        return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+
     def _get_sampling_params(self, is_validate: bool, input_len: int | None = None) -> dict:
         """Get sampling parameters based on mode (train/validate)."""
         params = copy.deepcopy(self.sampling_params)
@@ -245,6 +251,17 @@ class SglangEngine:
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
         return output["text"], responses, rollout_log_prob
 
+    def _resolve_batch_concurrency(self, use_router: bool) -> int:
+        limits = resolve_rollout_concurrency(self.config, phase="validate", use_router=use_router)
+        logger.debug(
+            "Batch concurrency: "
+            f"phase={limits['phase']}, use_router={bool(limits['use_router'])}, "
+            f"base_key={limits['base_key']}, base={limits['base']}, "
+            f"num_engines={limits['num_engines']}, resolved={limits['resolved']}, "
+            f"max_num_seqs={limits['max_num_seqs']}, effective={limits['effective']}"
+        )
+        return int(limits["effective"])
+
     async def generate_batch(
         self,
         batch_input_ids: list[list[int]],
@@ -253,6 +270,7 @@ class SglangEngine:
         show_progress: bool = True,
         progress_desc: str = "Validate",
         sort_by_length: bool = True,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> list[tuple[str, list[int], list[float]]]:
         """
         Batch generation for single-turn scenarios (no multi-turn/tool calls).
@@ -293,13 +311,10 @@ class SglangEngine:
             sorted_indices = list(range(len(batch_input_ids)))
             sorted_input_ids = batch_input_ids
 
-        # Use semaphore to control concurrency (prevent overwhelming the server)
-        # Same as slime: Semaphore(concurrency * num_engines)
-        base_concurrency = self.config.rollout.server_concurrency
-        rollout_gpus = getattr(self.config.trainer, "rollout_gpus", 1)
-        tp_size = getattr(self.config.rollout, "tensor_model_parallel_size", 1)
-        num_engines = max(1, rollout_gpus // tp_size)
-        max_concurrent = base_concurrency * num_engines
+        # Use semaphore to control concurrency (prevent overwhelming the server).
+        # Router path: scale by num_engines (router distributes across all engines).
+        # Local/validate path: use validate_server_concurrency (single-engine scope).
+        max_concurrent = self._resolve_batch_concurrency(use_router)
         semaphore = asyncio.Semaphore(max_concurrent)
 
         # Create concurrent tasks for each sample (SGLang handles batching internally)
@@ -314,6 +329,8 @@ class SglangEngine:
                 output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
             responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
             log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
+            if progress_callback is not None:
+                progress_callback(1)
             return output["text"], responses, log_probs
 
         # SGLang handles continuous batching internally
@@ -379,10 +396,11 @@ class SglangEngine:
         """Flush the cache of the server."""
         if self.rank != 0:
             return
+        timeout_s = self._rpc_timeout_s()
         # flush cache will not return status_code 200 when there are pending requests
         for _ in range(60):
             try:
-                response = requests.get(f"{self.sgl_args.url()}/flush_cache")
+                response = requests.get(f"{self.sgl_args.url()}/flush_cache", timeout=timeout_s)
                 if response.status_code == 200:
                     break
             except NewConnectionError as e:
@@ -395,12 +413,12 @@ class SglangEngine:
             raise TimeoutError("Timeout while flushing cache.")
 
     def pause_generation(self):
-        response = requests.post(f"{self.sgl_args.url()}/pause_generation", json={})
+        response = requests.post(f"{self.sgl_args.url()}/pause_generation", json={}, timeout=self._rpc_timeout_s())
         response.raise_for_status()
         return response
 
     def continue_generation(self):
-        response = requests.post(f"{self.sgl_args.url()}/continue_generation", json={})
+        response = requests.post(f"{self.sgl_args.url()}/continue_generation", json={}, timeout=self._rpc_timeout_s())
         response.raise_for_status()
         return response
 
@@ -418,7 +436,7 @@ class SglangEngine:
             return
 
         url = f"{self.sgl_args.url()}/{endpoint}"
-        response = requests.post(url, json=payload or {})
+        response = requests.post(url, json=payload or {}, timeout=self._rpc_timeout_s())
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError:
@@ -467,14 +485,33 @@ class SglangEngine:
             self._weight_version += 1
         return result
 
+    def param_sync_from_tensor(
+        self,
+        serialized_named_tensors,
+        flush_cache=True,
+        weight_version: str | None = None,
+    ):
+        payload = {
+            "serialized_named_tensors": serialized_named_tensors,
+            "flush_cache": flush_cache,
+        }
+        if weight_version is not None:
+            payload["weight_version"] = weight_version
+        result = self._make_request("update_weights_from_tensor", payload)
+        if weight_version:
+            self._weight_version = int(weight_version)
+        else:
+            self._weight_version += 1
+        return result
+
     def destroy_weights_update_group(self, group_name):
-        try:
-            return self._make_request(
-                "destroy_weights_update_group",
-                {
-                    "group_name": group_name,
-                },
-            )
-        except requests.exceptions.RequestException:
-            # catch the case there the engine is just created and does not have the group.
-            pass
+        if self.sgl_args.node_rank != 0:
+            return
+
+        url = f"{self.sgl_args.url()}/destroy_weights_update_group"
+        response = requests.post(url, json={"group_name": group_name}, timeout=self._rpc_timeout_s())
+        if response.status_code < 400:
+            return response.json()
+        if "does not exist" in response.text:
+            return
+        response.raise_for_status()

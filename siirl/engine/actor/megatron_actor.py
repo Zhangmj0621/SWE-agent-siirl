@@ -1,3 +1,4 @@
+from collections import defaultdict
 from functools import partial
 
 import torch
@@ -884,16 +885,35 @@ class MegatronPPOActor:
         return log_probs, entropys
 
     def compute_ppo_loss(self, model_output, data):
-        """Compute PPO loss including policy gradient, entropy, and KL"""
+        """Compute PPO loss and return mode-aware metric groups."""
         log_prob = model_output["log_probs"]
         entropy = model_output.get("entropy", None)
-        metrics = {}
 
         response_mask = data["response_mask"].to(bool)
         old_log_prob = data["old_log_probs"]
         advantages = data["advantages"]
         loss_agg_mode = self.actor_config.loss_agg_mode
         loss_mode = self.actor_config.loss_mode
+
+        global_info_raw = data.get("_global_info", None)
+        if isinstance(global_info_raw, NonTensorData) or hasattr(global_info_raw, "data") and isinstance(global_info_raw.data, dict):
+            global_info = global_info_raw.data
+        elif isinstance(global_info_raw, dict):
+            global_info = global_info_raw
+        else:
+            global_info = {}
+
+        agg_kwargs = {
+            "batch_num_tokens": global_info.get("batch_num_tokens"),
+            "global_valid_seqs": global_info.get("global_valid_seqs"),
+            "loss_scale_factor": global_info.get("loss_scale_factor"),
+            "dp_size": int(global_info.get("dp_size", 1)),
+        }
+        use_sum_reduce = (
+            agg_kwargs["batch_num_tokens"] is not None
+            or agg_kwargs["global_valid_seqs"] is not None
+            or agg_kwargs["loss_scale_factor"] is not None
+        )
 
         # Policy gradient loss
         policy_loss_fn = get_policy_loss_fn(loss_mode)
@@ -904,23 +924,24 @@ class MegatronPPOActor:
             response_mask=response_mask,
             loss_agg_mode=loss_agg_mode,
             config=self.actor_config,
+            **agg_kwargs,
         )
 
-        metrics.update(
-            {
-                "actor/pg_loss": pg_loss.detach().item(),
-                "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                "actor/ppo_kl": ppo_kl.detach().item(),
-                "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-            }
-        )
+        sum_metrics = {"actor/pg_loss": pg_loss.detach().item()}
+        weighted_metrics = {
+            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+            "actor/ppo_kl": ppo_kl.detach().item(),
+            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        }
+        passthrough_metrics = {}
+
         policy_loss = pg_loss
 
         # Entropy loss
         if entropy is not None:
-            entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+            entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **agg_kwargs)
             policy_loss -= self.actor_config.entropy_coeff * entropy_loss
-            metrics["actor/entropy_loss"] = entropy_loss.detach().item()
+            sum_metrics["actor/entropy_loss"] = entropy_loss.detach().item()
 
         # KL loss
         if self.actor_config.use_kl_loss:
@@ -930,16 +951,12 @@ class MegatronPPOActor:
                 ref_logprob=ref_log_prob,
                 kl_penalty=self.actor_config.kl_loss_type,
             )
-            kl_loss = agg_loss(
-                loss_mat=kld,
-                loss_mask=response_mask,
-                loss_agg_mode=self.actor_config.loss_agg_mode,
-            )
+            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=self.actor_config.loss_agg_mode, **agg_kwargs)
             policy_loss += kl_loss * self.actor_config.kl_loss_coef
-            metrics["actor/kl_loss"] = kl_loss.detach().item()
-            metrics["actor/kl_coef"] = self.actor_config.kl_loss_coef
+            sum_metrics["actor/kl_loss"] = kl_loss.detach().item()
+            passthrough_metrics["actor/kl_coef"] = self.actor_config.kl_loss_coef
 
-        return policy_loss, metrics
+        return policy_loss, sum_metrics, weighted_metrics, passthrough_metrics, use_sum_reduce
 
     def forward_backward_batch(
         self,
@@ -970,13 +987,23 @@ class MegatronPPOActor:
         # Use dynamic batching when enabled; restore order in forward-only path via partitions.
         partitions = None
         metric_weights = None
+        global_info = None
         use_dynamic_batch = getattr(self.actor_config, "use_dynamic_batch", False)
         if use_dynamic_batch:
             from siirl.engine.actor.dynamic_batch import rearrange_micro_batches
 
+            max_token_len = int(self.actor_config.max_tokens_per_gpu)
+            # CP can be exposed differently by runtime groups vs configured topology.
+            # Use the largest visible CP size to avoid underestimating token budget.
+            runtime_cp_size = int(mpu.get_context_parallel_world_size())
+            trainer_cp_size = int(getattr(self.config.trainer, "context_parallel_size", 1))
+            tf_cp_size = int(getattr(self.tf_config, "context_parallel_size", 1))
+            cp_size = max(1, runtime_cp_size, trainer_cp_size, tf_cp_size)
+            max_token_len *= cp_size
+
             micro_batches, partitions = rearrange_micro_batches(
                 batch=mini_batch,
-                max_token_len=self.actor_config.max_tokens_per_gpu,
+                max_token_len=max_token_len,
                 dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
                 vpp_size=len(self.actor_module),
                 sync_micro_num=True,
@@ -986,31 +1013,63 @@ class MegatronPPOActor:
             assert micro_batch_size is not None
             micro_batches = mini_batch.split(micro_batch_size)
 
+        n_micro_batch = len(micro_batches)
+
         if not forward_only and all("response_mask" in mb for mb in micro_batches):
-            if self.actor_config.loss_agg_mode == "token-mean":
-                metric_weights = [float(mb["response_mask"].sum().item()) for mb in micro_batches]
-            else:
-                metric_weights = [float(mb["response_mask"].shape[0]) for mb in micro_batches]
+            metric_weights = [float(mb["response_mask"].sum().item()) for mb in micro_batches]
+
+        if not forward_only and use_dynamic_batch and "response_mask" in mini_batch:
+            response_mask = mini_batch["response_mask"]
+            batch_num_tokens = float(response_mask.sum().item())
+            global_valid_seqs = float((response_mask.sum(dim=-1) > 0).sum().item())
+            denominator_scope = getattr(self.actor_config, "denominator_scope", "local")
+            if denominator_scope not in {"local", "dp_global"}:
+                raise ValueError(f"Unsupported denominator_scope: {denominator_scope}")
+
+            dp_size = 1
+            if denominator_scope == "dp_global":
+                dp_group = mpu.get_data_parallel_group(with_context_parallel=True)
+                dp_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
+                global_stats = torch.tensor([batch_num_tokens, global_valid_seqs], dtype=torch.float32, device=get_device_id())
+                torch.distributed.all_reduce(global_stats, op=torch.distributed.ReduceOp.SUM, group=dp_group)
+                batch_num_tokens = float(global_stats[0].item())
+                global_valid_seqs = float(global_stats[1].item())
+
+            global_info = {
+                "batch_num_tokens": batch_num_tokens,
+                "global_valid_seqs": global_valid_seqs,
+                "loss_scale_factor": getattr(self.actor_config, "loss_scale_factor", None),
+                "num_micro_batch": n_micro_batch,
+                "dp_size": dp_size,
+            }
+            for micro_batch in micro_batches:
+                micro_batch["_global_info"] = NonTensorData(dict(global_info))
 
         log_batch_info(data, micro_batch_size, len(micro_batches), forward_only)
-
-        n_micro_batch = len(micro_batches)
         forward_backward_func = get_forward_backward_func()
 
-        def loss_func(output, data, non_loss_data=False):
+        def loss_func(output_tensor, data, non_loss_data=False):
+            # Prefer queued dict payload; fallback keeps backward compatibility.
+            if _payload_channel:
+                output = _payload_channel.pop(0)
+            elif isinstance(output_tensor, dict):
+                output = output_tensor
+            else:
+                raise TypeError(
+                    f"loss_func expected dict payload from side-channel or output_tensor, "
+                    f"got {type(output_tensor).__name__}. This indicates a forward_step "
+                    f"contract violation — logits_processor output was not properly routed."
+                )
+
             device = output["log_probs"].device
             responses = data["responses"]
             response_length = responses.size(1)
 
-            # Check output format:
-            # - Response-only: shape is [batch, response_length], use directly
-            # - Packed/full: shape is [batch, seq_len], extract response part
+            # Support both response-only and full-sequence log-prob layouts.
             log_probs_shape = output["log_probs"].shape
             if log_probs_shape[-1] == response_length:
-                # Response-only format: already [batch, response_length]
                 log_prob = output["log_probs"].contiguous()
             else:
-                # Full sequence format: [batch, seq_len], extract response part
                 log_prob = output["log_probs"][:, -response_length - 1 : -1].contiguous()
 
             model_output = {"log_probs": log_prob}
@@ -1026,8 +1085,36 @@ class MegatronPPOActor:
             if forward_only or non_loss_data:
                 return torch.tensor(1.0, device=device), model_output
 
-            policy_loss, metrics = self.compute_ppo_loss(model_output, data)
-            return policy_loss, metrics
+            policy_loss, sum_metrics, weighted_metrics, passthrough_metrics, use_sum_reduce = self.compute_ppo_loss(
+                model_output,
+                data,
+            )
+            scaled_loss = policy_loss
+            global_info_raw = data.get("_global_info", None)
+            if global_info_raw is not None:
+                if (
+                    isinstance(global_info_raw, NonTensorData)
+                    or hasattr(global_info_raw, "data")
+                    and isinstance(global_info_raw.data, dict)
+                ):
+                    global_info = global_info_raw.data
+                elif isinstance(global_info_raw, dict):
+                    global_info = global_info_raw
+                else:
+                    global_info = {}
+                num_micro_batch = int(global_info.get("num_micro_batch", 1))
+                scaled_loss = policy_loss.float() * num_micro_batch
+
+            metric_payload = {
+                "sum_metrics": sum_metrics,
+                "weighted_metrics": weighted_metrics,
+                "passthrough_metrics": passthrough_metrics,
+                "sum_metrics_reduce": "sum" if use_sum_reduce else "mean",
+            }
+            return scaled_loss, metric_payload
+
+        # Keep dict payloads for loss_func while returning tensor output to Megatron schedule.
+        _payload_channel: list[dict] = []
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
@@ -1085,7 +1172,14 @@ class MegatronPPOActor:
                 logits_processor_args=logits_processor_args,
             )
 
-            return output, partial(loss_func, data=batch)
+            # Return tensor for schedule hooks and queue dict payload for loss_func.
+            if isinstance(output, dict):
+                _payload_channel.append(output)
+                output_tensor = output["log_probs"]
+            else:
+                output_tensor = output
+
+            return output_tensor, partial(loss_func, data=batch)
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
@@ -1124,9 +1218,15 @@ class MegatronPPOActor:
         """Update policy using PPO algorithm"""
         metrics = {}
         temperature = data["temperature"]
-        weighted_metric_keys = {"actor/entropy_loss", "actor/kl_loss"}
-        weighted_metric_num = {k: 0.0 for k in weighted_metric_keys}
-        weighted_metric_den = {k: 0.0 for k in weighted_metric_keys}
+        sum_metric_num = defaultdict(float)
+        sum_metric_den = defaultdict(float)
+        weighted_metric_num = defaultdict(float)
+        weighted_metric_den = defaultdict(float)
+
+        def _to_float(value):
+            if torch.is_tensor(value):
+                return float(value.item())
+            return float(value)
 
         select_keys = [
             "responses",
@@ -1163,20 +1263,41 @@ class MegatronPPOActor:
             )
             metric_weights = metric_micro_batch.get("_metric_weights")
             metric_micro_batch = metric_micro_batch["output"]
-            for idx, metric in enumerate(metric_micro_batch):
-                weight = 1.0
+            for idx, metric_payload in enumerate(metric_micro_batch):
+                token_weight = 1.0
                 if metric_weights is not None and idx < len(metric_weights):
-                    weight = float(metric_weights[idx])
-                non_weighted_metric = {}
-                for key, val in metric.items():
-                    if key in weighted_metric_keys:
-                        v = val.item() if torch.is_tensor(val) else float(val)
-                        weighted_metric_num[key] += v * weight
-                        weighted_metric_den[key] += weight
-                    else:
-                        non_weighted_metric[key] = val
-                if non_weighted_metric:
-                    append_to_dict(metrics, non_weighted_metric)
+                    token_weight = float(metric_weights[idx])
+
+                if isinstance(metric_payload, dict) and ("sum_metrics" in metric_payload or "weighted_metrics" in metric_payload):
+                    reduce_mode = metric_payload.get("sum_metrics_reduce", "mean")
+                    sum_metrics = metric_payload.get("sum_metrics", {})
+                    weighted_metrics = metric_payload.get("weighted_metrics", {})
+                    passthrough_metrics = metric_payload.get("passthrough_metrics", {})
+
+                    for key, value in sum_metrics.items():
+                        scalar = _to_float(value)
+                        if reduce_mode == "sum":
+                            # Already normalized by batch_num_tokens in agg_loss;
+                            # plain sum recovers global token-mean (weighted avg would double-normalize).
+                            #
+                            # Keep actor/entropy_loss driven by forward-only path in
+                            # trainer (master-compatible definition).
+                            if key == "actor/entropy_loss":
+                                continue
+                            sum_metric_num[key] += scalar
+                            sum_metric_den[key] = 1.0
+                        else:
+                            append_to_dict(metrics, {key: scalar})
+
+                    for key, value in weighted_metrics.items():
+                        weighted_metric_num[key] += _to_float(value) * token_weight
+                        weighted_metric_den[key] += token_weight
+
+                    if passthrough_metrics:
+                        append_to_dict(metrics, passthrough_metrics)
+                else:
+                    # Backward compatibility for legacy plain-metric payloads.
+                    append_to_dict(metrics, metric_payload)
 
             update_successful, grad_norm, num_zeros_in_grad = self.actor_optimizer.step()
             learning_rate = self.actor_optimizer.param_groups[-1]["lr"]
@@ -1187,17 +1308,33 @@ class MegatronPPOActor:
                 raise NotImplementedError
 
         get_torch_device().empty_cache()
-        for key in weighted_metric_keys:
-            if weighted_metric_den[key] > 0:
-                metrics[key] = weighted_metric_num[key] / weighted_metric_den[key]
-                # Expose numerator/denominator for cross-rank weighted mean.
-                metrics[f"{key}_weighted_sum"] = weighted_metric_num[key]
-                metrics[f"{key}_weight_sum"] = weighted_metric_den[key]
+        for key, numerator in sum_metric_num.items():
+            denominator = sum_metric_den[key]
+            if denominator > 0:
+                metrics[f"{key}_weighted_sum"] = numerator
+                metrics[f"{key}_weight_sum"] = denominator
+
+        for key, numerator in weighted_metric_num.items():
+            denominator = weighted_metric_den[key]
+            if denominator > 0:
+                metrics[f"{key}_weighted_sum"] = numerator
+                metrics[f"{key}_weight_sum"] = denominator
         return metrics
 
 
 class MegatronPPOCritic:
     """Core PPO Critic implementation with Megatron backend"""
+
+    @staticmethod
+    def _unwrap_output_item(item):
+        """Unwrap output item from forward_backward_batch result."""
+        if isinstance(item, dict):
+            return item
+        if isinstance(item, tuple):
+            for elem in item:
+                if isinstance(elem, dict):
+                    return elem
+        raise TypeError(f"Unexpected output item type: {type(item)}")
 
     def __init__(
         self,

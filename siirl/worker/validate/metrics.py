@@ -1,4 +1,4 @@
-# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+# Copyright 2026, Shanghai Innovation Institute. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""Validation metric aggregation helpers."""
+
 from collections import defaultdict
 
 import numpy as np
@@ -65,10 +68,12 @@ def aggregate_validation_results(all_payloads: list[Sample]) -> dict[str, float]
     infos_dict = defaultdict(list)
     for p in all_payloads:
         infos_dict["reward"].append(p.rewards)
-        # for key, value in p.extra_rewards.items():
-        #     infos_dict[key].append(value)
 
-    data_src2var2metric2val = aggregate_validation_metrics(data_sources=data_sources, sample_inputs=sample_inputs, infos_dict=infos_dict)
+    data_src2var2metric2val = aggregate_validation_metrics(
+        data_sources=data_sources,
+        sample_inputs=sample_inputs,
+        infos_dict=infos_dict,
+    )
 
     metric_dict = {}
     for data_source, var2metric2val in data_src2var2metric2val.items():

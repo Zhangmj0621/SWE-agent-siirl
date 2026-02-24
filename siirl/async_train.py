@@ -25,6 +25,7 @@ from siirl.utils.task_coordinator import create_coordinator
 from siirl.worker.actor.trainer_group import TrainerGroup
 from siirl.worker.ray_utils import allocate_resources
 from siirl.worker.rollout.rollout_manager import RolloutManager
+from siirl.worker.validate.progress import ValidateProgressMonitor
 
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
@@ -34,6 +35,7 @@ RAY_RUNTIME_ENV_VARS = {
 }
 
 MAIN_RUNNER_CPU_RESERVATION = 5
+VALIDATE_PROGRESS_DRIVER_POLL_S = 0.5
 
 
 @ray.remote(num_cpus=MAIN_RUNNER_CPU_RESERVATION)
@@ -47,7 +49,7 @@ class MainRunner:
     and that the setup process is managed within the Ray cluster.
     """
 
-    def run(self, config: SiiRLArguments) -> None:
+    def run(self, config: SiiRLArguments, rollout_manager_name: str | None = None) -> None:
         """
         Executes the main training workflow.
 
@@ -101,7 +103,18 @@ class MainRunner:
         try:
             logger.info(f"Initializing components: {actor_resources.num_gpus} training GPUs, {rollout_resources.num_gpus} rollout GPUs...")
 
-            rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator, coordinator, metric_worker)
+            rollout_manager_options = {}
+            if rollout_manager_name:
+                rollout_manager_options["name"] = rollout_manager_name
+
+            rollout_manager = RolloutManager.options(**rollout_manager_options).remote(
+                config,
+                rollout_resources,
+                data_coordinator,
+                actor_resources,
+                coordinator,
+                metric_worker,
+            )
             trainer_group = TrainerGroup(
                 config,
                 actor_resources,
@@ -255,9 +268,21 @@ def main() -> None:
         # Launch the main orchestration actor and wait for it to complete.
         logger.info("Starting MainRunner actor to orchestrate the job.")
         runner = MainRunner.remote()
-
-        # This is a blocking call that waits for the remote `run` method to finish.
-        ray.get(runner.run.remote(siirl_args))
+        rollout_manager_name = f"siirl_rollout_manager_{time.time_ns()}"
+        progress_monitor = ValidateProgressMonitor(rollout_manager_name)
+        run_completed = False
+        try:
+            run_ref = runner.run.remote(siirl_args, rollout_manager_name)
+            while True:
+                ready_refs, _ = ray.wait([run_ref], timeout=VALIDATE_PROGRESS_DRIVER_POLL_S)
+                progress_monitor.poll_once()
+                if ready_refs:
+                    ray.get(ready_refs[0])
+                    run_completed = True
+                    progress_monitor.poll_once()
+                    break
+        finally:
+            progress_monitor.close(force_complete=run_completed)
         logger.success("MainRunner has completed its execution.")
 
     except KeyboardInterrupt:

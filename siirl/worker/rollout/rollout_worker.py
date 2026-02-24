@@ -13,16 +13,17 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import importlib
 import os
 import threading
+import time
 
 from loguru import logger
 
 from siirl.engine.rollout.sglang_engine import SglangEngine
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.net import get_free_port, get_net_interface_ip
-from siirl.worker.rollout.validator import aggregate_and_log_validation_metrics
 
 
 def async_run_wrapper(executor):
@@ -69,6 +70,31 @@ class RolloutWorker:
         self.executor = None  # Rollout executor instance
         self.rollout_thread = None  # Thread for running the async rollout executor
         self.engine = None  # SGLang engine instance
+        self._validate_progress = {
+            "total": 0,
+            "done": 0,
+            "active": False,
+            "start_time": 0.0,
+            "updated_at": 0.0,
+        }
+
+    def _build_executor(self, data_coordinator, num_engine):
+        executor_path = self.config.rollout.executor_module
+        if executor_path == "naive":
+            from siirl.execution.rollout.agent_executor.naive_executor import NaiveExecutor
+
+            Executor = NaiveExecutor
+        else:
+            module_path, name = executor_path.rsplit(".", 1)
+            mod = importlib.import_module(module_path)
+            Executor = getattr(mod, name)
+        return Executor(
+            self.config,
+            data_coordinator,
+            self.engine,
+            self.config.data.train_batch_size // num_engine,
+            dp_rank=self.rank,
+        )
 
     def allocate_ports(self, start_port: int, count: int) -> list[int]:
         """
@@ -137,7 +163,7 @@ class RolloutWorker:
             self.ip = ip
             self.port = port
 
-    def launch_server(self, max_retries: int = 3):
+    def launch_server(self, max_retries: int = 3, reserved_ports: list[int] | None = None):
         """
         Launch the SGLang server with retry mechanism for port conflicts.
 
@@ -146,22 +172,40 @@ class RolloutWorker:
 
         Args:
             max_retries: Maximum number of retry attempts (default: 3)
+            reserved_ports: Optional reserved ports for this worker. When provided,
+                retries are limited to this list to avoid cross-worker port stealing.
         """
-        for attempt in range(max_retries):
+        candidate_ports = []
+        if reserved_ports:
+            seen_ports = set()
+            for port in reserved_ports:
+                if port in seen_ports:
+                    continue
+                seen_ports.add(port)
+                candidate_ports.append(port)
+
+        attempt_budget = min(max_retries, len(candidate_ports)) if candidate_ports else max_retries
+
+        for attempt in range(attempt_budget):
+            if candidate_ports:
+                target_port = candidate_ports[attempt]
+            elif attempt == 0:
+                target_port = self.port
+            else:
+                target_port = get_free_port(get_net_interface_ip(), start_port=self.port + 1)
+
+            self.port = target_port
+            self.engine.port = target_port
             try:
                 self.engine.launch_server()
                 return  # Success
             except Exception as e:
-                if attempt < max_retries - 1:
-                    # Get a new port and retry
-                    new_port = get_free_port(get_net_interface_ip(), start_port=self.port + 1)
-                    logger.warning(
-                        f"Port {self.port} conflict (attempt {attempt + 1}/{max_retries}), " f"retrying with port {new_port}: {e}"
-                    )
-                    self.port = new_port
-                    self.engine.port = new_port
+                with contextlib.suppress(Exception):
+                    self.engine.shutdown()
+                if attempt < attempt_budget - 1:
+                    logger.warning(f"Port {self.port} conflict (attempt {attempt + 1}/{attempt_budget}), retrying: {e}")
                 else:
-                    logger.error(f"Failed to start server after {max_retries} attempts")
+                    logger.error(f"Failed to start server after {attempt_budget} attempts")
                     raise
 
     def start_rollout(self, router_address, data_coordinator, num_engine):
@@ -178,28 +222,13 @@ class RolloutWorker:
             data_coordinator: Data coordinator instance for data management
             num_engine: Number of engine instances to use
         """
-        # create executor thread
-        # 1. init executor
-        executor_path = self.config.rollout.executor_module
-        if executor_path == "naive":
-            from siirl.execution.rollout.agent_executor.naive_executor import NaiveExecutor
-
-            Executor = NaiveExecutor
-        else:
-            # Dynamically import custom executor module
-            module_path, name = executor_path.rsplit(".", 1)
-            mod = importlib.import_module(module_path)
-            Executor = getattr(mod, name)
-        executor = Executor(
-            self.config,
-            data_coordinator,
-            self.engine,
-            self.config.data.train_batch_size // num_engine,
-            dp_rank=self.rank,
-        )
-        self.executor = executor
-        self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(executor,), daemon=True)
+        self.executor = self._build_executor(data_coordinator, num_engine)
+        self.rollout_thread = threading.Thread(target=async_run_wrapper, args=(self.executor,), daemon=True)
         self.rollout_thread.start()
+
+    def init_validate_executor(self, data_coordinator, num_engine):
+        if self.executor is None:
+            self.executor = self._build_executor(data_coordinator, num_engine)
 
     def stop_rollout(self):
         """
@@ -232,21 +261,60 @@ class RolloutWorker:
         """
         self.engine.set_router(router_address)
 
-    async def validate(self, val_batch_size, global_step):
-        rank = int(os.environ.get("RANK"))
-        # start_time = time.perf_counter()
-        if rank == 0:
-            logger.info("=" * 60)
-            logger.info(f"Starting Validation @ Global Step {global_step}...")
-            logger.info("=" * 60)
-        samples, val_time_metrics = await self.executor.validate(val_batch_size)
+    def _filter_validate_samples(self, samples):
         validate_samples = []
         for sample in samples:
             if sample.extra_info and isinstance(sample.extra_info, dict) and sample.extra_info.get("padded_duplicate", None):
                 continue
             validate_samples.append(sample)
-        val_metrics = aggregate_and_log_validation_metrics(validate_samples)
-        await self.metric_worker.submit_metric.remote(val_metrics, self.global_dp_size)
+        return validate_samples
+
+    def _start_validate_progress(self, total: int):
+        now = time.time()
+        self._validate_progress = {
+            "total": int(total),
+            "done": 0,
+            "active": True,
+            "start_time": now,
+            "updated_at": now,
+        }
+
+    def _update_validate_progress(self, delta: int = 1):
+        self._validate_progress["done"] += int(delta)
+        self._validate_progress["updated_at"] = time.time()
+
+    def _finish_validate_progress(self):
+        total = int(self._validate_progress.get("total", 0))
+        done = int(self._validate_progress.get("done", 0))
+        self._validate_progress["done"] = max(done, total)
+        self._validate_progress["active"] = False
+        self._validate_progress["updated_at"] = time.time()
+
+    def get_validate_progress(self) -> dict:
+        progress = dict(self._validate_progress)
+        start_time = float(progress.get("start_time", 0.0))
+        progress["elapsed"] = max(time.time() - start_time, 0.0) if start_time > 0 else 0.0
+        return progress
+
+    async def validate(self, val_batch_size, global_step):
+        logger.debug(f"[RolloutWorker rank={self.rank}] Starting validation @ global step {global_step}")
+        samples, val_time_metrics = await self.executor.validate(val_batch_size)
+        return self._filter_validate_samples(samples), val_time_metrics
+
+    async def validate_assigned(self, val_samples, global_step):
+        logger.debug(f"[RolloutWorker rank={self.rank}] Starting assigned validation @ global step {global_step}")
+        self._start_validate_progress(len(val_samples))
+        samples = []
+        val_time_metrics = {}
+        try:
+            samples, val_time_metrics = await self.executor.validate_samples(
+                val_samples,
+                use_router=False,
+                progress_callback=self._update_validate_progress,
+            )
+        finally:
+            self._finish_validate_progress()
+        return self._filter_validate_samples(samples), val_time_metrics
 
     def get_ip(self):
         """
@@ -284,6 +352,14 @@ class RolloutWorker:
         weight_version: str | None = None,
     ):
         return self.engine.param_sync_from_distributed(names, dtypes, shapes, group_name, flush_cache, weight_version)
+
+    def param_sync_from_tensor(
+        self,
+        serialized_named_tensors,
+        flush_cache=False,
+        weight_version: str | None = None,
+    ):
+        return self.engine.param_sync_from_tensor(serialized_named_tensors, flush_cache=flush_cache, weight_version=weight_version)
 
     def destroy_weights_update_group(self, group_name):
         return self.engine.destroy_weights_update_group(group_name)

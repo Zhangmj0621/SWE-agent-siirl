@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import contextlib
 import multiprocessing
 import os
 import re
@@ -31,6 +32,20 @@ from siirl.utils.net_utils.net import (
     get_net_interface_ip,
 )
 from siirl.worker.ray_utils import GPUResources, RayClassWithInitArgs, get_random_string
+from siirl.worker.validate.progress import ValidateProgressTracker
+from siirl.worker.validate.reuse.constants import (
+    GRACEFUL_SHUTDOWN_TIMEOUT_S,
+    PORT_CYCLE,
+    PORT_RETRY_SLOTS,
+    PORT_STRIDE,
+    PROGRESS_POLL_INTERVAL_S,
+    RECREATE_COOLDOWN_S,
+    SYNC_LOG_INTERVAL_S,
+    SYNC_TIMEOUT_S,
+)
+from siirl.worker.validate.reuse.coordinator import ValidateReuseCoordinator
+from siirl.worker.validate.reuse.topology import rollout_to_train_step, split_validate_reuse_sync_workers, split_validate_samples
+from siirl.worker.validate.reuse.worker_pool import ValidateReuseWorkerPool
 
 
 @ray.remote
@@ -57,6 +72,7 @@ class RolloutManager:
         config: SiiRLArguments,
         gpu_resources: GPUResources,
         data_coordinator_handle,
+        train_gpu_resources: GPUResources | None = None,
         coordinator=None,
         metric_worker=None,
     ):
@@ -85,6 +101,7 @@ class RolloutManager:
 
         # Store GPUResources for centralized access
         self.gpu_resources = gpu_resources
+        self.train_gpu_resources = train_gpu_resources
         self.pg = gpu_resources.pg
         self.rollout_gpu = gpu_resources.num_gpus
 
@@ -110,6 +127,13 @@ class RolloutManager:
         self.router_process = None
         self.worker_handle = []
         self.worker_urls = []
+        self._validate_active = False
+        self._validate_reuse_enabled = bool(
+            getattr(config.trainer, "validate_reuse_train_gpus", False) and self.train_gpu_resources is not None
+        )
+        self._trainer_world_size = self.train_gpu_resources.num_gpus if self.train_gpu_resources is not None else 0
+        self._validate_reuse_coordinator = ValidateReuseCoordinator(trainer_world_size=self._trainer_world_size)
+        self._validate_reuse_pool = ValidateReuseWorkerPool()
 
         # Cache for dist_init_addr (used in cross-node TP)
         self._dist_init_addrs = {}
@@ -122,7 +146,8 @@ class RolloutManager:
         self.batches_to_skip = 0
         self.event = asyncio.Event()
         self.global_steps = 0  # will be reset by actor checkpoint, but maybe not correct in fully async mode
-        self._val_time_acc = 0.0
+        self._val_time_windows: deque[tuple[float, float]] = deque()
+        self._validate_progress = ValidateProgressTracker()
 
         # Initialize workers, engines, router and start rollout
         self.message_queue = deque()
@@ -173,7 +198,18 @@ class RolloutManager:
                 f"local_rank={local_rank}, manages GPUs [{first_gpu_idx}:{first_gpu_idx + self.gpus_per_rollout}]"
             )
 
-    def _create_worker(self, rank, local_rank, bundle_idx, num_gpus, device_name):
+    def _create_worker(
+        self,
+        rank,
+        local_rank,
+        bundle_idx,
+        num_gpus,
+        device_name,
+        num_cpus: float | None = None,
+        world_size: int | None = None,
+        worker_prefix: str | None = None,
+        rollout_ray_class: RayClassWithInitArgs | None = None,
+    ):
         """
         Create a single RolloutWorker Ray actor.
 
@@ -189,33 +225,35 @@ class RolloutManager:
         """
         # Set distributed environment variables
         env_vars = {
-            DistributedEnv.WORLD_SIZE.value: str(self.num_workers),
+            DistributedEnv.WORLD_SIZE.value: str(world_size if world_size is not None else self.num_workers),
             DistributedEnv.RANK.value: str(rank),
             DistributedEnv.LOCAL_RANK.value: str(local_rank),
-            DistributedEnv.WG_PREFIX.value: self.name_prefix,
+            DistributedEnv.WG_PREFIX.value: worker_prefix or self.name_prefix,
             "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
         }
         if os.getenv("GLOO_SOCKET_IFNAME"):
             env_vars["GLOO_SOCKET_IFNAME"] = os.getenv("GLOO_SOCKET_IFNAME")
 
         # Generate unique actor name
-        base_class_repr = type(self.rollout_ray_class.cls).__name__
+        target_rollout_ray_class = rollout_ray_class or self.rollout_ray_class
+        base_class_repr = type(target_rollout_ray_class.cls).__name__
         match = re.search(r"ActorClass\(([^)]+)\)", base_class_repr)
         actor_class_name = match.group(1) if match else base_class_repr
-        actor_name = f"{self.name_prefix}_{actor_class_name}_actor{rank}_bundle{bundle_idx}"
+        actor_name = f"{worker_prefix or self.name_prefix}_{actor_class_name}_actor{rank}_bundle{bundle_idx}"
 
-        self.rollout_ray_class.update_options(
-            {
-                "runtime_env": {"env_vars": env_vars},
-                "name": actor_name,
-            }
-        )
+        actor_options = {
+            "runtime_env": {"env_vars": env_vars},
+            "name": actor_name,
+        }
+        if num_cpus is not None:
+            actor_options["num_cpus"] = num_cpus
+        target_rollout_ray_class.update_options(actor_options)
 
         from loguru import logger
 
         logger.debug(f"Creating actor '{actor_name}'")
 
-        worker = self.rollout_ray_class(
+        worker = target_rollout_ray_class(
             placement_group=self.pg,
             placement_group_bundle_idx=bundle_idx,
             num_gpus=num_gpus,
@@ -376,7 +414,26 @@ class RolloutManager:
         )
 
     def set_step(self, step: int):
+        from loguru import logger
+
+        step = max(0, int(step))
         self.global_steps = step
+
+        if self.num_train_batches > 0:
+            self.start_epoch = min(step // self.num_train_batches, self.config.trainer.total_epochs)
+            self.batches_to_skip = step % self.num_train_batches
+        else:
+            self.start_epoch = 0
+            self.batches_to_skip = 0
+
+        if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
+            self.start_epoch = self.config.trainer.total_epochs
+            self.batches_to_skip = 0
+
+        logger.info(
+            "[RolloutManager] Resume cursor updated "
+            f"global_steps={self.global_steps} start_epoch={self.start_epoch} batches_to_skip={self.batches_to_skip}"
+        )
 
     def get_rollout_worker_on_tp0(self):
         """
@@ -394,6 +451,110 @@ class RolloutManager:
             if worker_idx % self.rollout_per_tp_group == 0:
                 result.append(self.worker_handle[worker_idx])
         return result
+
+    def get_validate_reuse_sync_workers(self, trainer_rank: int):
+        if not self._validate_reuse_coordinator.sync_required:
+            return []
+        return self._validate_reuse_pool.tp0_workers
+
+    def get_validate_active_state(self):
+        return self._validate_reuse_coordinator.get_active_state(
+            validate_active=self._validate_active,
+            global_steps=self.global_steps,
+        )
+
+    def _reset_validate_reuse_sync_state(self):
+        self._validate_reuse_coordinator.reset()
+
+    def get_validate_reuse_sync_plan(self, trainer_rank: int):
+        if not self._validate_reuse_coordinator.sync_required:
+            return {"distributed_workers": [], "tensor_workers": [], "phase": "IDLE"}
+        if self.train_gpu_resources is None or trainer_rank < 0 or trainer_rank >= self.train_gpu_resources.num_gpus:
+            return {
+                "distributed_workers": self._validate_reuse_pool.tp0_workers,
+                "tensor_workers": [],
+                "phase": self._validate_reuse_coordinator.phase,
+            }
+
+        from loguru import logger
+
+        trainer_node_ip = self.train_gpu_resources.node_ips[trainer_rank]
+        trainer_local_rank = self.train_gpu_resources.local_ranks[trainer_rank]
+        distributed_workers, tensor_workers = split_validate_reuse_sync_workers(
+            self._validate_reuse_pool.tp0_worker_infos,
+            trainer_node_ip,
+            trainer_local_rank,
+        )
+        if self._validate_reuse_coordinator.should_log_sync_plan(trainer_rank):
+            logger.info(
+                "[RolloutManager] Validate reuse sync plan "
+                f"trainer_rank={trainer_rank} trainer_node={trainer_node_ip} trainer_local_rank={trainer_local_rank} "
+                f"distributed_workers={len(distributed_workers)} tensor_workers={len(tensor_workers)} "
+                f"phase={self._validate_reuse_coordinator.phase}"
+            )
+        return {
+            "distributed_workers": distributed_workers,
+            "tensor_workers": tensor_workers,
+            "phase": self._validate_reuse_coordinator.phase,
+        }
+
+    def start_validate_reuse_sync_session(self) -> int | None:
+        """RPC facade for coordinator.start_session()."""
+        return self._validate_reuse_coordinator.start_session()
+
+    def mark_validate_reuse_begin(self, trainer_rank: int, session_id: int):
+        """RPC facade for coordinator.mark_begin()."""
+        return self._validate_reuse_coordinator.mark_begin(trainer_rank, session_id)
+
+    def get_validate_reuse_sync_gate(self, session_id: int):
+        """RPC facade for coordinator.get_gate()."""
+        return self._validate_reuse_coordinator.get_gate(session_id)
+
+    def abort_validate_reuse_sync_session(self, session_id: int, reason: str):
+        """RPC facade for coordinator.abort_session()."""
+        return self._validate_reuse_coordinator.abort_session(session_id, reason)
+
+    def mark_validate_reuse_synced(self, trainer_rank: int, session_id: int | None = None):
+        """RPC facade for coordinator.mark_synced()."""
+        result = self._validate_reuse_coordinator.mark_synced(trainer_rank, session_id=session_id)
+        if not result.get("accepted", False):
+            return result
+
+        from loguru import logger
+
+        logger.info(
+            "[RolloutManager] Validate reuse synced "
+            f"trainer_rank={trainer_rank} synced={result['synced']}/{result['world_size']} missing={result['missing']}"
+        )
+        return result
+
+    async def _wait_validate_reuse_synced(self, timeout_s: int = SYNC_TIMEOUT_S) -> bool:
+        return await self._validate_reuse_coordinator.wait_synced(
+            timeout_s=timeout_s,
+            log_interval_s=SYNC_LOG_INTERVAL_S,
+        )
+
+    def _destroy_validate_reuse_pool(self):
+        self._validate_reuse_pool.destroy(graceful_shutdown_timeout_s=GRACEFUL_SHUTDOWN_TIMEOUT_S)
+        self._validate_reuse_coordinator.clear_sync_plan_logs()
+
+    def _init_validate_reuse_pool(self) -> list:
+        return self._validate_reuse_pool.init_pool(
+            enabled=self._validate_reuse_enabled,
+            train_gpu_resources=self.train_gpu_resources,
+            tp_size=self.tp_size,
+            n_gpus_per_node=self.n_gpus_per_node,
+            name_prefix=self.name_prefix,
+            config=self.config,
+            metric_worker=self.metric_worker,
+            device_name=self.device_name,
+            data_coordinator=self.data_coordinator,
+            create_worker_fn=self._create_worker,
+            recreate_cooldown_s=RECREATE_COOLDOWN_S,
+            port_stride=PORT_STRIDE,
+            port_cycle=PORT_CYCLE,
+            port_retry_slots=PORT_RETRY_SLOTS,
+        )
 
     def start_rollout(self):
         """
@@ -462,23 +623,126 @@ class RolloutManager:
         val_before_train = self.config.trainer.val_before_train
         for epoch in range(self.start_epoch, total_epochs):
             for batch_idx in range(self.num_train_batches):
-                is_last_step = self.global_steps >= self.total_training_steps
-                if epoch == self.start_epoch and batch_idx < (self.global_steps % self.num_train_batches):
+                if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
+                    logger.info(
+                        "[RolloutManager] Reached total training steps, stop dataloader loop "
+                        f"global_steps={self.global_steps} total_training_steps={self.total_training_steps}"
+                    )
+                    self.report_completed()
+                    return
+                if epoch == self.start_epoch and batch_idx < self.batches_to_skip:
                     continue
                 await self.event.wait()
                 self.event.clear()
                 if val_before_train:
                     await self.validate(val_num_batch, dp_val_batch)
                     val_before_train = False
-                self.global_steps += 1
+                next_step = self.global_steps + 1
+                is_last_step = self.total_training_steps > 0 and next_step >= self.total_training_steps
+                has_batch = await self.data_coordinator.run_dataloader.remote(epoch)
+                if not has_batch:
+                    reason = (
+                        "[RolloutManager] Dataloader exhausted before expected training completion "
+                        f"epoch={epoch} batch_idx={batch_idx} global_steps={self.global_steps} "
+                        f"total_training_steps={self.total_training_steps}"
+                    )
+                    logger.warning(reason)
+                    if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
+                        self.report_completed()
+                    else:
+                        self.report_failure(reason)
+                    return
+                self.global_steps = next_step
                 if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     await self.validate(val_num_batch, dp_val_batch)
-                logger.info(f"Start Rollout Step {self.global_steps}")
-                await self.data_coordinator.run_dataloader.remote(epoch)
+                train_step = rollout_to_train_step(self.global_steps)
+                logger.info(f"Start rollout generation for train_step={train_step} (rollout_index={self.global_steps})")
 
     def next_rollout(self):
         self.event.set()
         return self.router_address
+
+    def _set_validate_progress_state(self, *, active: bool, total: int, done: int, workers_active: int, workers_total: int):
+        self._validate_progress.set_state(
+            active=active,
+            total=total,
+            done=done,
+            workers_active=workers_active,
+            workers_total=workers_total,
+            step=rollout_to_train_step(self.global_steps),
+            rollout_index=self.global_steps,
+        )
+
+    def get_validate_progress_snapshot(self):
+        return self._validate_progress.snapshot()
+
+    async def _monitor_validate_progress(
+        self,
+        assigned_workers: list[tuple],
+        *,
+        total_samples: int,
+        chunk_samples: int,
+        done_offset: int = 0,
+    ):
+        total_samples = max(0, int(total_samples))
+        chunk_samples = max(0, int(chunk_samples))
+        done_offset = max(0, int(done_offset))
+        worker_total = len(assigned_workers)
+        initial_done = min(done_offset, total_samples)
+        if total_samples <= 0 or chunk_samples <= 0 or worker_total <= 0:
+            self._set_validate_progress_state(
+                active=initial_done < total_samples,
+                total=total_samples,
+                done=initial_done,
+                workers_active=0,
+                workers_total=worker_total,
+            )
+            return
+
+        self._set_validate_progress_state(
+            active=True,
+            total=total_samples,
+            done=initial_done,
+            workers_active=worker_total,
+            workers_total=worker_total,
+        )
+
+        last_global_done = initial_done
+        try:
+            while True:
+                progress_refs = [worker.get_validate_progress.remote() for worker, _ in assigned_workers]
+                progresses = await asyncio.gather(*progress_refs)
+
+                done_samples = 0
+                workers_active = 0
+                for progress, (_, expected_total) in zip(progresses, assigned_workers, strict=False):
+                    done = int(progress.get("done", 0))
+                    done_samples += min(max(done, 0), expected_total)
+                    if progress.get("active", False):
+                        workers_active += 1
+
+                done_samples = min(done_samples, chunk_samples)
+                global_done = min(done_offset + done_samples, total_samples)
+                last_global_done = global_done
+                self._set_validate_progress_state(
+                    active=global_done < total_samples,
+                    total=total_samples,
+                    done=global_done,
+                    workers_active=workers_active,
+                    workers_total=worker_total,
+                )
+
+                if done_samples >= chunk_samples:
+                    return
+                await asyncio.sleep(PROGRESS_POLL_INTERVAL_S)
+        finally:
+            self._set_validate_progress_state(
+                active=last_global_done < total_samples,
+                total=total_samples,
+                done=last_global_done,
+                workers_active=0,
+                workers_total=worker_total,
+            )
 
     async def validate(self, val_num_batch, val_batch_size):
         """
@@ -486,21 +750,138 @@ class RolloutManager:
         """
         from loguru import logger
 
+        from siirl.worker.validate.metrics import aggregate_and_log_validation_metrics
+
         val_start = time.time()
+        self._validate_active = True
+        self._set_validate_progress_state(active=False, total=0, done=0, workers_active=0, workers_total=0)
         try:
             for _ in range(val_num_batch):
-                await self.data_coordinator.run_dataloader.remote(is_validate=True)
+                has_val_batch = await self.data_coordinator.run_dataloader.remote(is_validate=True)
+                if not has_val_batch:
+                    logger.warning("[RolloutManager] Validation dataloader exhausted before filling expected batches")
+                    break
+
+            if self._validate_reuse_enabled:
+                try:
+                    self._init_validate_reuse_pool()
+                except Exception as e:
+                    logger.warning(f"[RolloutManager] Validate GPU reuse init failed, fallback to rollout-only: {e}")
+                    self._destroy_validate_reuse_pool()
+
+            if self._validate_reuse_pool.tp0_workers:
+                self._validate_reuse_coordinator.prepare_for_validation(sync_required=True)
+                trainer_world_size = self._validate_reuse_coordinator.trainer_world_size
+                logger.info(
+                    "[RolloutManager] Start validate reuse sync wait "
+                    f"trainer_world_size={trainer_world_size} reuse_tp0_workers={len(self._validate_reuse_pool.tp0_workers)}"
+                )
+                synced = await self._wait_validate_reuse_synced()
+                if not synced:
+                    missing = self._validate_reuse_coordinator.missing_ranks()
+                    synced_count = self._validate_reuse_coordinator.synced_count()
+                    logger.warning(
+                        "[RolloutManager] Validate GPU reuse sync timeout, fallback to rollout-only "
+                        f"synced={synced_count}/{trainer_world_size} missing={missing}"
+                    )
+                    # Fall back to rollout-only validate to preserve forward progress.
+                    self._reset_validate_reuse_sync_state()
+                    self._destroy_validate_reuse_pool()
+
             logger.info("Starting validate rollout...")
-            rollout_workers = self.get_rollout_worker_on_tp0()
-            futures = [
-                rollout_worker.validate.remote(val_batch_size * val_num_batch, self.global_steps) for rollout_worker in rollout_workers
-            ]
-            await asyncio.gather(*futures)
-            val_metrics = await self.metric_worker.wait_final_res.remote()
-            logger.info(f"Step-{self.global_steps} Validate Metrics: {val_metrics}")
-            self.message_queue.append((val_metrics, self.global_steps))
+            validate_workers = self.get_rollout_worker_on_tp0() + self._validate_reuse_pool.tp0_workers
+
+            # Drain all validation samples from the data coordinator.
+            all_val_samples = []
+            drain_batch_size = max(val_batch_size * val_num_batch, len(validate_workers))
+            while True:
+                val_batch = await self.data_coordinator.get_dataloader.remote(batch_size=drain_batch_size, is_validate=True)
+                if not val_batch:
+                    break
+                all_val_samples.extend(val_batch)
+
+            total_samples = len(all_val_samples)
+            chunk_size = max(1, int(getattr(self.config.rollout, "validate_chunk_size", 1024)))
+            # Ensure chunk_size is at least num_workers so every worker gets work per chunk.
+            chunk_size = max(chunk_size, len(validate_workers))
+
+            logger.info(f"Validate dispatch: workers={len(validate_workers)}, " f"samples={total_samples}, chunk_size={chunk_size}")
+
+            all_samples = []
+            dispatched = 0
+            for chunk_start in range(0, total_samples, chunk_size):
+                chunk = all_val_samples[chunk_start : chunk_start + chunk_size]
+                chunk_samples = len(chunk)
+                shards = split_validate_samples(chunk, len(validate_workers))
+                assigned_workers = [(worker, len(shards[idx])) for idx, worker in enumerate(validate_workers) if shards[idx]]
+                futures = [
+                    worker.validate_assigned.remote(shards[idx], self.global_steps)
+                    for idx, worker in enumerate(validate_workers)
+                    if shards[idx]
+                ]
+                progress_task = None
+                if assigned_workers:
+                    progress_task = asyncio.create_task(
+                        self._monitor_validate_progress(
+                            assigned_workers,
+                            total_samples=total_samples,
+                            chunk_samples=chunk_samples,
+                            done_offset=dispatched,
+                        )
+                    )
+                try:
+                    results = await asyncio.gather(*futures) if futures else []
+                finally:
+                    if progress_task is not None:
+                        try:
+                            await asyncio.wait_for(progress_task, timeout=max(PROGRESS_POLL_INTERVAL_S * 2, 2.0))
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                f"Validate progress monitor timeout after chunk "
+                                f"step={self.global_steps}, dispatched={dispatched}, chunk={chunk_samples}"
+                            )
+                            progress_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await progress_task
+
+                for samples, _ in results:
+                    all_samples.extend(samples)
+
+                dispatched += chunk_samples
+                self._set_validate_progress_state(
+                    active=dispatched < total_samples,
+                    total=total_samples,
+                    done=dispatched,
+                    workers_active=0,
+                    workers_total=len(assigned_workers),
+                )
+                train_step = rollout_to_train_step(self.global_steps)
+                message = (
+                    f"Validate@step{train_step} chunk done: "
+                    f"{dispatched}/{total_samples} ({100 * dispatched / total_samples:.1f}%), "
+                    f"rollout_index={self.global_steps}"
+                )
+                if dispatched >= total_samples:
+                    logger.info(message)
+                else:
+                    logger.debug(message)
+            raw_val_metrics = aggregate_and_log_validation_metrics(all_samples)
+            val_metrics = raw_val_metrics
+            if self.metric_worker is not None and raw_val_metrics:
+                await self.metric_worker.submit_metric.remote(raw_val_metrics, 1)
+                val_metrics = await self.metric_worker.wait_final_res.remote()
+            if val_metrics:
+                from siirl.utils.metrics import restore_weighted_metrics
+
+                val_metrics = restore_weighted_metrics(val_metrics)
+            train_step = rollout_to_train_step(self.global_steps)
+            self.message_queue.append((val_metrics, train_step))
         finally:
-            self._val_time_acc += time.time() - val_start
+            self._reset_validate_reuse_sync_state()
+            self._destroy_validate_reuse_pool()
+            val_end = time.time()
+            self._val_time_windows.append((val_start, val_end))
+            self._validate_active = False
         return
 
     async def get_metrics(self):
@@ -511,14 +892,57 @@ class RolloutManager:
         self.message_queue.clear()
         return result
 
+    def pop_validation_time_overlap(self, step_start: float, step_end: float, step: int | None = None) -> float:
+        """
+        Return validation-time overlap with [step_start, step_end], and consume matched windows.
+        This avoids cross-step attribution drift when validate spans step boundaries.
+        """
+        step_start = float(step_start)
+        step_end = float(step_end)
+        if step_end <= step_start:
+            return 0.0
+
+        overlap_s = 0.0
+        stale_windows = 0
+        stale_seconds = 0.0
+        remaining_windows: deque[tuple[float, float]] = deque()
+
+        for window_start, window_end in self._val_time_windows:
+            if window_end <= step_start:
+                stale_windows += 1
+                stale_seconds += max(window_end - window_start, 0.0)
+                continue
+            if window_start >= step_end:
+                remaining_windows.append((window_start, window_end))
+                continue
+
+            overlap_start = max(window_start, step_start)
+            overlap_end = min(window_end, step_end)
+            if overlap_end > overlap_start:
+                overlap_s += overlap_end - overlap_start
+            if window_end > step_end:
+                remaining_windows.append((step_end, window_end))
+
+        self._val_time_windows = remaining_windows
+
+        if stale_windows:
+            from loguru import logger
+
+            logger.warning(
+                "[RolloutManager] Dropped stale validation windows "
+                f"current_step={step if step is not None else 'unknown'} "
+                f"stale_windows={stale_windows} stale_total={stale_seconds:.2f}s"
+            )
+        return float(overlap_s)
+
     def pop_validation_time(self) -> float:
         """
-        Return and reset accumulated validation time.
+        Return and reset all queued validation-time windows.
         Used by trainer to exclude validation from train throughput metrics.
         """
-        val_time = self._val_time_acc
-        self._val_time_acc = 0.0
-        return val_time
+        val_time = sum(max(window_end - window_start, 0.0) for window_start, window_end in self._val_time_windows)
+        self._val_time_windows.clear()
+        return float(val_time)
 
     def should_stop(self) -> bool:
         """
@@ -556,6 +980,17 @@ class RolloutManager:
                 logger.warning(f"[RolloutManager] Failed to report to coordinator: {e}")
                 logger.warning(f"[RolloutManager] Traceback:\n{traceback.format_exc()}")
 
+    def report_completed(self):
+        from loguru import logger
+
+        logger.info("[RolloutManager] Reporting task completion")
+        if self.coordinator:
+            try:
+                ray.get(self.coordinator.report_completed.remote("rollout_manager"))
+            except Exception as e:
+                logger.warning(f"[RolloutManager] Failed to report completion: {e}")
+                logger.warning(f"[RolloutManager] Traceback:\n{traceback.format_exc()}")
+
     def cleanup(self):
         """
         Clean up rollout resources: stop workers and router.
@@ -565,6 +1000,8 @@ class RolloutManager:
         from loguru import logger
 
         logger.info("[RolloutManager] Starting cleanup...")
+
+        self._destroy_validate_reuse_pool()
 
         # Gracefully shutdown engine processes first
         shutdown_futures = [w.shutdown_engine.remote() for w in self.worker_handle]

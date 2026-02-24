@@ -37,6 +37,10 @@ from siirl.utils.logger.memory_profiler import MemoryProfiler
 from siirl.utils.megatron.megatron_utils import offload_megatron_model_to_cpu
 from siirl.utils.timer import Timer, TimerCollection
 from siirl.worker.actor.checkpoint_manager import CheckpointManager
+from siirl.worker.validate.reuse.constants import SYNC_RETRY_SLEEP_S
+from siirl.worker.validate.reuse.trainer_sync import ValidateGateDecision, ValidateReuseTrainerSync
+
+TRAIN_NO_BATCH_BACKOFF_S = 0.1
 
 
 def global_initialize_model_parallel(config: TrainingArguments):
@@ -152,11 +156,18 @@ class Trainer:
         self.should_submit_metrics = False  # Will be set in init_models()
 
         self.checkpoint_manager = None
+        self.param_sync = None
+        self._validate_reuse_sync: ValidateReuseTrainerSync | None = None
 
         # Training state
         self.global_step = 0
         # Subtract prior checkpoint save overhead from next-step perf accounting.
         self._pending_ckpt_excluded_time = 0.0
+        # EMA of step_interval from non-validation steps.  Used as a floor
+        # when excluding validation time to avoid over-exclusion that removes
+        # the normal generation-pipeline lag.
+        self._step_interval_ema: float = 0.0
+        self._step_interval_ema_alpha: float = 0.3
 
         # Local batch cache for handling async data fetch race conditions
         # When some dp_ranks get data while others don't, the ones with data
@@ -189,11 +200,11 @@ class Trainer:
             self.critic_worker.init_model()
             logger.info(f"[Trainer.init_models] rank={self.rank} CriticWorker initialized")
 
-        # Use with_context_parallel=True for dp_rank/dp_world_size:
+        # Use with_context_parallel=False for dp_rank/dp_world_size:
         # - Ensures CP group ranks have the same dp_rank (they process the same batch's different sequence parts)
         # - Matches the DP group used in _sync_batch_availability
-        self.dp_rank = mpu.get_data_parallel_rank(with_context_parallel=True)
-        self.dp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=True)
+        self.dp_rank = mpu.get_data_parallel_rank(with_context_parallel=False)
+        self.dp_world_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
         self.tp_rank = mpu.get_tensor_model_parallel_rank()
         self.pp_rank = mpu.get_pipeline_model_parallel_rank()
         self.cp_rank = mpu.get_context_parallel_rank()
@@ -280,6 +291,7 @@ class Trainer:
 
     def set_rollout_manager(self, rollout_manager):
         self.rollout_manager = rollout_manager
+        self._maybe_init_validate_reuse_sync()
 
     def setup_param_sync(self):
         assert self.actor_worker is not None, "must init models first"
@@ -290,10 +302,18 @@ class Trainer:
             bridge=self.actor_worker.bridge,
         )
         init_gloo_group()
+        self._maybe_init_validate_reuse_sync()
 
     # @timer
     def update_rollout_weight(self):
+        rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
+        self._sync_rollout_workers(rollout_workers)
+
+    def _sync_rollout_workers(self, rollout_workers, tensor_workers=None, bump_weight_version=True):
         assert self.param_sync is not None, "must setup param sync first"
+        tensor_workers = tensor_workers or []
+        if not rollout_workers and not tensor_workers:
+            return
 
         # Load actor model to GPU before weight sync (needed when param_offload=True)
         if self.actor_worker._is_offload_param:
@@ -302,16 +322,47 @@ class Trainer:
             load_megatron_model_to_gpu(self.actor_worker.actor_module, load_grad=False)
 
         if isinstance(self.param_sync, ParamSyncDistributed):
-            # TODO support elastic rollout connection
-            rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
-            if any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
+            if rollout_workers and any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
                 self.param_sync.setup_param_sync_group(rollout_workers)
-        self.param_sync.update_weights()
+            self.param_sync.update_weights_mixed(
+                rollout_workers,
+                tensor_workers,
+                bump_weight_version=bump_weight_version,
+            )
+        else:
+            self.param_sync.update_weights()
 
         # Offload actor model back to CPU after weight sync
         if self.actor_worker._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_worker.actor_module)
             get_torch_device().empty_cache()
+
+    def _get_regular_rollout_workers(self) -> list:
+        if self.rollout_manager is None:
+            return []
+        rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+        return ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote(), timeout=rpc_timeout_s)
+
+    def _ensure_regular_rollout_workers(self, regular_workers) -> None:
+        if isinstance(self.param_sync, ParamSyncDistributed):
+            if regular_workers and any(not self.param_sync.has_connected_to_actor(x) for x in regular_workers):
+                self.param_sync.setup_param_sync_group(regular_workers)
+            return
+        self._sync_rollout_workers(regular_workers, bump_weight_version=False)
+
+    def _maybe_init_validate_reuse_sync(self) -> None:
+        if self.rollout_manager is None or self.param_sync is None:
+            self._validate_reuse_sync = None
+            return
+        self._validate_reuse_sync = ValidateReuseTrainerSync(
+            rollout_manager=self.rollout_manager,
+            rank=self.rank,
+            config=self.config,
+            sync_workers_fn=self._sync_rollout_workers,
+            get_regular_workers_fn=self._get_regular_rollout_workers,
+            ensure_regular_workers_fn=self._ensure_regular_rollout_workers,
+            get_current_weight_version_fn=self.get_current_weight_version,
+        )
 
     def has_critic(self):
         return self.critic_worker is not None
@@ -485,11 +536,9 @@ class Trainer:
             if hasattr(actor_metrics, "data"):  # NonTensorData wrapper
                 actor_metrics = actor_metrics.data
 
-            # Keep forward-only entropy for debugging and backfill actor/entropy_loss
-            # when the training path does not compute entropy (e.g., entropy_coeff=0).
+            # Add entropy loss to actor metrics (computed earlier from compute_log_prob)
             if entropy_loss is not None:
-                actor_metrics.setdefault("actor/entropy_loss", entropy_loss.item())
-                actor_metrics["actor/entropy_loss_forward_only"] = entropy_loss.item()
+                actor_metrics["actor/entropy_loss"] = entropy_loss.item()
 
             if self.use_critic:
                 with timers["update_critic"]:
@@ -590,6 +639,76 @@ class Trainer:
             logger.warning(f"[Trainer rank={self.rank}] Failed to report failure: {e}")
             logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
 
+    def _report_completed(self):
+        """Report training completion to coordinator."""
+        if not self.coordinator:
+            return
+        try:
+            ray.get(self.coordinator.report_completed.remote(source=f"trainer_{self.rank}"))
+        except Exception as e:
+            logger.warning(f"[Trainer rank={self.rank}] Failed to report completion: {e}")
+            logger.warning(f"[Trainer rank={self.rank}] Traceback:\n{traceback.format_exc()}")
+
+    def _pop_validation_time_once(self, step: int, step_start: float, step_end: float) -> float:
+        """Read and reset validation-time overlap for one step window (rank 0 only)."""
+        if self.rank != 0 or self.rollout_manager is None:
+            return 0.0
+        try:
+            val_time = float(
+                ray.get(
+                    self.rollout_manager.pop_validation_time_overlap.remote(
+                        float(step_start),
+                        float(step_end),
+                        int(step),
+                    )
+                )
+            )
+            if val_time > 0:
+                logger.info(f"[Trainer rank=0] Validation time pop step={int(step)} val_time={val_time:.2f}s")
+            return val_time
+        except Exception as e:
+            logger.warning(f"[Trainer rank={self.rank}] Failed to fetch validation time: {e}")
+            return 0.0
+
+    def _compute_step_timing(self, train_e2e: float, validation_excluded: float) -> dict[str, float]:
+        """Compute step timing with validation/checkpoint exclusions.
+
+        When validation is excluded, the naive subtraction ``train_e2e - val``
+        removes the normal generation-pipeline lag that exists on every step
+        (the time ``get_batch`` waits for the inference server to finish the
+        previous batch).  This makes validation steps report a *shorter*
+        step_interval — and therefore *higher* throughput — than non-validation
+        steps, creating a periodic throughput spike.
+
+        Fix: clamp the validation-adjusted step_interval to be no less than
+        the recent EMA of non-validation step intervals.  On non-validation
+        steps, update the EMA so it tracks the true steady-state step time.
+        """
+        step_interval_raw = max(train_e2e - max(validation_excluded, 0.0), 0.0)
+        checkpoint_excluded = min(self._pending_ckpt_excluded_time, step_interval_raw)
+        step_interval = max(step_interval_raw - checkpoint_excluded, 0.0)
+
+        is_validation_step = validation_excluded > 0.0
+        if is_validation_step and self._step_interval_ema > 0:
+            # Clamp: validation step should not report a shorter interval than
+            # the recent non-validation baseline.
+            step_interval = max(step_interval, self._step_interval_ema)
+            step_interval_raw = max(step_interval_raw, self._step_interval_ema)
+        elif not is_validation_step and step_interval > 0:
+            # Update EMA from non-validation steps only.
+            alpha = self._step_interval_ema_alpha
+            if self._step_interval_ema <= 0:
+                self._step_interval_ema = step_interval  # seed
+            else:
+                self._step_interval_ema = alpha * step_interval + (1 - alpha) * self._step_interval_ema
+
+        return {
+            "validation_excluded": validation_excluded,
+            "step_interval_raw": step_interval_raw,
+            "checkpoint_excluded": checkpoint_excluded,
+            "step_interval": step_interval,
+        }
+
     def train(self, batch_size: int):
         """
         Continuous training loop that processes batches as they become available.
@@ -603,12 +722,21 @@ class Trainer:
             batch_size: Training batch size
         """
         logger.info(f"[Trainer rank={self.rank}] Starting training loop, batch_size={batch_size}")
+        total_training_steps = int(getattr(self.config.actor_ref.actor.optim, "total_training_steps", 0) or 0)
 
         try:
             while True:
                 # Check stop signal
                 if self._check_should_stop():
                     logger.info(f"[Trainer rank={self.rank}] Stop signal received, exiting...")
+                    break
+                if total_training_steps > 0 and self.global_step >= total_training_steps:
+                    logger.info(
+                        f"[Trainer rank={self.rank}] Reached total training steps "
+                        f"({self.global_step}/{total_training_steps}), exiting..."
+                    )
+                    if self.rank == 0:
+                        self._report_completed()
                     break
 
                 train_e2e_start_time = time.time()
@@ -621,10 +749,32 @@ class Trainer:
                 if self.rank == 0:
                     ray.get(self.rollout_manager.next_rollout.remote())
 
+                if self._validate_reuse_sync is not None:
+                    self._validate_reuse_sync.try_sync()
+
                 # Record get_batch timing
                 with Timer("get_batch") as get_batch_timer:
                     while (batch_data := self.get_batch(batch_size)) is None:
-                        time.sleep(0.1)
+                        did_sync = self._validate_reuse_sync.try_sync() if self._validate_reuse_sync is not None else False
+                        gate_decision = (
+                            self._validate_reuse_sync.wait_idle() if self._validate_reuse_sync is not None else ValidateGateDecision.PROCEED
+                        )
+                        if gate_decision is ValidateGateDecision.RETRY_SYNC:
+                            time.sleep(SYNC_RETRY_SLEEP_S)
+                            continue
+                        if not did_sync:
+                            time.sleep(TRAIN_NO_BATCH_BACKOFF_S)
+
+                while True:
+                    if self._validate_reuse_sync is not None:
+                        self._validate_reuse_sync.try_sync()
+                    gate_decision = (
+                        self._validate_reuse_sync.wait_idle() if self._validate_reuse_sync is not None else ValidateGateDecision.PROCEED
+                    )
+                    if gate_decision is ValidateGateDecision.RETRY_SYNC:
+                        time.sleep(SYNC_RETRY_SLEEP_S)
+                        continue
+                    break
 
                 # compare
                 self.train_step(batch_data)
@@ -642,31 +792,16 @@ class Trainer:
 
                 train_e2e_end_time = time.time()
                 train_e2e = train_e2e_end_time - train_e2e_start_time
-                val_time = 0.0
-                if self.rollout_manager is not None:
-                    try:
-                        val_time = ray.get(self.rollout_manager.pop_validation_time.remote())
-                    except Exception as e:
-                        logger.warning(f"[Trainer rank={self.rank}] Failed to fetch validation time: {e}")
-                train_e2e_without_val = max(train_e2e - val_time, 0.0)
-                ckpt_excluded_time = min(self._pending_ckpt_excluded_time, train_e2e_without_val)
-                train_e2e_effective = max(train_e2e_without_val - ckpt_excluded_time, 0.0)
+                val_time = self._pop_validation_time_once(self.global_step, train_e2e_start_time, train_e2e_end_time)
+                step_timing = self._compute_step_timing(train_e2e, val_time)
 
                 # Only rank=0 (global rank) aggregates and logs to tracker
                 if self.rank == 0 and self.tracker is not None and self.metric_client is not None:
                     try:
+                        from siirl.utils.metrics import restore_weighted_metrics
+
                         aggregated_metrics = self.metric_client.wait_final_res()
-                        # Reconstruct weighted means across ranks.
-                        weighted_metric_keys = ("actor/entropy_loss", "actor/kl_loss")
-                        for key in weighted_metric_keys:
-                            num_key = f"{key}_weighted_sum"
-                            den_key = f"{key}_weight_sum"
-                            weighted_den = aggregated_metrics.get(den_key)
-                            weighted_num = aggregated_metrics.get(num_key)
-                            if weighted_den is not None and weighted_num is not None and weighted_den > 0:
-                                aggregated_metrics[key] = weighted_num / weighted_den
-                            aggregated_metrics.pop(num_key, None)
-                            aggregated_metrics.pop(den_key, None)
+                        aggregated_metrics = restore_weighted_metrics(aggregated_metrics)
 
                         aggregated_metrics["training/global_step"] = self.global_step
                         aggregated_metrics["perf/delta_time/weight_sync"] = weight_sync_timer.elapsed
@@ -675,14 +810,15 @@ class Trainer:
                         # Recompute throughput after aggregation to avoid per-rank bias.
                         total_tokens = aggregated_metrics.get("perf/total_num_tokens", 0)
                         # Exclude validation time and prior checkpoint save time.
-                        aggregated_metrics["perf/delta_time/step_interval_raw"] = train_e2e_without_val
-                        aggregated_metrics["perf/delta_time/checkpoint_save_excluded"] = ckpt_excluded_time
-                        aggregated_metrics["perf/delta_time/step_interval"] = train_e2e_effective
-                        aggregated_metrics["perf/time_per_step"] = train_e2e_effective
-                        aggregated_metrics["perf/time_per_step_max"] = train_e2e_effective
-                        if train_e2e_effective > 0 and total_tokens > 0:
+                        aggregated_metrics["perf/delta_time/validation_excluded"] = step_timing["validation_excluded"]
+                        aggregated_metrics["perf/delta_time/step_interval_raw"] = step_timing["step_interval_raw"]
+                        aggregated_metrics["perf/delta_time/checkpoint_save_excluded"] = step_timing["checkpoint_excluded"]
+                        aggregated_metrics["perf/delta_time/step_interval"] = step_timing["step_interval"]
+                        aggregated_metrics["perf/time_per_step"] = step_timing["step_interval"]
+                        aggregated_metrics["perf/time_per_step_max"] = step_timing["step_interval"]
+                        if step_timing["step_interval"] > 0 and total_tokens > 0:
                             total_gpus = self.config.trainer.actor_gpus + self.config.trainer.rollout_gpus
-                            aggregated_metrics["perf/throughput"] = total_tokens / (train_e2e_effective * total_gpus)
+                            aggregated_metrics["perf/throughput"] = total_tokens / (step_timing["step_interval"] * total_gpus)
                         self.tracker.log(aggregated_metrics, step=self.global_step)
 
                         # get rollout validate metrics

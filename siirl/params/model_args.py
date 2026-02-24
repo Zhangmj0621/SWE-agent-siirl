@@ -106,6 +106,14 @@ class ActorArguments:
     use_dynamic_batch: bool = field(default=False, metadata={"help": "Enable dynamic batching (token-based instead of fixed batch size)"})
     max_tokens_per_gpu: int = field(default=4096, metadata={"help": "Max tokens per GPU when dynamic batching is enabled"})
     use_workload_balance: bool = field(default=True, metadata={"help": "Use FLOPs-based balancing (otherwise sequence length based)"})
+    denominator_scope: str = field(
+        default="local",
+        metadata={"help": "Loss denominator scope for dynamic batch: local or dp_global"},
+    )
+    loss_scale_factor: float | None = field(
+        default=None,
+        metadata={"help": "Optional fixed denominator for seq-mean-token-sum-norm"},
+    )
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
     clip_ratio_c: float = field(
@@ -174,6 +182,18 @@ class RolloutArguments:
     server_concurrency: int = field(
         default=512,
         metadata={"help": "Max concurrent client requests per rollout engine during batch generation"},
+    )
+    train_server_concurrency: int = field(
+        default=256,
+        metadata={"help": "Max concurrent client requests per worker during training rollout"},
+    )
+    validate_server_concurrency: int = field(
+        default=256,
+        metadata={"help": "Max concurrent client requests per worker during validation (local, no router)"},
+    )
+    validate_chunk_size: int = field(
+        default=1024,
+        metadata={"help": "Number of samples per validation chunk to limit peak concurrency"},
     )
     do_sample: bool = field(default=True, metadata={"help": "Enable sampling"})
     n: int = field(default=1, metadata={"help": "Number of responses"})

@@ -15,22 +15,56 @@
 
 import torch
 
-from siirl.utils.model_utils.torch_functional import masked_mean
+from siirl.utils.model_utils.torch_functional import masked_mean, masked_sum
 
 
-def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str):
+def _to_denominator(value, like: torch.Tensor) -> torch.Tensor:
+    if torch.is_tensor(value):
+        return value.to(device=like.device, dtype=like.dtype)
+    return torch.tensor(float(value), device=like.device, dtype=like.dtype)
+
+
+def agg_loss(
+    loss_mat: torch.Tensor,
+    loss_mask: torch.Tensor,
+    loss_agg_mode: str,
+    batch_num_tokens: float | None = None,
+    global_valid_seqs: float | None = None,
+    loss_scale_factor: float | None = None,
+    dp_size: int = 1,
+):
     """Aggregate loss matrix into a scalar"""
     if loss_agg_mode == "token-mean":
-        loss = masked_mean(loss_mat, loss_mask)
+        if batch_num_tokens is None:
+            loss = masked_mean(loss_mat, loss_mask)
+        else:
+            denom = _to_denominator(batch_num_tokens, loss_mat).clamp_min(1e-8)
+            loss = masked_sum(loss_mat, loss_mask) / denom * dp_size
     elif loss_agg_mode == "seq-mean-token-sum":
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
-        loss = torch.mean(seq_losses)
+        seq_mask = (torch.sum(loss_mask, dim=-1) > 0).to(loss_mat.dtype)
+        if global_valid_seqs is None:
+            denom = seq_mask.sum().clamp_min(1.0)
+            loss = masked_sum(seq_losses, seq_mask) / denom
+        else:
+            denom = _to_denominator(global_valid_seqs, seq_losses).clamp_min(1e-8)
+            loss = masked_sum(seq_losses, seq_mask) / denom * dp_size
     elif loss_agg_mode == "seq-mean-token-mean":
-        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / torch.sum(loss_mask, dim=-1)
-        loss = torch.mean(seq_losses)
+        seq_token_count = torch.sum(loss_mask, dim=-1)
+        seq_losses = torch.sum(loss_mat * loss_mask, dim=-1) / (seq_token_count + 1e-8)
+        seq_mask = (seq_token_count > 0).to(loss_mat.dtype)
+        if global_valid_seqs is None:
+            denom = seq_mask.sum().clamp_min(1.0)
+            loss = masked_sum(seq_losses, seq_mask) / denom
+        else:
+            denom = _to_denominator(global_valid_seqs, seq_losses).clamp_min(1e-8)
+            loss = masked_sum(seq_losses, seq_mask) / denom * dp_size
     elif loss_agg_mode == "seq-mean-token-sum-norm":
         seq_losses = torch.sum(loss_mat * loss_mask, dim=-1)
-        loss = torch.sum(seq_losses) / loss_mask.shape[-1]
+        if loss_scale_factor is None:
+            loss_scale_factor = loss_mask.shape[-1]
+        denom = _to_denominator(loss_scale_factor, seq_losses).clamp_min(1e-8)
+        loss = torch.sum(seq_losses) / denom
     else:
         raise ValueError(f"Unsupported loss_agg_mode: {loss_agg_mode}")
     return loss
@@ -69,6 +103,10 @@ def compute_policy_loss_vanilla(
     loss_agg_mode: str = "token-mean",
     config: object | None = None,
     rollout_is_weights: torch.Tensor | None = None,
+    batch_num_tokens: float | None = None,
+    global_valid_seqs: float | None = None,
+    loss_scale_factor: float | None = None,
+    dp_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute vanilla PPO clipped policy loss (Dual-clip PPO).
 
@@ -119,7 +157,15 @@ def compute_policy_loss_vanilla(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    pg_loss = agg_loss(
+        loss_mat=pg_losses,
+        loss_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        batch_num_tokens=batch_num_tokens,
+        global_valid_seqs=global_valid_seqs,
+        loss_scale_factor=loss_scale_factor,
+        dp_size=dp_size,
+    )
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 

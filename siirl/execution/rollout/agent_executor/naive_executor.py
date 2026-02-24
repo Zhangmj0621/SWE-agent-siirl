@@ -17,6 +17,7 @@ import importlib
 import os
 import time
 from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -25,8 +26,10 @@ import torch
 from loguru import logger
 
 from siirl.data_coordinator.sample import Sample, SampleInfo
+from siirl.execution.rollout.concurrency import resolve_rollout_concurrency
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.model_utils.model import compute_position_id_with_mask
+from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient
 from siirl.utils.timer import Timer
 
 
@@ -54,7 +57,11 @@ class NaiveExecutor:
         self.engine = engine  # Inference engine for text generation
         # TODO: use validation arguments here
         self.train_batch_size = train_batch_size  # Target batch size for rollout samples
-        self.max_concurrency_size = train_batch_size * config.rollout.n
+        target_concurrency = max(1, int(train_batch_size) * int(config.rollout.n))
+        train_limits = resolve_rollout_concurrency(config, phase="train", use_router=False)
+        self.max_concurrency_size = min(target_concurrency, int(train_limits["effective"]))
+        self._train_target_concurrency = target_concurrency
+        self._train_concurrency_limits = train_limits
         self.tasks: set[asyncio.Task] = set()  # Track active generation tasks for cleanup
         self.finish_group_samples: dict[str, list[Any]] = {}  # Save result of finish samples until reach n group
         self.pending_queue = deque()
@@ -66,6 +73,7 @@ class NaiveExecutor:
         self.rollout_flow = None  # Rollout flow function for sample generation
         self._rank = int(os.environ.get("RANK"))
         self._dp_rank = dp_rank  # Data parallel rank for logging
+        self._verbose_validate_logs = os.environ.get("SIIRL_VERBOSE_VALIDATE_LOGS", "0") == "1"
         # Load custom reward function if configured
         if config.custom_reward_function.path:
             from siirl.utils.reward_score.custom_reward import load_custom_reward_function
@@ -359,6 +367,13 @@ class NaiveExecutor:
         self.running = True
         stats_task = None
         if self._dp_rank == 0:
+            limits = self._train_concurrency_limits
+            logger.info(
+                "Rollout train concurrency: "
+                f"target={self._train_target_concurrency}, "
+                f"base_key={limits['base_key']}, base={limits['base']}, "
+                f"max_num_seqs={limits['max_num_seqs']}, effective={self.max_concurrency_size}"
+            )
             stats_task = asyncio.create_task(self.rollout_status())
 
         while self.running:
@@ -422,7 +437,12 @@ class NaiveExecutor:
             ground_truth=sample.reward_model["ground_truth"],
         )
 
-    async def _validate_single_turn(self, samples: list[Sample]) -> list[Sample]:
+    async def _validate_single_turn(
+        self,
+        samples: list[Sample],
+        use_router: bool = True,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> list[Sample]:
         """
         Optimized validation for single-turn scenarios.
         Uses batch generation with router load balancing and sort-by-length.
@@ -443,9 +463,10 @@ class NaiveExecutor:
             results = await self.engine.generate_batch(
                 batch_input_ids,
                 is_validate=True,
-                use_router=True,
-                show_progress=(self._dp_rank == 0),
+                use_router=use_router,
+                show_progress=False,
                 progress_desc="Validate",
+                progress_callback=progress_callback,
             )
 
         # 3. Reward + postprocess (direct loop, millisecond-level)
@@ -460,11 +481,15 @@ class NaiveExecutor:
 
         # Log timing breakdown (rank 0 only)
         if self._dp_rank == 0:
-            logger.info(
+            message = (
                 f"Validate timing: preprocess={preprocess_time.elapsed:.2f}s, "
                 f"generate={generate_time.elapsed:.2f}s, "
                 f"reward_postprocess={reward_time.elapsed:.2f}s"
             )
+            if self._verbose_validate_logs:
+                logger.info(message)
+            else:
+                logger.debug(message)
 
         return samples
 
@@ -473,43 +498,54 @@ class NaiveExecutor:
         result = await self.generate(sample, is_validate=True)
         return idx, result
 
-    async def _validate_multi_turn(self, samples: list[Sample]) -> list[Sample]:
+    def _resolve_validate_concurrency(self, use_router: bool) -> int:
+        limits = resolve_rollout_concurrency(self.config, phase="validate", use_router=use_router)
+        logger.debug(
+            "Validate multi-turn concurrency: "
+            f"use_router={use_router}, base_key={limits['base_key']}, base={limits['base']}, "
+            f"num_engines={limits['num_engines']}, resolved={limits['resolved']}, "
+            f"max_num_seqs={limits['max_num_seqs']}, effective={limits['effective']}"
+        )
+        return int(limits["effective"])
+
+    async def _validate_multi_turn(
+        self,
+        samples: list[Sample],
+        use_router: bool = True,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> list[Sample]:
         """
         Validation for multi-turn scenarios.
         Uses high concurrency with router load balancing.
         Streaming collection via as_completed to reduce tail latency.
         """
         # Enable router on rollout_flow for validate duration
-        self.rollout_flow.use_router = True
+        self.rollout_flow.use_router = use_router
+        max_concurrent = self._resolve_validate_concurrency(use_router)
+        validate_semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def _indexed_generate_limited(idx: int, sample: Sample):
+            async with validate_semaphore:
+                return await self._indexed_generate(idx, sample)
+
+        tasks: list[asyncio.Task] = []
         try:
             results = [None] * len(samples)
-            tasks = [self._indexed_generate(i, s) for i, s in enumerate(samples)]
+            tasks = [asyncio.create_task(_indexed_generate_limited(i, s)) for i, s in enumerate(samples)]
 
-            if self._dp_rank == 0:
-                from tqdm import tqdm
-
-                pbar = tqdm(
-                    total=len(samples),
-                    desc="Validate",
-                    unit="sample",
-                    dynamic_ncols=True,
-                    mininterval=2.0,
-                    miniters=50,
-                )
-                try:
-                    for coro in asyncio.as_completed(tasks):
-                        idx, result = await coro
-                        results[idx] = result
-                        pbar.update(1)
-                finally:
-                    pbar.close()
-            else:
-                for coro in asyncio.as_completed(tasks):
-                    idx, result = await coro
-                    results[idx] = result
+            for task in asyncio.as_completed(tasks):
+                idx, result = await task
+                results[idx] = result
+                if progress_callback is not None:
+                    progress_callback(1)
 
             return results
         finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             self.rollout_flow.use_router = False
 
     async def validate(self, val_batch_size: int) -> tuple[list[Sample], dict]:
@@ -518,24 +554,42 @@ class NaiveExecutor:
         - Single-turn: batch generation + router load balancing
         - Multi-turn: high concurrency + router load balancing
         """
-        # 1. Load validation data (async optimized)
         with Timer("get_val_data") as val_get_time:
             val_samples = await self._load_val_data(val_batch_size)
+        return await self.validate_samples(val_samples, val_get_time=val_get_time.elapsed)
 
-        logger.info(
+    async def validate_samples(
+        self,
+        val_samples: list[Sample],
+        val_get_time: float = 0.0,
+        use_router: bool = True,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> tuple[list[Sample], dict]:
+        logger.debug(
             f"RANK_{self._rank} start validate, batch_size:{len(val_samples)}, "
             f"mode:{'single-turn' if self._is_single_turn() else 'multi-turn'}"
         )
 
-        # 2. Generate based on mode
+        if not val_samples:
+            return [], {"val_get_time": val_get_time, "val_generate_time": 0.0}
+
         with Timer("val_generate") as val_generate_time:
             if self._is_single_turn():
-                result = await self._validate_single_turn(val_samples)
+                result = await self._validate_single_turn(
+                    val_samples,
+                    use_router=use_router,
+                    progress_callback=progress_callback,
+                )
             else:
-                result = await self._validate_multi_turn(val_samples)
+                result = await self._validate_multi_turn(
+                    val_samples,
+                    use_router=use_router,
+                    progress_callback=progress_callback,
+                )
 
+        val_get_time_sec = val_get_time.elapsed if hasattr(val_get_time, "elapsed") else float(val_get_time)
         metrics = {
-            "val_get_time": val_get_time.elapsed,
+            "val_get_time": val_get_time_sec,
             "val_generate_time": val_generate_time.elapsed,
         }
         return result, metrics
@@ -545,8 +599,24 @@ class NaiveExecutor:
         while True:
             await asyncio.sleep(interval)
             current_status = len(self.tasks)
-            if last_status != current_status:
-                logger.info(f"rank_{self._rank} active generate tasks: {current_status}, {len(self.pending_queue)} left in pending_queue")
+            http_metrics = GlobalAsyncHTTPClient.drain_metrics()
+            attempts = int(http_metrics.get("attempts", 0))
+            timeouts = int(http_metrics.get("timeouts", 0))
+            timeout_rate = (timeouts / attempts) if attempts > 0 else 0.0
+
+            if last_status != current_status or timeouts > 0:
+                message = (
+                    f"rank_{self._rank} active generate tasks: {current_status}, "
+                    f"{len(self.pending_queue)} left in pending_queue, "
+                    f"sem_limit={self.max_concurrency_size}, "
+                    f"http_attempts={attempts}, http_timeouts={timeouts}, http_timeout_rate={timeout_rate:.3f}"
+                )
+                if timeouts > 0:
+                    logger.warning(message)
+                elif self._verbose_validate_logs:
+                    logger.info(message)
+                else:
+                    logger.debug(message)
                 last_status = current_status
 
     async def stop(self):
