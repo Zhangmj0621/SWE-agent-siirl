@@ -215,9 +215,10 @@ class SglangEngine:
     def _rpc_timeout_s(self) -> int:
         return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
 
-    def _control_http_timeout_s(self) -> int:
-        ray_timeout = int(getattr(self.config.trainer, "colocate_timeout_s", 60))
-        return max(1, ray_timeout // 4)
+    def _control_plane_timeout_s(self) -> int:
+        ray_timeout = max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
+        # Keep a small buffer so the outer Ray wait is still the hard deadline.
+        return ray_timeout if ray_timeout <= 5 else ray_timeout - 5
 
     def _get_sampling_params(self, is_validate: bool, input_len: int | None = None) -> dict:
         """Get sampling parameters based on mode (train/validate)."""
@@ -469,31 +470,8 @@ class SglangEngine:
     )
 
     def _control_plane_retry_params(self) -> tuple[int, int]:
-        """Choose control-plane timeout/retries so total budget stays below Ray timeout."""
-        ray_timeout = max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
-        if ray_timeout < 2:
-            logger.warning(
-                "[SglangEngine] colocate_timeout_s={} is too small for layered timeouts; "
-                "forcing control-plane requests to single-attempt timeout=1s",
-                ray_timeout,
-            )
-            return 1, 0
-
-        base_http_timeout = self._control_http_timeout_s()
-        budget = int(ray_timeout * 0.8)
-        for retries in (2, 1, 0):
-            # Exponential backoff capped at 4s.
-            backoff = sum(min(1.0 * (2**i), 4.0) for i in range(retries))
-            remaining = budget - int(backoff)
-            if remaining <= 0:
-                continue
-            per_attempt_timeout = remaining // (retries + 1)
-            if per_attempt_timeout <= 0:
-                continue
-            http_timeout = min(base_http_timeout, per_attempt_timeout, ray_timeout - 1)
-            if http_timeout >= 1:
-                return int(http_timeout), retries
-        return 1, 0
+        """Use a single long control-plane call instead of short retries."""
+        return self._control_plane_timeout_s(), 0
 
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request with endpoint-aware timeout and retry strategy."""

@@ -713,6 +713,22 @@ class RolloutManager:
                 )
         ray.get(futures)
 
+    def _router_health_kwargs(self) -> dict:
+        if self.gpu_resources.is_shared:
+            colocate_timeout = max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
+            return {
+                "health_check_endpoint": "/health",
+                "health_check_timeout_secs": max(20, colocate_timeout),
+                "health_check_interval_secs": max(180, colocate_timeout * 3),
+                "disable_health_check": True,
+            }
+        return {
+            "health_check_endpoint": "/health",
+            "health_check_timeout_secs": 5,
+            "health_check_interval_secs": 60,
+            "disable_health_check": False,
+        }
+
     def start_router(self, request_timeout: int = 3600):
         """
         Start SGLang router process and configure it with worker URLs.
@@ -734,10 +750,7 @@ class RolloutManager:
             log_level="warn",
             request_timeout_secs=max(1, int(request_timeout)),
         )
-        health_kwargs = dict(
-            health_check_timeout_secs=5,
-            health_check_interval_secs=60,
-        )
+        health_kwargs = self._router_health_kwargs()
         try:
             router_args = RouterArgs(**base_kwargs, **health_kwargs)
         except TypeError:
