@@ -215,6 +215,10 @@ class SglangEngine:
     def _rpc_timeout_s(self) -> int:
         return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
 
+    def _control_http_timeout_s(self) -> int:
+        ray_timeout = int(getattr(self.config.trainer, "colocate_timeout_s", 60))
+        return max(1, ray_timeout // 4)
+
     def _get_sampling_params(self, is_validate: bool, input_len: int | None = None) -> dict:
         """Get sampling parameters based on mode (train/validate)."""
         params = copy.deepcopy(self.sampling_params)
@@ -448,27 +452,61 @@ class SglangEngine:
         payload = {"tags": tags} if tags is not None else {}
         return self._make_request("resume_memory_occupation", payload)
 
-    def _make_request(self, endpoint: str, payload: dict | None = None):
-        """Make a POST request to the specified endpoint with the given payload.
+    _CONTROL_PLANE_ENDPOINTS = frozenset(
+        {
+            "release_memory_occupation",
+            "resume_memory_occupation",
+        }
+    )
 
-        Args:
-            endpoint: The API endpoint to call
-            payload: The JSON payload to send (default: empty dict)
-
-        Returns:
-            The JSON response from the server
-        """
-        if self.sgl_args.node_rank != 0:
-            return
-
-        url = f"{self.sgl_args.url()}/{endpoint}"
-        retryable_endpoints = {
+    _RETRYABLE_ENDPOINTS = frozenset(
+        {
             "update_weights_from_tensor",
             "update_weights_from_distributed",
             "release_memory_occupation",
             "resume_memory_occupation",
         }
-        max_retries = 2 if endpoint in retryable_endpoints else 0
+    )
+
+    def _control_plane_retry_params(self) -> tuple[int, int]:
+        """Choose control-plane timeout/retries so total budget stays below Ray timeout."""
+        ray_timeout = max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
+        if ray_timeout < 2:
+            logger.warning(
+                "[SglangEngine] colocate_timeout_s={} is too small for layered timeouts; "
+                "forcing control-plane requests to single-attempt timeout=1s",
+                ray_timeout,
+            )
+            return 1, 0
+
+        base_http_timeout = self._control_http_timeout_s()
+        budget = int(ray_timeout * 0.8)
+        for retries in (2, 1, 0):
+            # Exponential backoff capped at 4s.
+            backoff = sum(min(1.0 * (2**i), 4.0) for i in range(retries))
+            remaining = budget - int(backoff)
+            if remaining <= 0:
+                continue
+            per_attempt_timeout = remaining // (retries + 1)
+            if per_attempt_timeout <= 0:
+                continue
+            http_timeout = min(base_http_timeout, per_attempt_timeout, ray_timeout - 1)
+            if http_timeout >= 1:
+                return int(http_timeout), retries
+        return 1, 0
+
+    def _make_request(self, endpoint: str, payload: dict | None = None):
+        """Make a POST request with endpoint-aware timeout and retry strategy."""
+        if self.sgl_args.node_rank != 0:
+            return
+
+        url = f"{self.sgl_args.url()}/{endpoint}"
+        is_control = endpoint in self._CONTROL_PLANE_ENDPOINTS
+        if is_control:
+            timeout_s, max_retries = self._control_plane_retry_params()
+        else:
+            timeout_s = self._rpc_timeout_s()
+            max_retries = 2 if endpoint in self._RETRYABLE_ENDPOINTS else 0
         last_error: Exception | None = None
 
         for attempt in range(max_retries + 1):
@@ -478,7 +516,7 @@ class SglangEngine:
                     f"SGLang process on {self.ip}:{self.port} is dead (exitcode={process.exitcode}); " f"cannot call /{endpoint}"
                 )
             try:
-                response = requests.post(url, json=payload or {}, timeout=self._rpc_timeout_s())
+                response = requests.post(url, json=payload or {}, timeout=timeout_s)
                 response.raise_for_status()
                 return response.json()
             except requests.exceptions.HTTPError:

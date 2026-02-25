@@ -230,7 +230,6 @@ class RolloutManager:
         Returns:
             Ray actor handle to the created RolloutWorker instance
         """
-        # Set distributed environment variables
         env_vars = {
             DistributedEnv.WORLD_SIZE.value: str(world_size if world_size is not None else self.num_workers),
             DistributedEnv.RANK.value: str(rank),
@@ -240,6 +239,10 @@ class RolloutManager:
         }
         if os.getenv("GLOO_SOCKET_IFNAME"):
             env_vars["GLOO_SOCKET_IFNAME"] = os.getenv("GLOO_SOCKET_IFNAME")
+
+        # Colocated uses lightweight /health by default, unless user overrides it.
+        if self.gpu_resources.is_shared and os.getenv("SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION") is None:
+            env_vars["SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION"] = "false"
 
         # Generate unique actor name
         target_rollout_ray_class = rollout_ray_class or self.rollout_ray_class
@@ -522,6 +525,40 @@ class RolloutManager:
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] onload_weights_for_sync completed in {elapsed_ms:.1f}ms")
 
+    def _wait_with_diagnostics(
+        self,
+        refs: list,
+        workers: list,
+        *,
+        timeout_s: int,
+        phase: str,
+        tag: str,
+    ):
+        """Wait for refs and raise timeout with per-worker diagnostics."""
+        from loguru import logger
+
+        ready, pending = ray.wait(refs, num_returns=len(refs), timeout=timeout_s)
+        if not pending:
+            ray.get(ready)
+            return
+
+        urls = getattr(self, "worker_urls", [])
+        pending_set = set(pending)
+        stuck = []
+        for idx, ref in enumerate(refs):
+            if ref not in pending_set:
+                continue
+            url = urls[idx] if idx < len(urls) else "unknown"
+            stuck.append(f"worker_idx={idx} url={url}")
+        logger.error(
+            f"[RolloutManager] {phase} timed out after {timeout_s}s "
+            f"tag={tag} total={len(refs)} done={len(ready)} stuck={len(pending)}: " + "; ".join(stuck)
+        )
+        raise TimeoutError(
+            f"[RolloutManager] {phase} timed out: {len(pending)}/{len(refs)} workers "
+            f"did not complete within {timeout_s}s ({', '.join(stuck)})"
+        )
+
     def resume_after_sync(self, timeout_s: int = 120):
         """Resume rollout GPU memory after weight sync.
 
@@ -542,10 +579,12 @@ class RolloutManager:
         try:
             if offload_weights and not getattr(self, "_weights_onloaded_for_sync", False):
                 logger.info(f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers")
-                ray.get([w.onload_memory.remote(["weights"]) for w in tp0_workers], timeout=timeout_s)
+                refs = [w.onload_memory.remote(["weights"]) for w in tp0_workers]
+                self._wait_with_diagnostics(refs, tp0_workers, timeout_s=timeout_s, phase="resume_after_sync", tag="weights")
 
             logger.info(f"[RolloutManager] resume_after_sync: resuming kv_cache on {len(tp0_workers)} TP0 workers")
-            ray.get([w.onload_memory.remote(["kv_cache"]) for w in tp0_workers], timeout=timeout_s)
+            refs = [w.onload_memory.remote(["kv_cache"]) for w in tp0_workers]
+            self._wait_with_diagnostics(refs, tp0_workers, timeout_s=timeout_s, phase="resume_after_sync", tag="kv_cache")
 
             ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
             self._train_offloaded = False
@@ -687,14 +726,28 @@ class RolloutManager:
         router_port = self.config.rollout.router_port or get_free_port(router_ip, start_port=SGLANG_ROUTER_START_PORT)
         router_address = f"{router_ip}:{router_port}"
 
-        router_args = RouterArgs(
+        base_kwargs = dict(
             host=router_ip,
             port=router_port,
             worker_urls=self.worker_urls,
             balance_abs_threshold=0,
             log_level="warn",
-            request_timeout_secs=3600,
+            request_timeout_secs=max(1, int(request_timeout)),
         )
+        health_kwargs = dict(
+            health_check_timeout_secs=5,
+            health_check_interval_secs=60,
+        )
+        try:
+            router_args = RouterArgs(**base_kwargs, **health_kwargs)
+        except TypeError:
+            from loguru import logger
+
+            logger.warning(
+                "[RolloutManager] RouterArgs does not accept health_check kwargs "
+                "(sglang_router version may be older); falling back to defaults"
+            )
+            router_args = RouterArgs(**base_kwargs)
 
         self.router_process = multiprocessing.Process(target=launch_router, args=(router_args,))
         self.router_process.daemon = True

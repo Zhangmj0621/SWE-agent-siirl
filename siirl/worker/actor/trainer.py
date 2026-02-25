@@ -332,6 +332,10 @@ class Trainer:
     def _rpc_timeout_s(self) -> int:
         return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
 
+    @property
+    def _colocate_timeout_s(self) -> int:
+        return max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
+
     def _wait_validate_gate(self):
         """Block until validate-reuse gate allows proceeding."""
         while True:
@@ -348,7 +352,7 @@ class Trainer:
         error = None
         if self.rank == 0:
             try:
-                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=self._rpc_timeout_s))
+                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=self._colocate_timeout_s))
             except Exception as e:
                 logger.error(f"[Trainer rank=0] offload_for_train failed: {e}")
                 error = e
@@ -361,7 +365,7 @@ class Trainer:
         error = None
         if self.rank == 0:
             try:
-                ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=self._rpc_timeout_s))
+                ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=self._colocate_timeout_s))
             except Exception as e:
                 logger.error(f"[Trainer rank=0] resume_after_sync failed: {e}")
                 error = e

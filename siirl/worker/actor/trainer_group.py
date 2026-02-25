@@ -302,16 +302,16 @@ class TrainerGroup:
             return
 
         is_colocate = getattr(self.config.trainer, "colocate", False)
-        rpc_timeout = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+        timeout = max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
         offloaded = False
         try:
             if is_colocate:
-                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=rpc_timeout), timeout=rpc_timeout)
+                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=timeout), timeout=timeout)
                 offloaded = True
             futures = [trainer.update_rollout_weight.remote() for trainer in self.trainers]
             ray.get(futures)
         finally:
             if offloaded:
-                ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=rpc_timeout), timeout=rpc_timeout)
+                ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=timeout), timeout=timeout)
 
         logger.info("Weight update completed")

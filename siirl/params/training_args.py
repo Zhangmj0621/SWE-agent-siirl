@@ -104,6 +104,10 @@ class TrainingArguments:
         default=120,
         metadata={"help": "Timeout in seconds for param sync RPC calls to rollout workers"},
     )
+    colocate_timeout_s: int = field(
+        default=60,
+        metadata={"help": "Ray-level timeout for colocated offload/resume lifecycle operations"},
+    )
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
     pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
     context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})
