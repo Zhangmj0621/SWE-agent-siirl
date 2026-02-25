@@ -473,6 +473,22 @@ class SglangEngine:
         """Use a single long control-plane call instead of short retries."""
         return self._control_plane_timeout_s(), 0
 
+    def _process_debug_state(self) -> dict:
+        process = getattr(self, "process", None)
+        return {
+            "pid": getattr(process, "pid", None),
+            "alive": bool(process and process.is_alive()),
+            "exitcode": getattr(process, "exitcode", None),
+        }
+
+    def _probe_server_health(self, timeout_s: int = 2) -> str:
+        url = f"{self.sgl_args.url()}/health"
+        try:
+            response = requests.get(url, timeout=timeout_s)
+            return f"ok:{response.status_code}"
+        except Exception as e:
+            return f"error:{type(e).__name__}:{e}"
+
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request with endpoint-aware timeout and retry strategy."""
         if self.sgl_args.node_rank != 0:
@@ -494,14 +510,40 @@ class SglangEngine:
                     f"SGLang process on {self.ip}:{self.port} is dead (exitcode={process.exitcode}); " f"cannot call /{endpoint}"
                 )
             try:
+                request_start = time.monotonic()
                 response = requests.post(url, json=payload or {}, timeout=timeout_s)
                 response.raise_for_status()
+                if is_control:
+                    elapsed_ms = (time.monotonic() - request_start) * 1000
+                    if elapsed_ms >= 5_000:
+                        logger.warning(
+                            "[COLOCATE_DEBUG][SglangEngine] slow control request endpoint={} timeout_s={} elapsed_ms={:.1f} process={}",
+                            endpoint,
+                            timeout_s,
+                            elapsed_ms,
+                            self._process_debug_state(),
+                        )
                 return response.json()
             except requests.exceptions.HTTPError:
                 logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
                 raise
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 last_error = e
+                if is_control:
+                    elapsed_ms = (time.monotonic() - request_start) * 1000
+                    health = self._probe_server_health(timeout_s=min(3, timeout_s))
+                    logger.error(
+                        "[COLOCATE_DEBUG][SglangEngine] control request failed endpoint={} attempt={}/{} timeout_s={} "
+                        "elapsed_ms={:.1f} process={} health_probe={} payload={}",
+                        endpoint,
+                        attempt + 1,
+                        max_retries + 1,
+                        timeout_s,
+                        elapsed_ms,
+                        self._process_debug_state(),
+                        health,
+                        payload,
+                    )
                 if attempt >= max_retries:
                     raise
                 delay_s = min(1.0 * (2**attempt), 4.0)

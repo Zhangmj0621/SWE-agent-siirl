@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import contextlib
+import inspect
 import multiprocessing
 import os
 import re
@@ -497,6 +498,7 @@ class RolloutManager:
                 with contextlib.suppress(Exception):
                     ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
             logger.error("[RolloutManager] offload_for_train failed\n" + traceback.format_exc())
+            self._log_worker_debug_states(tp0_workers, timeout_s=min(5, timeout_s), phase="offload_for_train", tag=",".join(tags))
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] offload_for_train completed in {elapsed_ms:.1f}ms")
@@ -521,6 +523,7 @@ class RolloutManager:
             self._weights_onloaded_for_sync = True
         except Exception:
             logger.error("[RolloutManager] onload_weights_for_sync failed\n" + traceback.format_exc())
+            self._log_worker_debug_states(tp0_workers, timeout_s=min(5, timeout_s), phase="onload_weights_for_sync", tag="weights")
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] onload_weights_for_sync completed in {elapsed_ms:.1f}ms")
@@ -537,12 +540,26 @@ class RolloutManager:
         """Wait for refs and raise timeout with per-worker diagnostics."""
         from loguru import logger
 
+        ref_to_idx = {ref: idx for idx, ref in enumerate(refs)}
+        urls = getattr(self, "worker_urls", [])
+
         ready, pending = ray.wait(refs, num_returns=len(refs), timeout=timeout_s)
+        for ref in ready:
+            idx = ref_to_idx.get(ref, -1)
+            url = urls[idx] if 0 <= idx < len(urls) else "unknown"
+            try:
+                ray.get(ref)
+            except Exception:
+                logger.error(
+                    f"[COLOCATE_DEBUG][RolloutManager] {phase} failed before timeout "
+                    f"tag={tag} worker_idx={idx} url={url}\n" + traceback.format_exc()
+                )
+                self._log_worker_debug_states(workers, timeout_s=min(5, timeout_s), phase=phase, tag=tag)
+                raise
+
         if not pending:
-            ray.get(ready)
             return
 
-        urls = getattr(self, "worker_urls", [])
         pending_set = set(pending)
         stuck = []
         for idx, ref in enumerate(refs):
@@ -554,10 +571,81 @@ class RolloutManager:
             f"[RolloutManager] {phase} timed out after {timeout_s}s "
             f"tag={tag} total={len(refs)} done={len(ready)} stuck={len(pending)}: " + "; ".join(stuck)
         )
+        self._log_worker_debug_states(workers, timeout_s=min(5, timeout_s), phase=phase, tag=tag)
         raise TimeoutError(
             f"[RolloutManager] {phase} timed out: {len(pending)}/{len(refs)} workers "
             f"did not complete within {timeout_s}s ({', '.join(stuck)})"
         )
+
+    def _log_worker_debug_states(self, workers: list, *, timeout_s: int, phase: str, tag: str):
+        from loguru import logger
+
+        if not workers:
+            return
+
+        urls = getattr(self, "worker_urls", [])
+        refs = []
+        for idx, worker in enumerate(workers):
+            try:
+                refs.append((idx, urls[idx] if idx < len(urls) else "unknown", worker.get_debug_state.remote()))
+            except Exception:
+                logger.warning(
+                    "[COLOCATE_DEBUG][RolloutManager] skip debug state fetch for worker_idx={} phase={} tag={}",
+                    idx,
+                    phase,
+                    tag,
+                )
+
+        if not refs:
+            return
+
+        obj_refs = [ref for _, _, ref in refs]
+        ref_meta = {ref: (idx, url) for idx, url, ref in refs}
+
+        try:
+            ready, pending = ray.wait(obj_refs, num_returns=len(obj_refs), timeout=timeout_s)
+        except Exception:
+            logger.warning(
+                "[COLOCATE_DEBUG][RolloutManager] failed to collect worker debug states phase={} tag={}\n{}",
+                phase,
+                tag,
+                traceback.format_exc(),
+            )
+            return
+
+        for ref in ready:
+            idx, url = ref_meta.get(ref, (-1, "unknown"))
+            try:
+                state = ray.get(ref)
+            except Exception as e:
+                logger.warning(
+                    "[COLOCATE_DEBUG][RolloutManager] worker debug state fetch failed phase={} tag={} worker_idx={} url={} err={}",
+                    phase,
+                    tag,
+                    idx,
+                    url,
+                    repr(e),
+                )
+                continue
+            logger.error(
+                "[COLOCATE_DEBUG][RolloutManager] worker debug state phase={} tag={} worker_idx={} url={} state={}",
+                phase,
+                tag,
+                idx,
+                url,
+                state,
+            )
+
+        for ref in pending:
+            idx, url = ref_meta.get(ref, (-1, "unknown"))
+            logger.warning(
+                "[COLOCATE_DEBUG][RolloutManager] worker debug state timeout phase={} tag={} worker_idx={} url={} timeout_s={}",
+                phase,
+                tag,
+                idx,
+                url,
+                timeout_s,
+            )
 
     def resume_after_sync(self, timeout_s: int = 120):
         """Resume rollout GPU memory after weight sync.
@@ -590,6 +678,7 @@ class RolloutManager:
             self._train_offloaded = False
         except Exception:
             logger.error("[RolloutManager] resume_after_sync failed\n" + traceback.format_exc())
+            self._log_worker_debug_states(tp0_workers, timeout_s=min(5, timeout_s), phase="resume_after_sync", tag="exception")
             raise
         finally:
             self._weights_onloaded_for_sync = False
@@ -729,6 +818,48 @@ class RolloutManager:
             "disable_health_check": False,
         }
 
+    def _build_router_args(self, RouterArgs, base_kwargs: dict, health_kwargs: dict):
+        """Build RouterArgs while keeping supported health kwargs on mixed versions."""
+        from loguru import logger
+
+        merged = dict(base_kwargs)
+        dropped = []
+
+        try:
+            sig = inspect.signature(RouterArgs)
+        except (TypeError, ValueError):
+            sig = None
+
+        if sig is not None:
+            params = sig.parameters
+            supports_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            if supports_var_kw:
+                merged.update(health_kwargs)
+            else:
+                supported = {name for name in params if name != "self"}
+                for key, value in health_kwargs.items():
+                    if key in supported:
+                        merged[key] = value
+                    else:
+                        dropped.append(key)
+        else:
+            # Fallback for C-extension callables without inspectable signatures.
+            for key, value in health_kwargs.items():
+                try:
+                    RouterArgs(**merged, **{key: value})
+                except TypeError:
+                    dropped.append(key)
+                else:
+                    merged[key] = value
+
+        if dropped:
+            logger.warning(
+                "[RolloutManager] RouterArgs does not support health kwargs {}; using compatible subset",
+                dropped,
+            )
+
+        return RouterArgs(**merged)
+
     def start_router(self, request_timeout: int = 3600):
         """
         Start SGLang router process and configure it with worker URLs.
@@ -751,16 +882,7 @@ class RolloutManager:
             request_timeout_secs=max(1, int(request_timeout)),
         )
         health_kwargs = self._router_health_kwargs()
-        try:
-            router_args = RouterArgs(**base_kwargs, **health_kwargs)
-        except TypeError:
-            from loguru import logger
-
-            logger.warning(
-                "[RolloutManager] RouterArgs does not accept health_check kwargs "
-                "(sglang_router version may be older); falling back to defaults"
-            )
-            router_args = RouterArgs(**base_kwargs)
+        router_args = self._build_router_args(RouterArgs, base_kwargs, health_kwargs)
 
         self.router_process = multiprocessing.Process(target=launch_router, args=(router_args,))
         self.router_process.daemon = True

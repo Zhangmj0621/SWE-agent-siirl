@@ -378,11 +378,74 @@ class RolloutWorker:
 
     def offload_memory(self, tags: list[str] | None = None):
         """Release GPU memory occupation for colocated mode."""
-        return self.engine.release_memory_occupation(tags)
+        try:
+            return self.engine.release_memory_occupation(tags)
+        except Exception:
+            logger.error(
+                "[COLOCATE_DEBUG][RolloutWorker rank={}] offload_memory failed tags={} debug_state={}",
+                self.rank,
+                tags,
+                self.get_debug_state(),
+            )
+            raise
 
     def onload_memory(self, tags: list[str] | None = None):
         """Resume GPU memory occupation for colocated mode."""
-        return self.engine.resume_memory_occupation(tags)
+        try:
+            return self.engine.resume_memory_occupation(tags)
+        except Exception:
+            logger.error(
+                "[COLOCATE_DEBUG][RolloutWorker rank={}] onload_memory failed tags={} debug_state={}",
+                self.rank,
+                tags,
+                self.get_debug_state(),
+            )
+            raise
+
+    def _collect_cuda_debug_stats(self) -> dict:
+        stats = {}
+        try:
+            import torch
+        except Exception as e:
+            stats["torch_import_error"] = repr(e)
+            return stats
+
+        try:
+            if not torch.cuda.is_available():
+                stats["cuda_available"] = False
+                return stats
+
+            device = torch.cuda.current_device()
+            free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+            stats.update(
+                {
+                    "cuda_available": True,
+                    "device": int(device),
+                    "free_gb": round(free_bytes / (1024**3), 3),
+                    "total_gb": round(total_bytes / (1024**3), 3),
+                    "allocated_gb": round(torch.cuda.memory_allocated(device) / (1024**3), 3),
+                    "reserved_gb": round(torch.cuda.memory_reserved(device) / (1024**3), 3),
+                    "max_allocated_gb": round(torch.cuda.max_memory_allocated(device) / (1024**3), 3),
+                    "max_reserved_gb": round(torch.cuda.max_memory_reserved(device) / (1024**3), 3),
+                }
+            )
+            return stats
+        except Exception as e:
+            stats["cuda_stats_error"] = repr(e)
+            return stats
+
+    def get_debug_state(self) -> dict:
+        process = getattr(self.engine, "process", None)
+        return {
+            "rank": self.rank,
+            "ip": self.ip,
+            "port": self.port,
+            "engine_pid": getattr(process, "pid", None),
+            "engine_alive": bool(process and process.is_alive()),
+            "engine_exitcode": getattr(process, "exitcode", None),
+            "cuda": self._collect_cuda_debug_stats(),
+            "ts": round(time.time(), 3),
+        }
 
     def weight_version(self):
         return self.engine._weight_version
