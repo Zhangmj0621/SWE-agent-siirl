@@ -5,6 +5,41 @@ from loguru import logger
 from mbridge.core.bridge import Bridge
 from mbridge.core.util import unwrap_model
 
+COLOCATE_MEM_DEBUG_PREFIX = "[COLOCATE_MEM_DEBUG]"
+
+
+def _cuda_export_snapshot() -> dict[str, float | int | str]:
+    snapshot: dict[str, float | int | str] = {}
+    if not torch.cuda.is_available():
+        snapshot["cuda_available"] = 0
+        return snapshot
+    try:
+        device = torch.cuda.current_device()
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        snapshot.update(
+            {
+                "cuda_available": 1,
+                "device": int(device),
+                "allocated_gb": round(torch.cuda.memory_allocated(device) / (1024**3), 3),
+                "reserved_gb": round(torch.cuda.memory_reserved(device) / (1024**3), 3),
+                "free_gb": round(free_bytes / (1024**3), 3),
+                "total_gb": round(total_bytes / (1024**3), 3),
+            }
+        )
+    except Exception as e:
+        snapshot["snapshot_error"] = repr(e)
+    return snapshot
+
+
+def _log_export_mem(stage: str, **fields):
+    merged = {
+        "stage": stage,
+        **_cuda_export_snapshot(),
+        **fields,
+    }
+    payload = " ".join(f"{k}={v}" for k, v in merged.items())
+    logger.info(f"{COLOCATE_MEM_DEBUG_PREFIX} {payload}")
+
 
 def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[torch.nn.Module]):
     models = [unwrap_model(model) for model in models]
@@ -36,7 +71,11 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
 
     model_chunk_generator = get_model_chunk_generator()
     local_to_global_maps = [self._weight_name_mapping_mcore_local_to_global(model, consider_ep=False) for model in models]
-    for _, iter_vpp_rank, iter_name in weights_names:
+    emitted_count = 0
+    emitted_bytes = 0
+    _log_export_mem(stage="mbridge_export_start", weight_name_count=len(weights_names))
+
+    for idx, (_, iter_vpp_rank, iter_name) in enumerate(weights_names, start=1):
         local_to_global_map = local_to_global_maps[iter_vpp_rank]
         try:
             name, param = next(model_chunk_generator)
@@ -67,7 +106,17 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
 
                 merge_params = self._weight_merge_across_tp(name, params, param)
                 converted_names, converted_params = self._weight_to_hf_format(name, merge_params)
-                yield from zip(converted_names, converted_params, strict=False)
+                for converted_name, converted_param in zip(converted_names, converted_params, strict=False):
+                    emitted_count += 1
+                    emitted_bytes += converted_param.numel() * converted_param.element_size()
+                    if emitted_count % 256 == 0:
+                        _log_export_mem(
+                            stage="mbridge_export_progress",
+                            source_index=idx,
+                            emitted_count=emitted_count,
+                            emitted_mb=round(emitted_bytes / (1024**2), 2),
+                        )
+                    yield converted_name, converted_param
             continue
 
         # TP
@@ -83,8 +132,24 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
             infer_params = param
 
         converted_names, converted_params = self._weight_to_hf_format(name, infer_params)
+        for converted_name, converted_param in zip(converted_names, converted_params, strict=False):
+            emitted_count += 1
+            emitted_bytes += converted_param.numel() * converted_param.element_size()
+            if emitted_count % 256 == 0:
+                _log_export_mem(
+                    stage="mbridge_export_progress",
+                    source_index=idx,
+                    emitted_count=emitted_count,
+                    emitted_mb=round(emitted_bytes / (1024**2), 2),
+                )
+            yield converted_name, converted_param
 
-        yield from zip(converted_names, converted_params, strict=False)
+    _log_export_mem(
+        stage="mbridge_export_done",
+        emitted_count=emitted_count,
+        emitted_mb=round(emitted_bytes / (1024**2), 2),
+        weight_name_count=len(weights_names),
+    )
 
 
 logger.debug("patching mbridge with _export_weights_in_current_pipeline_stage")

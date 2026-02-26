@@ -21,6 +21,8 @@ from siirl.utils.distributed_utils import get_gloo_group, init_process_group
 
 from . import mbridge_patch  # noqa: F401
 
+COLOCATE_MEM_DEBUG_PREFIX = "[COLOCATE_MEM_DEBUG]"
+
 
 def _import_flattened_tensor_bucket():
     """Import FlattenedTensorBucket with dual-path compatibility."""
@@ -77,6 +79,50 @@ def _serialize_bucket_ipc(
     return serialized, long_lived_buckets
 
 
+def _shared_cache_len() -> int:
+    try:
+        from torch.multiprocessing import reductions
+
+        cache = getattr(reductions, "shared_cache", None)
+        if cache is None:
+            return -1
+        return len(cache)
+    except Exception:
+        return -1
+
+
+def _cuda_memory_snapshot() -> dict[str, float | int | str]:
+    snapshot: dict[str, float | int | str] = {}
+    if not torch.cuda.is_available():
+        snapshot["cuda_available"] = 0
+        return snapshot
+
+    try:
+        device = torch.cuda.current_device()
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        stats = torch.cuda.memory_stats(device)
+        snapshot.update(
+            {
+                "cuda_available": 1,
+                "device": int(device),
+                "allocated_gb": round(torch.cuda.memory_allocated(device) / (1024**3), 3),
+                "reserved_gb": round(torch.cuda.memory_reserved(device) / (1024**3), 3),
+                "free_gb": round(free_bytes / (1024**3), 3),
+                "total_gb": round(total_bytes / (1024**3), 3),
+                "active_gb": round(stats.get("active_bytes.all.current", 0) / (1024**3), 3),
+                "inactive_split_gb": round(stats.get("inactive_split_bytes.all.current", 0) / (1024**3), 3),
+                "shared_cache_len": _shared_cache_len(),
+            }
+        )
+    except Exception as e:
+        snapshot["snapshot_error"] = repr(e)
+    return snapshot
+
+
+def _tensor_bytes(named_tensors: Sequence[tuple[str, torch.Tensor]]) -> int:
+    return sum(tensor.numel() * tensor.element_size() for _, tensor in named_tensors)
+
+
 class ParamSyncInterface:
     def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
         self.config = config
@@ -116,6 +162,9 @@ class ParamSyncDistributed(ParamSyncInterface):
 
     def _record_sync_bucket(self) -> None:
         self._current_sync_bucket_count += 1
+
+    def _log_colocate_mem_debug(self, stage: str, **fields) -> None:
+        return
 
     @staticmethod
     def _percentile(values: Sequence[float], quantile: float) -> float:
@@ -244,6 +293,8 @@ class ParamSyncDistributed(ParamSyncInterface):
 
         buffer_size = 0
         converted_named_tensors = []
+        exported_params = 0
+        exported_bytes = 0
         pbar = (
             tqdm(
                 desc=f"[{self._group_name}] Update weights",
@@ -255,12 +306,20 @@ class ParamSyncDistributed(ParamSyncInterface):
             else None
         )
         try:
+            self._log_colocate_mem_debug(stage="export_start")
             generator = self.bridge._export_weights_in_current_pipeline_stage(self.model)
             for name, param in generator:
+                exported_params += 1
+                exported_bytes += param.numel() * param.element_size()
                 buffer_size = self._update_param_sync_bucket(name, param, converted_named_tensors, buffer_size, pbar)
 
             if converted_named_tensors:
                 self._update_bucket_weights(converted_named_tensors, pbar=pbar)
+            self._log_colocate_mem_debug(
+                stage="export_done",
+                exported_params=exported_params,
+                exported_mb=round(exported_bytes / (1024**2), 2),
+            )
         finally:
             if pbar is not None:
                 pbar.close()
@@ -347,6 +406,14 @@ class ParamSyncDistributed(ParamSyncInterface):
             return buffer_size
         param_size = param.numel() * param.element_size()
         if buffer_size + param_size > self.config.trainer.param_sync_buffer_size:
+            self._log_colocate_mem_debug(
+                stage="bucket_flush_trigger",
+                next_bucket_idx=self._current_sync_bucket_count + 1,
+                buffered_params=len(converted_named_tensors),
+                buffered_mb=round(buffer_size / (1024**2), 2),
+                incoming_param=name,
+                incoming_mb=round(param_size / (1024**2), 2),
+            )
             self._update_bucket_weights(converted_named_tensors, pbar=pbar)
             buffer_size = 0
         converted_named_tensors.append((name, param))
@@ -433,6 +500,21 @@ class ParamSyncColocated(ParamSyncDistributed):
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         self._group_name = f"param_sync_colocated-pp_{pp_rank}"
 
+    def _log_colocate_mem_debug(self, stage: str, **fields) -> None:
+        if not self._is_pp_src_rank:
+            return
+        mem = _cuda_memory_snapshot()
+        merged = {
+            "group": self._group_name,
+            "stage": stage,
+            "backend": self._sync_backend,
+            "weight_version": self.weight_version,
+            **mem,
+            **fields,
+        }
+        payload = " ".join(f"{k}={v}" for k, v in merged.items())
+        logger.info(f"{COLOCATE_MEM_DEBUG_PREFIX} {payload}")
+
     def _compact_cuda_cache(self, stage: str, *, force: bool = False) -> None:
         if not self._is_pp_src_rank or not torch.cuda.is_available():
             return
@@ -489,6 +571,15 @@ class ParamSyncColocated(ParamSyncDistributed):
             )
             self._tensor_path_logged = True
 
+        bucket_idx = self._current_sync_bucket_count + 1
+        tensor_bytes = _tensor_bytes(converted_named_tensors)
+        self._log_colocate_mem_debug(
+            stage="bucket_tensor_before_sync",
+            bucket_idx=bucket_idx,
+            param_count=len(converted_named_tensors),
+            tensor_mb=round(tensor_bytes / (1024**2), 2),
+            timeout_s=timeout_s,
+        )
         refs = update_weights_from_tensor(
             self.weight_version,
             self.rollout_workers,
@@ -498,6 +589,13 @@ class ParamSyncColocated(ParamSyncDistributed):
         if refs:
             ray.get(refs, timeout=timeout_s)
             self._record_sync_bucket()
+        self._log_colocate_mem_debug(
+            stage="bucket_tensor_after_sync",
+            bucket_idx=bucket_idx,
+            param_count=len(converted_named_tensors),
+            tensor_mb=round(tensor_bytes / (1024**2), 2),
+            ref_count=len(refs),
+        )
         converted_named_tensors.clear()
         if pbar is not None:
             pbar.update(1)
@@ -548,18 +646,29 @@ class ParamSyncColocated(ParamSyncDistributed):
         try:
             if bump_weight_version:
                 self.weight_version += 1
+            self._log_colocate_mem_debug(
+                stage="step_start",
+                weight_version=self.weight_version,
+                worker_count=len(all_workers),
+            )
 
             # No pause_generation / flush_cache here — already released by trainer
             dist.barrier(group=get_gloo_group())
 
             if self.bridge is not None:
+                self._log_colocate_mem_debug(stage="before_mbridge_export")
                 self._update_weights_use_mbridge()
+                self._log_colocate_mem_debug(
+                    stage="after_mbridge_export",
+                    bucket_count=self._current_sync_bucket_count,
+                )
             else:
                 raise NotImplementedError("Colocated mode requires use_mbridge=True")
 
             dist.barrier(group=get_gloo_group())
             if dist.get_rank() == 0:
                 self._check_weight_version()
+                self._log_colocate_mem_debug(stage="after_version_check")
             # No continue_generation here — will be resumed by trainer
             dist.barrier(group=get_gloo_group())
             sync_success = True
@@ -567,6 +676,12 @@ class ParamSyncColocated(ParamSyncDistributed):
             if dist.get_rank() == 0:
                 elapsed_ms = (time.monotonic() - sync_started_at) * 1000
                 self._log_sync_metrics(elapsed_ms, success=sync_success)
+            self._log_colocate_mem_debug(
+                stage="step_end",
+                weight_version=self.weight_version,
+                sync_success=int(sync_success),
+                bucket_count=self._current_sync_bucket_count,
+            )
             self._compact_cuda_cache(stage="step_end", force=True)
 
     def _update_bucket_weights(
@@ -581,6 +696,15 @@ class ParamSyncColocated(ParamSyncDistributed):
             return
 
         timeout_s = self._rpc_timeout_s()
+        bucket_idx = self._current_sync_bucket_count + 1
+        tensor_bytes = _tensor_bytes(converted_named_tensors)
+        self._log_colocate_mem_debug(
+            stage="bucket_start",
+            bucket_idx=bucket_idx,
+            param_count=len(converted_named_tensors),
+            tensor_mb=round(tensor_bytes / (1024**2), 2),
+            timeout_s=timeout_s,
+        )
 
         if not self._using_flattened_bucket():
             self._sync_bucket_with_tensor_path(converted_named_tensors, timeout_s=timeout_s, pbar=pbar)
@@ -589,6 +713,15 @@ class ParamSyncColocated(ParamSyncDistributed):
         try:
             tp_size = max(1, self.config.rollout.tensor_model_parallel_size)
             serialized_parts, long_lived_buckets = _serialize_bucket_ipc(converted_named_tensors)
+            payload_mb = round(sum(len(part) for part in serialized_parts) / (1024**2), 2)
+            self._log_colocate_mem_debug(
+                stage="bucket_after_ipc_serialize",
+                bucket_idx=bucket_idx,
+                param_count=len(converted_named_tensors),
+                part_count=len(serialized_parts),
+                payload_mb=payload_mb,
+                tp_size=tp_size,
+            )
             try:
                 t0 = time.monotonic()
                 for part in serialized_parts:
@@ -597,11 +730,28 @@ class ParamSyncColocated(ParamSyncDistributed):
                     self._record_sync_bucket()
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 logger.debug(f"[{self._group_name}] IPC bucket sync: {len(converted_named_tensors)} params, {elapsed_ms:.1f}ms")
+                self._log_colocate_mem_debug(
+                    stage="bucket_after_ipc_sync",
+                    bucket_idx=bucket_idx,
+                    elapsed_ms=round(elapsed_ms, 2),
+                    part_count=len(serialized_parts),
+                )
             finally:
                 long_lived_buckets.clear()
+                self._log_colocate_mem_debug(
+                    stage="bucket_after_ipc_clear",
+                    bucket_idx=bucket_idx,
+                    part_count=len(serialized_parts),
+                )
         except Exception as exc:
             if not self._fallback_to_tensor:
                 raise
+            self._log_colocate_mem_debug(
+                stage="bucket_fallback_to_tensor",
+                bucket_idx=bucket_idx,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             self._switch_backend_to_tensor(reason=f"{type(exc).__name__}: {exc}")
             self._sync_bucket_with_tensor_path(converted_named_tensors, timeout_s=timeout_s, pbar=pbar)
             return
@@ -708,7 +858,25 @@ def update_weights_from_tensor(
     if not rollout_workers:
         return []
 
+    before = _cuda_memory_snapshot()
     serialized_bucket = serialize_named_tensors(converted_named_tensors)
+    after = _cuda_memory_snapshot()
+    logger.info(
+        "{} stage=tensor_serialize weight_version={} worker_count={} param_count={} payload_mb={} "
+        "before_allocated_gb={} after_allocated_gb={} before_reserved_gb={} after_reserved_gb={} "
+        "before_shared_cache_len={} after_shared_cache_len={}",
+        COLOCATE_MEM_DEBUG_PREFIX,
+        weight_version,
+        len(rollout_workers),
+        len(converted_named_tensors),
+        round(len(serialized_bucket) / (1024**2), 2),
+        before.get("allocated_gb"),
+        after.get("allocated_gb"),
+        before.get("reserved_gb"),
+        after.get("reserved_gb"),
+        before.get("shared_cache_len"),
+        after.get("shared_cache_len"),
+    )
     serialized_named_tensors = [serialized_bucket for _ in range(max(1, tensor_model_parallel_size))]
     return [
         worker.param_sync_from_tensor.remote(
