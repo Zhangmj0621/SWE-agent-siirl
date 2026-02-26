@@ -515,6 +515,61 @@ class ParamSyncColocated(ParamSyncDistributed):
         payload = " ".join(f"{k}={v}" for k, v in merged.items())
         logger.info(f"{COLOCATE_MEM_DEBUG_PREFIX} {payload}")
 
+    def _clear_shared_cache(self) -> None:
+        """Evict CUDA IPC handles so their pinned GPU storage can be reclaimed."""
+        if not self._is_pp_src_rank:
+            return
+        cache_len_before = _shared_cache_len()
+        cleared_entries = 0
+        clear_error = None
+        ipc_collect = -1
+        try:
+            from torch.multiprocessing import reductions
+
+            cache = getattr(reductions, "shared_cache", None)
+            if cache is not None:
+                cleared_entries = len(cache)
+                if cleared_entries > 0:
+                    cache.clear()
+            else:
+                logger.warning(
+                    "{} group={} stage=shared_cache_clear_skipped reason=shared_cache_unavailable",
+                    COLOCATE_MEM_DEBUG_PREFIX,
+                    self._group_name,
+                )
+        except Exception as e:
+            clear_error = repr(e)
+            logger.warning(
+                "{} group={} stage=shared_cache_clear_failed error={}",
+                COLOCATE_MEM_DEBUG_PREFIX,
+                self._group_name,
+                clear_error,
+            )
+
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.ipc_collect()
+                ipc_collect = 1
+            except Exception as e:
+                ipc_collect = 0
+                logger.warning(
+                    "{} group={} stage=ipc_collect_failed error={}",
+                    COLOCATE_MEM_DEBUG_PREFIX,
+                    self._group_name,
+                    repr(e),
+                )
+        else:
+            ipc_collect = 0
+
+        self._log_colocate_mem_debug(
+            stage="after_shared_cache_clear",
+            before_shared_cache_len=cache_len_before,
+            after_shared_cache_len=_shared_cache_len(),
+            cleared_entries=cleared_entries,
+            ipc_collect=ipc_collect,
+            clear_error=clear_error or "",
+        )
+
     def _compact_cuda_cache(self, stage: str, *, force: bool = False) -> None:
         if not self._is_pp_src_rank or not torch.cuda.is_available():
             return
@@ -673,6 +728,7 @@ class ParamSyncColocated(ParamSyncDistributed):
             dist.barrier(group=get_gloo_group())
             sync_success = True
         finally:
+            self._clear_shared_cache()
             if dist.get_rank() == 0:
                 elapsed_ms = (time.monotonic() - sync_started_at) * 1000
                 self._log_sync_metrics(elapsed_ms, success=sync_success)
@@ -683,6 +739,7 @@ class ParamSyncColocated(ParamSyncDistributed):
                 bucket_count=self._current_sync_bucket_count,
             )
             self._compact_cuda_cache(stage="step_end", force=True)
+            self._log_colocate_mem_debug(stage="after_step_compact")
 
     def _update_bucket_weights(
         self,
