@@ -1,3 +1,4 @@
+import gc
 import socket
 import time
 import traceback
@@ -391,6 +392,7 @@ class ParamSyncColocated(ParamSyncDistributed):
 
     _SUPPORTED_BACKENDS = {"tensor", "flattened_bucket"}
     _MAX_SYNC_RETRIES = 2
+    _MIN_RECLAIMABLE_BYTES = 1 << 30
 
     def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
         super().__init__(config, model, bridge)
@@ -430,6 +432,25 @@ class ParamSyncColocated(ParamSyncDistributed):
         self._is_pp_src_rank = mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         self._group_name = f"param_sync_colocated-pp_{pp_rank}"
+
+    def _compact_cuda_cache(self, stage: str, *, force: bool = False) -> None:
+        if not self._is_pp_src_rank or not torch.cuda.is_available():
+            return
+        gc.collect()
+        device = torch.cuda.current_device()
+        reserved = torch.cuda.memory_reserved(device)
+        allocated = torch.cuda.memory_allocated(device)
+        reclaimable = max(0, reserved - allocated)
+        if force or reclaimable >= self._MIN_RECLAIMABLE_BYTES:
+            torch.cuda.empty_cache()
+        logger.debug(
+            "[COLOCATE_DEBUG][{}] cuda_cache_compact stage={} allocated_gb={:.3f} reserved_gb={:.3f} reclaimable_gb={:.3f}",
+            self._group_name,
+            stage,
+            allocated / (1024**3),
+            reserved / (1024**3),
+            reclaimable / (1024**3),
+        )
 
     def _sync_ipc_bucket_with_retry(self, serialized_named_tensors: list[bytes], timeout_s: int) -> None:
         retry_limit = self._max_sync_retries
@@ -480,6 +501,7 @@ class ParamSyncColocated(ParamSyncDistributed):
         converted_named_tensors.clear()
         if pbar is not None:
             pbar.update(1)
+        self._compact_cuda_cache(stage="bucket_tensor")
 
     def setup_param_sync_group(self, rollout_workers: Sequence[ActorHandle]):
         normalized_workers = self._normalize_rollout_workers(rollout_workers)
@@ -545,6 +567,7 @@ class ParamSyncColocated(ParamSyncDistributed):
             if dist.get_rank() == 0:
                 elapsed_ms = (time.monotonic() - sync_started_at) * 1000
                 self._log_sync_metrics(elapsed_ms, success=sync_success)
+            self._compact_cuda_cache(stage="step_end", force=True)
 
     def _update_bucket_weights(
         self,
@@ -586,6 +609,7 @@ class ParamSyncColocated(ParamSyncDistributed):
         converted_named_tensors.clear()
         if pbar is not None:
             pbar.update(1)
+        self._compact_cuda_cache(stage="bucket_flattened")
 
 
 def connect_rollout_workers_from_distributed(
