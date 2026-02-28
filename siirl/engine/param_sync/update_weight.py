@@ -1014,6 +1014,23 @@ def update_weights_from_tensor(
 
 
 def serialize_named_tensors(named_tensors: Sequence[tuple[str, torch.Tensor]]) -> str:
+    # Patch torch reductions before CUDA tensor IPC serialization.
+    monkey_patch_torch_reductions = None
+    try:
+        from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions as _patch_fn
+
+        monkey_patch_torch_reductions = _patch_fn
+    except ImportError:
+        try:
+            from sglang.srt.patch_torch import monkey_patch_torch_reductions as _patch_fn
+
+            monkey_patch_torch_reductions = _patch_fn
+        except ImportError:
+            monkey_patch_torch_reductions = None
+
+    if monkey_patch_torch_reductions is not None:
+        monkey_patch_torch_reductions()
+
     from sglang.srt.utils.common import MultiprocessingSerializer
 
     return MultiprocessingSerializer.serialize(list(named_tensors), output_str=True)
