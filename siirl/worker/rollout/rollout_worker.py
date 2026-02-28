@@ -18,6 +18,7 @@ import importlib
 import os
 import threading
 import time
+import traceback
 
 from loguru import logger
 
@@ -359,10 +360,76 @@ class RolloutWorker:
         flush_cache=False,
         weight_version: str | None = None,
         load_format: str | None = None,
+        trace_id: str | None = None,
+        bucket_idx: int | None = None,
+        part_idx: int | None = None,
+        part_count: int | None = None,
     ):
-        return self.engine.param_sync_from_tensor(
-            serialized_named_tensors, flush_cache=flush_cache, weight_version=weight_version, load_format=load_format
+        trace_id = trace_id or "na"
+        payload_parts = len(serialized_named_tensors) if isinstance(serialized_named_tensors, list) else 1
+        payload_bytes = 0
+        if isinstance(serialized_named_tensors, list):
+            for item in serialized_named_tensors:
+                if isinstance(item, (bytes, bytearray, str)):
+                    payload_bytes += len(item)
+        start = time.monotonic()
+        logger.info(
+            "[COLOCATE_TRACE][RolloutWorker] stage=param_sync_from_tensor_start trace_id={} rank={} "
+            "weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} payload_parts={} payload_mb={} debug_state={}",
+            trace_id,
+            self.rank,
+            weight_version,
+            load_format or "tensor",
+            bucket_idx if bucket_idx is not None else -1,
+            part_idx if part_idx is not None else -1,
+            part_count if part_count is not None else -1,
+            payload_parts,
+            round(payload_bytes / (1024**2), 2),
+            self.get_debug_state(),
         )
+        try:
+            result = self.engine.param_sync_from_tensor(
+                serialized_named_tensors,
+                flush_cache=flush_cache,
+                weight_version=weight_version,
+                load_format=load_format,
+                trace_id=trace_id,
+                bucket_idx=bucket_idx,
+                part_idx=part_idx,
+                part_count=part_count,
+            )
+            elapsed_ms = (time.monotonic() - start) * 1000
+            logger.info(
+                "[COLOCATE_TRACE][RolloutWorker] stage=param_sync_from_tensor_done trace_id={} rank={} "
+                "weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} elapsed_ms={} debug_state={}",
+                trace_id,
+                self.rank,
+                weight_version,
+                load_format or "tensor",
+                bucket_idx if bucket_idx is not None else -1,
+                part_idx if part_idx is not None else -1,
+                part_count if part_count is not None else -1,
+                round(elapsed_ms, 2),
+                self.get_debug_state(),
+            )
+            return result
+        except Exception:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            logger.error(
+                "[COLOCATE_TRACE][RolloutWorker] stage=param_sync_from_tensor_failed trace_id={} rank={} "
+                "weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} elapsed_ms={} err={} debug_state={}",
+                trace_id,
+                self.rank,
+                weight_version,
+                load_format or "tensor",
+                bucket_idx if bucket_idx is not None else -1,
+                part_idx if part_idx is not None else -1,
+                part_count if part_count is not None else -1,
+                round(elapsed_ms, 2),
+                traceback.format_exc(),
+                self.get_debug_state(),
+            )
+            raise
 
     def destroy_weights_update_group(self, group_name):
         return self.engine.destroy_weights_update_group(group_name)

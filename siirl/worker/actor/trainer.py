@@ -336,6 +336,52 @@ class Trainer:
     def _colocate_timeout_s(self) -> int:
         return max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
 
+    def _cuda_debug_snapshot(self) -> dict[str, float | int | str]:
+        if not torch.cuda.is_available():
+            return {"cuda_available": 0}
+        try:
+            device = torch.cuda.current_device()
+            free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+            return {
+                "cuda_available": 1,
+                "device": int(device),
+                "allocated_gb": round(torch.cuda.memory_allocated(device) / (1024**3), 3),
+                "reserved_gb": round(torch.cuda.memory_reserved(device) / (1024**3), 3),
+                "free_gb": round(free_bytes / (1024**3), 3),
+                "total_gb": round(total_bytes / (1024**3), 3),
+            }
+        except Exception as e:
+            return {"cuda_available": 1, "snapshot_error": repr(e)}
+
+    def _next_weight_version_hint(self, bump_weight_version: bool = True) -> int:
+        current = getattr(self.param_sync, "weight_version", None)
+        if current is None:
+            return -1
+        try:
+            current_int = int(current)
+        except Exception:
+            return -1
+        return current_int + (1 if bump_weight_version else 0)
+
+    def _build_colocate_trace_id(self, phase: str, bump_weight_version: bool = True) -> str:
+        next_weight_version = self._next_weight_version_hint(bump_weight_version=bump_weight_version)
+        return f"{phase}-step{self.global_step}-rank{self.rank}" f"-nextwv{next_weight_version}-ts{int(time.time() * 1000)}"
+
+    def _log_colocate_trace(self, stage: str, trace_id: str, **fields) -> None:
+        if not self._is_colocate:
+            return
+        payload = {
+            "stage": stage,
+            "trace_id": trace_id,
+            "rank": self.rank,
+            "local_rank": self.local_rank,
+            "global_step": self.global_step,
+            **self._cuda_debug_snapshot(),
+            **fields,
+        }
+        line = " ".join(f"{k}={v}" for k, v in payload.items())
+        logger.info(f"[COLOCATE_TRACE][Trainer] {line}")
+
     def _wait_validate_gate(self):
         """Block until validate-reuse gate allows proceeding."""
         while True:
@@ -347,69 +393,95 @@ class Trainer:
                 continue
             break
 
-    def _colocate_offload(self):
+    def _colocate_offload(self, trace_id: str):
         """Rank-0 calls offload_for_train, broadcasts errors to all ranks."""
         error = None
+        self._log_colocate_trace("offload_start", trace_id=trace_id)
         if self.rank == 0:
             try:
-                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=self._colocate_timeout_s))
+                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=self._colocate_timeout_s, trace_id=trace_id))
             except Exception as e:
                 logger.error(f"[Trainer rank=0] offload_for_train failed: {e}")
                 error = e
         error = self._broadcast_rank0_error(error)
         if error is not None:
+            self._log_colocate_trace("offload_failed", trace_id=trace_id, error=repr(error))
             raise error
+        self._log_colocate_trace("offload_done", trace_id=trace_id)
 
-    def _colocate_resume(self):
+    def _colocate_resume(self, trace_id: str):
         """Rank-0 calls resume_after_sync, broadcasts errors to all ranks."""
         error = None
+        self._log_colocate_trace("resume_start", trace_id=trace_id)
         if self.rank == 0:
             try:
-                ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=self._colocate_timeout_s))
+                ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=self._colocate_timeout_s, trace_id=trace_id))
             except Exception as e:
                 logger.error(f"[Trainer rank=0] resume_after_sync failed: {e}")
                 error = e
         error = self._broadcast_rank0_error(error)
         if error is not None:
+            self._log_colocate_trace("resume_failed", trace_id=trace_id, error=repr(error))
             raise error
+        self._log_colocate_trace("resume_done", trace_id=trace_id)
 
     @contextlib.contextmanager
-    def _colocate_offload_scope(self, label: str):
+    def _colocate_offload_scope(self, label: str, trace_id: str):
         """Ensure colocated rollout memory is resumed after offload."""
-        self._colocate_offload()
+        self._log_colocate_trace("offload_scope_enter", trace_id=trace_id, label=label)
+        self._colocate_offload(trace_id=trace_id)
         primary_error = None
         try:
             yield
         except Exception as e:
             primary_error = e
+            self._log_colocate_trace("offload_scope_error", trace_id=trace_id, label=label, error=repr(e))
             raise
         finally:
             try:
-                self._colocate_resume()
+                self._colocate_resume(trace_id=trace_id)
             except Exception as resume_error:
                 if primary_error is None:
                     raise
                 logger.error(f"[Trainer rank={self.rank}] resume_after_sync failed during {label} cleanup: {resume_error}")
+                self._log_colocate_trace("offload_scope_resume_error", trace_id=trace_id, label=label, error=repr(resume_error))
+            self._log_colocate_trace("offload_scope_exit", trace_id=trace_id, label=label)
 
-    def update_rollout_weight(self):
+    def update_rollout_weight(self, trace_id: str | None = None):
         """Sync trainer weights to rollout workers.
 
         In colocated mode the train loop manages offload/resume around this call.
         """
+        trace_id = trace_id or self._build_colocate_trace_id("sync", bump_weight_version=True)
         rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
-        self._sync_rollout_workers(rollout_workers)
+        self._sync_rollout_workers(rollout_workers, trace_id=trace_id)
 
-    def _sync_rollout_workers(self, rollout_workers, tensor_workers=None, bump_weight_version=True):
+    def _sync_rollout_workers(self, rollout_workers, tensor_workers=None, bump_weight_version=True, trace_id: str | None = None):
         assert self.param_sync is not None, "must setup param sync first"
+        trace_id = trace_id or self._build_colocate_trace_id("sync", bump_weight_version=bump_weight_version)
         tensor_workers = tensor_workers or []
         if not rollout_workers and not tensor_workers:
             return
+        sync_start = time.monotonic()
+        current_weight_version = int(getattr(self.param_sync, "weight_version", -1))
+        target_weight_version = self._next_weight_version_hint(bump_weight_version=bump_weight_version)
+        self._log_colocate_trace(
+            "sync_start",
+            trace_id=trace_id,
+            current_weight_version=current_weight_version,
+            target_weight_version=target_weight_version,
+            rollout_worker_count=len(rollout_workers),
+            tensor_worker_count=len(tensor_workers),
+            bump_weight_version=int(bool(bump_weight_version)),
+            backend=getattr(self.param_sync, "_sync_backend", "distributed"),
+        )
 
         # Load actor model to GPU before weight sync (needed when param_offload=True)
         if self.actor_worker._is_offload_param:
             from siirl.utils.megatron.megatron_utils import load_megatron_model_to_gpu
 
             load_megatron_model_to_gpu(self.actor_worker.actor_module, load_grad=False)
+            self._log_colocate_trace("sync_actor_loaded_to_gpu", trace_id=trace_id)
 
         # If rollout WEIGHTS were released, onload them before IPC update.
         # update_weights_from_tensor requires destination weights to be resident.
@@ -420,30 +492,44 @@ class Trainer:
             onload_error = None
             if self.rank == 0:
                 try:
-                    ray.get(self.rollout_manager.onload_weights_for_sync.remote(timeout_s=rpc_timeout_s))
+                    self._log_colocate_trace("sync_onload_weights_start", trace_id=trace_id, timeout_s=rpc_timeout_s)
+                    ray.get(self.rollout_manager.onload_weights_for_sync.remote(timeout_s=rpc_timeout_s, trace_id=trace_id))
                 except Exception as e:
                     logger.error(f"[Trainer rank=0] onload_weights_for_sync failed: {e}")
                     onload_error = e
             onload_error = self._broadcast_rank0_error(onload_error)
             if onload_error is not None:
+                self._log_colocate_trace("sync_onload_weights_failed", trace_id=trace_id, error=repr(onload_error))
                 raise onload_error
+            self._log_colocate_trace("sync_onload_weights_done", trace_id=trace_id, timeout_s=rpc_timeout_s)
 
         try:
             if isinstance(self.param_sync, ParamSyncDistributed):
                 if rollout_workers and any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
+                    self._log_colocate_trace("sync_setup_group_start", trace_id=trace_id)
                     self.param_sync.setup_param_sync_group(rollout_workers)
+                    self._log_colocate_trace("sync_setup_group_done", trace_id=trace_id)
                 self.param_sync.update_weights_mixed(
                     rollout_workers,
                     tensor_workers,
                     bump_weight_version=bump_weight_version,
+                    trace_id=trace_id,
                 )
             else:
                 self.param_sync.update_weights()
+            current_weight_version = int(getattr(self.param_sync, "weight_version", -1))
+            self._log_colocate_trace(
+                "sync_done",
+                trace_id=trace_id,
+                elapsed_ms=round((time.monotonic() - sync_start) * 1000, 2),
+                current_weight_version=current_weight_version,
+            )
         finally:
             # Ensure model is offloaded even on sync failure to avoid GPU memory leak
             if self.actor_worker._is_offload_param:
                 offload_megatron_model_to_cpu(self.actor_worker.actor_module)
                 get_torch_device().empty_cache()
+                self._log_colocate_trace("sync_actor_offloaded_to_cpu", trace_id=trace_id)
 
     def _get_regular_rollout_workers(self) -> list:
         if self.rollout_manager is None:
@@ -837,8 +923,9 @@ class Trainer:
             # generation so that a resumed checkpoint doesn't produce stale data.
             if self._is_colocate:
                 logger.info(f"[Trainer rank={self.rank}] Colocated bootstrap: syncing weights before first generation")
-                with self._colocate_offload_scope("bootstrap"):
-                    self.update_rollout_weight()
+                bootstrap_trace_id = self._build_colocate_trace_id("bootstrap", bump_weight_version=True)
+                with self._colocate_offload_scope("bootstrap", trace_id=bootstrap_trace_id):
+                    self.update_rollout_weight(trace_id=bootstrap_trace_id)
             while True:
                 # Check stop signal
                 if self._check_should_stop():
@@ -879,11 +966,15 @@ class Trainer:
                                 time.sleep(TRAIN_NO_BATCH_BACKOFF_S)
 
                     self._wait_validate_gate()
-                    with self._colocate_offload_scope(f"step={self.global_step}"):
+                    step_trace_id = self._build_colocate_trace_id("step", bump_weight_version=True)
+                    self._log_colocate_trace("step_pipeline_start", trace_id=step_trace_id)
+                    with self._colocate_offload_scope(f"step={self.global_step}", trace_id=step_trace_id):
                         self.train_step(batch_data)
+                        self._log_colocate_trace("step_train_done", trace_id=step_trace_id)
 
                         with Timer("weight_sync") as weight_sync_timer:
-                            self.update_rollout_weight()
+                            self.update_rollout_weight(trace_id=step_trace_id)
+                    self._log_colocate_trace("step_pipeline_done", trace_id=step_trace_id)
                 else:
                     # Separated: sync -> generate -> get_batch -> train (original order)
                     with Timer("weight_sync") as weight_sync_timer:

@@ -340,6 +340,7 @@ class ParamSyncDistributed(ParamSyncInterface):
         rollout_workers: Sequence[ActorHandle],
         tensor_rollout_workers: Sequence[ActorHandle] | None = None,
         bump_weight_version: bool = True,
+        trace_id: str | None = None,
     ) -> None:
         if self.param_sync_unhealthy:
             raise RuntimeError("Param sync group is unhealthy; refusing to sync rollout weights")
@@ -467,6 +468,7 @@ class ParamSyncColocated(ParamSyncDistributed):
         self._fallback_to_tensor = True
         self._max_sync_retries = self._MAX_SYNC_RETRIES
         self._tensor_path_logged = False
+        self._trace_id = ""
         self._refresh_sync_context()
 
     def _resolve_sync_backend(self) -> str:
@@ -507,6 +509,7 @@ class ParamSyncColocated(ParamSyncDistributed):
         merged = {
             "group": self._group_name,
             "stage": stage,
+            "trace_id": self._trace_id or "na",
             "backend": self._sync_backend,
             "weight_version": self.weight_version,
             **mem,
@@ -589,7 +592,15 @@ class ParamSyncColocated(ParamSyncDistributed):
             reclaimable / (1024**3),
         )
 
-    def _sync_ipc_bucket_with_retry(self, serialized_named_tensors: list[bytes], timeout_s: int) -> None:
+    def _sync_ipc_bucket_with_retry(
+        self,
+        serialized_named_tensors: list[bytes],
+        timeout_s: int,
+        *,
+        bucket_idx: int,
+        part_idx: int,
+        part_count: int,
+    ) -> None:
         retry_limit = self._max_sync_retries
         for attempt in range(1, retry_limit + 2):
             refs = [
@@ -598,17 +609,36 @@ class ParamSyncColocated(ParamSyncDistributed):
                     flush_cache=False,
                     weight_version=str(self.weight_version),
                     load_format="flattened_bucket",
+                    trace_id=self._trace_id,
+                    bucket_idx=bucket_idx,
+                    part_idx=part_idx,
+                    part_count=part_count,
                 )
                 for worker in self.rollout_workers
             ]
             try:
                 ray.get(refs, timeout=timeout_s)
+                self._log_colocate_mem_debug(
+                    stage="bucket_ipc_part_sync_done",
+                    bucket_idx=bucket_idx,
+                    part_idx=part_idx,
+                    part_count=part_count,
+                    attempt=attempt,
+                    ref_count=len(refs),
+                )
                 return
             except Exception:
                 if attempt > retry_limit:
                     logger.error(
                         f"[{self._group_name}] IPC bucket sync failed after retries. retry_limit={retry_limit}\n"
                         f"{traceback.format_exc()}"
+                    )
+                    self._log_colocate_mem_debug(
+                        stage="bucket_ipc_part_sync_failed",
+                        bucket_idx=bucket_idx,
+                        part_idx=part_idx,
+                        part_count=part_count,
+                        attempt=attempt,
                     )
                     raise
                 logger.warning(f"[{self._group_name}] IPC bucket sync retry {attempt}/{retry_limit} after failure")
@@ -635,21 +665,26 @@ class ParamSyncColocated(ParamSyncDistributed):
             tensor_mb=round(tensor_bytes / (1024**2), 2),
             timeout_s=timeout_s,
         )
+        rpc_start = time.monotonic()
         refs = update_weights_from_tensor(
             self.weight_version,
             self.rollout_workers,
             converted_named_tensors,
             self.config.rollout.tensor_model_parallel_size,
+            trace_id=self._trace_id,
+            bucket_idx=bucket_idx,
         )
         if refs:
             ray.get(refs, timeout=timeout_s)
             self._record_sync_bucket()
+        rpc_elapsed_ms = (time.monotonic() - rpc_start) * 1000
         self._log_colocate_mem_debug(
             stage="bucket_tensor_after_sync",
             bucket_idx=bucket_idx,
             param_count=len(converted_named_tensors),
             tensor_mb=round(tensor_bytes / (1024**2), 2),
             ref_count=len(refs),
+            rpc_elapsed_ms=round(rpc_elapsed_ms, 2),
         )
         converted_named_tensors.clear()
         if pbar is not None:
@@ -672,6 +707,7 @@ class ParamSyncColocated(ParamSyncDistributed):
         rollout_workers: Sequence[ActorHandle],
         tensor_rollout_workers: Sequence[ActorHandle] | None = None,
         bump_weight_version: bool = True,
+        trace_id: str | None = None,
     ) -> None:
         """Colocated weight sync: skip NCCL, skip pause/flush/continue.
 
@@ -699,6 +735,8 @@ class ParamSyncColocated(ParamSyncDistributed):
         sync_success = False
         self._current_sync_bucket_count = 0
         try:
+            target_weight_version = self.weight_version + (1 if bump_weight_version else 0)
+            self._trace_id = trace_id or (f"auto-step{target_weight_version}-rank{dist.get_rank()}-ts{int(time.time() * 1000)}")
             if bump_weight_version:
                 self.weight_version += 1
             self._log_colocate_mem_debug(
@@ -740,6 +778,7 @@ class ParamSyncColocated(ParamSyncDistributed):
             )
             self._compact_cuda_cache(stage="step_end", force=True)
             self._log_colocate_mem_debug(stage="after_step_compact")
+            self._trace_id = ""
 
     def _update_bucket_weights(
         self,
@@ -781,9 +820,15 @@ class ParamSyncColocated(ParamSyncDistributed):
             )
             try:
                 t0 = time.monotonic()
-                for part in serialized_parts:
+                for part_idx, part in enumerate(serialized_parts, start=1):
                     serialized_named_tensors = [part for _ in range(tp_size)]
-                    self._sync_ipc_bucket_with_retry(serialized_named_tensors, timeout_s=timeout_s)
+                    self._sync_ipc_bucket_with_retry(
+                        serialized_named_tensors,
+                        timeout_s=timeout_s,
+                        bucket_idx=bucket_idx,
+                        part_idx=part_idx,
+                        part_count=len(serialized_parts),
+                    )
                     self._record_sync_bucket()
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 logger.debug(f"[{self._group_name}] IPC bucket sync: {len(converted_named_tensors)} params, {elapsed_ms:.1f}ms")
@@ -911,18 +956,25 @@ def update_weights_from_tensor(
     rollout_workers: Sequence[ActorHandle],
     converted_named_tensors: Sequence[tuple[str, torch.Tensor]],
     tensor_model_parallel_size: int,
+    trace_id: str | None = None,
+    bucket_idx: int | None = None,
 ) -> list[ray.ObjectRef]:
     if not rollout_workers:
         return []
 
+    trace_id = trace_id or "na"
+    serialize_start = time.monotonic()
     before = _cuda_memory_snapshot()
     serialized_bucket = serialize_named_tensors(converted_named_tensors)
     after = _cuda_memory_snapshot()
+    serialize_elapsed_ms = (time.monotonic() - serialize_start) * 1000
     logger.info(
-        "{} stage=tensor_serialize weight_version={} worker_count={} param_count={} payload_mb={} "
+        "{} stage=tensor_serialize trace_id={} bucket_idx={} weight_version={} worker_count={} param_count={} payload_mb={} "
         "before_allocated_gb={} after_allocated_gb={} before_reserved_gb={} after_reserved_gb={} "
-        "before_shared_cache_len={} after_shared_cache_len={}",
+        "before_shared_cache_len={} after_shared_cache_len={} serialize_elapsed_ms={}",
         COLOCATE_MEM_DEBUG_PREFIX,
+        trace_id,
+        bucket_idx if bucket_idx is not None else -1,
         weight_version,
         len(rollout_workers),
         len(converted_named_tensors),
@@ -933,16 +985,32 @@ def update_weights_from_tensor(
         after.get("reserved_gb"),
         before.get("shared_cache_len"),
         after.get("shared_cache_len"),
+        round(serialize_elapsed_ms, 2),
     )
     serialized_named_tensors = [serialized_bucket for _ in range(max(1, tensor_model_parallel_size))]
-    return [
+    refs = [
         worker.param_sync_from_tensor.remote(
             serialized_named_tensors=serialized_named_tensors,
             flush_cache=False,
             weight_version=str(weight_version),
+            trace_id=trace_id,
+            bucket_idx=bucket_idx,
+            part_idx=1,
+            part_count=1,
         )
         for worker in rollout_workers
     ]
+    logger.info(
+        "{} stage=tensor_dispatch trace_id={} bucket_idx={} weight_version={} ref_count={} fanout={} payload_mb={}",
+        COLOCATE_MEM_DEBUG_PREFIX,
+        trace_id,
+        bucket_idx if bucket_idx is not None else -1,
+        weight_version,
+        len(refs),
+        max(1, tensor_model_parallel_size),
+        round(len(serialized_bucket) / (1024**2), 2),
+    )
+    return refs
 
 
 def serialize_named_tensors(named_tensors: Sequence[tuple[str, torch.Tensor]]) -> str:

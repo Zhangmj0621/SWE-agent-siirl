@@ -463,7 +463,7 @@ class RolloutManager:
                 result.append(self.worker_handle[worker_idx])
         return result
 
-    def offload_for_train(self, timeout_s: int = 120):
+    def offload_for_train(self, timeout_s: int = 120, trace_id: str | None = None):
         """Release rollout GPU memory before trainer loads model.
 
         Idempotent: repeated calls while already offloaded are no-ops.
@@ -472,8 +472,9 @@ class RolloutManager:
         """
         from loguru import logger
 
+        trace_id = trace_id or "na"
         if self._train_offloaded:
-            logger.debug("[RolloutManager] offload_for_train: already offloaded, skipping")
+            logger.debug(f"[RolloutManager] offload_for_train: already offloaded, skipping trace_id={trace_id}")
             return
 
         tp0_workers = self.get_rollout_worker_on_tp0()
@@ -484,7 +485,10 @@ class RolloutManager:
         tags = ["kv_cache"]
         if offload_weights:
             tags.append("weights")
-        logger.info(f"[RolloutManager] offload_for_train: releasing {tags} on {len(tp0_workers)} TP0 workers")
+        logger.info(
+            f"[RolloutManager] offload_for_train: releasing {tags} on {len(tp0_workers)} TP0 workers "
+            f"trace_id={trace_id} timeout_s={timeout_s}"
+        )
         t0 = time.monotonic()
         pause_succeeded = False
         try:
@@ -498,15 +502,28 @@ class RolloutManager:
                 with contextlib.suppress(Exception):
                     ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
             logger.error("[RolloutManager] offload_for_train failed\n" + traceback.format_exc())
-            self._log_worker_debug_states(tp0_workers, timeout_s=min(5, timeout_s), phase="offload_for_train", tag=",".join(tags))
+            self._log_worker_debug_states(
+                tp0_workers,
+                timeout_s=min(5, timeout_s),
+                phase="offload_for_train",
+                tag=f"{','.join(tags)} trace_id={trace_id}",
+            )
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.info(f"[RolloutManager] offload_for_train completed in {elapsed_ms:.1f}ms")
+        logger.info(f"[RolloutManager] offload_for_train completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
+        self._log_worker_debug_states(
+            tp0_workers,
+            timeout_s=min(5, timeout_s),
+            phase="offload_for_train",
+            tag=f"post_success trace_id={trace_id}",
+            level="info",
+        )
 
-    def onload_weights_for_sync(self, timeout_s: int = 120):
+    def onload_weights_for_sync(self, timeout_s: int = 120, trace_id: str | None = None):
         """Ensure weights are resident before IPC weight update in colocated mode."""
         from loguru import logger
 
+        trace_id = trace_id or "na"
         if not bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False)):
             return
         if getattr(self, "_weights_onloaded_for_sync", False):
@@ -516,17 +533,32 @@ class RolloutManager:
         if not tp0_workers:
             return
 
-        logger.info(f"[RolloutManager] onload_weights_for_sync: resuming weights on {len(tp0_workers)} TP0 workers")
+        logger.info(
+            f"[RolloutManager] onload_weights_for_sync: resuming weights on {len(tp0_workers)} TP0 workers "
+            f"trace_id={trace_id} timeout_s={timeout_s}"
+        )
         t0 = time.monotonic()
         try:
             ray.get([w.onload_memory.remote(["weights"]) for w in tp0_workers], timeout=timeout_s)
             self._weights_onloaded_for_sync = True
         except Exception:
             logger.error("[RolloutManager] onload_weights_for_sync failed\n" + traceback.format_exc())
-            self._log_worker_debug_states(tp0_workers, timeout_s=min(5, timeout_s), phase="onload_weights_for_sync", tag="weights")
+            self._log_worker_debug_states(
+                tp0_workers,
+                timeout_s=min(5, timeout_s),
+                phase="onload_weights_for_sync",
+                tag=f"weights trace_id={trace_id}",
+            )
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.info(f"[RolloutManager] onload_weights_for_sync completed in {elapsed_ms:.1f}ms")
+        logger.info(f"[RolloutManager] onload_weights_for_sync completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
+        self._log_worker_debug_states(
+            tp0_workers,
+            timeout_s=min(5, timeout_s),
+            phase="onload_weights_for_sync",
+            tag=f"post_success trace_id={trace_id}",
+            level="info",
+        )
 
     def _wait_with_diagnostics(
         self,
@@ -577,7 +609,7 @@ class RolloutManager:
             f"did not complete within {timeout_s}s ({', '.join(stuck)})"
         )
 
-    def _log_worker_debug_states(self, workers: list, *, timeout_s: int, phase: str, tag: str):
+    def _log_worker_debug_states(self, workers: list, *, timeout_s: int, phase: str, tag: str, level: str = "error"):
         from loguru import logger
 
         if not workers:
@@ -627,14 +659,24 @@ class RolloutManager:
                     repr(e),
                 )
                 continue
-            logger.error(
-                "[COLOCATE_DEBUG][RolloutManager] worker debug state phase={} tag={} worker_idx={} url={} state={}",
-                phase,
-                tag,
-                idx,
-                url,
-                state,
-            )
+            if level == "info":
+                logger.info(
+                    "[COLOCATE_DEBUG][RolloutManager] worker debug state phase={} tag={} worker_idx={} url={} state={}",
+                    phase,
+                    tag,
+                    idx,
+                    url,
+                    state,
+                )
+            else:
+                logger.error(
+                    "[COLOCATE_DEBUG][RolloutManager] worker debug state phase={} tag={} worker_idx={} url={} state={}",
+                    phase,
+                    tag,
+                    idx,
+                    url,
+                    state,
+                )
 
         for ref in pending:
             idx, url = ref_meta.get(ref, (-1, "unknown"))
@@ -647,7 +689,7 @@ class RolloutManager:
                 timeout_s,
             )
 
-    def resume_after_sync(self, timeout_s: int = 120):
+    def resume_after_sync(self, timeout_s: int = 120, trace_id: str | None = None):
         """Resume rollout GPU memory after weight sync.
 
         Idempotent: repeated calls while not offloaded are no-ops.
@@ -655,8 +697,9 @@ class RolloutManager:
         """
         from loguru import logger
 
+        trace_id = trace_id or "na"
         if not self._train_offloaded:
-            logger.debug("[RolloutManager] resume_after_sync: not offloaded, skipping")
+            logger.debug(f"[RolloutManager] resume_after_sync: not offloaded, skipping trace_id={trace_id}")
             return
 
         tp0_workers = self.get_rollout_worker_on_tp0()
@@ -666,24 +709,50 @@ class RolloutManager:
         t0 = time.monotonic()
         try:
             if offload_weights and not getattr(self, "_weights_onloaded_for_sync", False):
-                logger.info(f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers")
+                logger.info(
+                    f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}"
+                )
                 refs = [w.onload_memory.remote(["weights"]) for w in tp0_workers]
-                self._wait_with_diagnostics(refs, tp0_workers, timeout_s=timeout_s, phase="resume_after_sync", tag="weights")
+                self._wait_with_diagnostics(
+                    refs,
+                    tp0_workers,
+                    timeout_s=timeout_s,
+                    phase="resume_after_sync",
+                    tag=f"weights trace_id={trace_id}",
+                )
 
-            logger.info(f"[RolloutManager] resume_after_sync: resuming kv_cache on {len(tp0_workers)} TP0 workers")
+            logger.info(f"[RolloutManager] resume_after_sync: resuming kv_cache on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}")
             refs = [w.onload_memory.remote(["kv_cache"]) for w in tp0_workers]
-            self._wait_with_diagnostics(refs, tp0_workers, timeout_s=timeout_s, phase="resume_after_sync", tag="kv_cache")
+            self._wait_with_diagnostics(
+                refs,
+                tp0_workers,
+                timeout_s=timeout_s,
+                phase="resume_after_sync",
+                tag=f"kv_cache trace_id={trace_id}",
+            )
 
             ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
             self._train_offloaded = False
         except Exception:
             logger.error("[RolloutManager] resume_after_sync failed\n" + traceback.format_exc())
-            self._log_worker_debug_states(tp0_workers, timeout_s=min(5, timeout_s), phase="resume_after_sync", tag="exception")
+            self._log_worker_debug_states(
+                tp0_workers,
+                timeout_s=min(5, timeout_s),
+                phase="resume_after_sync",
+                tag=f"exception trace_id={trace_id}",
+            )
             raise
         finally:
             self._weights_onloaded_for_sync = False
         elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.info(f"[RolloutManager] resume_after_sync completed in {elapsed_ms:.1f}ms")
+        logger.info(f"[RolloutManager] resume_after_sync completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
+        self._log_worker_debug_states(
+            tp0_workers,
+            timeout_s=min(5, timeout_s),
+            phase="resume_after_sync",
+            tag=f"post_success trace_id={trace_id}",
+            level="info",
+        )
 
     def get_validate_reuse_sync_workers(self, trainer_rank: int):
         if not self._validate_reuse_coordinator.sync_required:
