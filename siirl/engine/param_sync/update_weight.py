@@ -67,15 +67,30 @@ def _serialize_bucket_ipc(
 
     serialized: list[bytes] = []
     long_lived_buckets: list[dict[str, object]] = []
-    for _dtype_key, tensors in groups.items():
+    for dtype_key, tensors in groups.items():
         bucket = FlattenedTensorBucket(named_tensors=tensors)
+        flattened_tensor = bucket.get_flattened_tensor()
+        metadata = bucket.get_metadata()
         flattened_data = {
-            "flattened_tensor": bucket.get_flattened_tensor(),
-            "metadata": bucket.get_metadata(),
+            "flattened_tensor": flattened_tensor,
+            "metadata": metadata,
         }
         long_lived_buckets.append(flattened_data)
         # output_str=False -> bytes with CUDA IPC handle (no base64 overhead)
-        serialized.append(MultiprocessingSerializer.serialize(flattened_data, output_str=False))
+        serialized_part = MultiprocessingSerializer.serialize(flattened_data, output_str=False)
+        serialized.append(serialized_part)
+        logger.info(
+            "{} stage=ipc_group_serialize dtype={} tensor_count={} tensor_mb={} flattened_dtype={} "
+            "flattened_mb={} metadata_items={} serialized_bytes={}",
+            COLOCATE_MEM_DEBUG_PREFIX,
+            str(dtype_key),
+            len(tensors),
+            round(_tensor_bytes(tensors) / (1024**2), 2),
+            str(getattr(flattened_tensor, "dtype", "unknown")),
+            round((flattened_tensor.numel() * flattened_tensor.element_size()) / (1024**2), 2),
+            len(metadata) if hasattr(metadata, "__len__") else -1,
+            len(serialized_part),
+        )
     return serialized, long_lived_buckets
 
 
@@ -405,8 +420,18 @@ class ParamSyncDistributed(ParamSyncInterface):
     ):
         if not self._is_pp_src_rank:
             return buffer_size
+        buffer_limit = self.config.trainer.param_sync_buffer_size
         param_size = param.numel() * param.element_size()
-        if buffer_size + param_size > self.config.trainer.param_sync_buffer_size:
+        if param_size > buffer_limit:
+            self._log_colocate_mem_debug(
+                stage="bucket_single_param_exceeds_limit",
+                incoming_param=name,
+                incoming_mb=round(param_size / (1024**2), 2),
+                buffer_limit_mb=round(buffer_limit / (1024**2), 2),
+                buffered_params=len(converted_named_tensors),
+                buffered_mb=round(buffer_size / (1024**2), 2),
+            )
+        if buffer_size + param_size > buffer_limit:
             self._log_colocate_mem_debug(
                 stage="bucket_flush_trigger",
                 next_bucket_idx=self._current_sync_bucket_count + 1,
@@ -414,6 +439,7 @@ class ParamSyncDistributed(ParamSyncInterface):
                 buffered_mb=round(buffer_size / (1024**2), 2),
                 incoming_param=name,
                 incoming_mb=round(param_size / (1024**2), 2),
+                buffer_limit_mb=round(buffer_limit / (1024**2), 2),
             )
             self._update_bucket_weights(converted_named_tensors, pbar=pbar)
             buffer_size = 0
@@ -602,7 +628,21 @@ class ParamSyncColocated(ParamSyncDistributed):
         part_count: int,
     ) -> None:
         retry_limit = self._max_sync_retries
+        payload_bytes = (
+            len(serialized_named_tensors[0])
+            if serialized_named_tensors and isinstance(serialized_named_tensors[0], (bytes, bytearray, str))
+            else -1
+        )
         for attempt in range(1, retry_limit + 2):
+            self._log_colocate_mem_debug(
+                stage="bucket_ipc_part_dispatch",
+                bucket_idx=bucket_idx,
+                part_idx=part_idx,
+                part_count=part_count,
+                attempt=attempt,
+                worker_count=len(self.rollout_workers),
+                payload_bytes=payload_bytes,
+            )
             refs = [
                 worker.param_sync_from_tensor.remote(
                     serialized_named_tensors=serialized_named_tensors,
@@ -629,6 +669,19 @@ class ParamSyncColocated(ParamSyncDistributed):
                 return
             except Exception:
                 if attempt > retry_limit:
+                    worker_alive = worker_dead = 0
+                    exitcodes: list[int | None] = []
+                    debug_error = ""
+                    try:
+                        states = ray.get([worker.get_debug_state.remote() for worker in self.rollout_workers], timeout=5)
+                        for state in states:
+                            if state.get("engine_alive"):
+                                worker_alive += 1
+                            else:
+                                worker_dead += 1
+                            exitcodes.append(state.get("engine_exitcode"))
+                    except Exception as e:
+                        debug_error = repr(e)
                     logger.error(
                         f"[{self._group_name}] IPC bucket sync failed after retries. retry_limit={retry_limit}\n"
                         f"{traceback.format_exc()}"
@@ -639,6 +692,11 @@ class ParamSyncColocated(ParamSyncDistributed):
                         part_idx=part_idx,
                         part_count=part_count,
                         attempt=attempt,
+                        payload_bytes=payload_bytes,
+                        worker_alive=worker_alive,
+                        worker_dead=worker_dead,
+                        worker_exitcodes=exitcodes,
+                        worker_debug_error=debug_error,
                     )
                     raise
                 logger.warning(f"[{self._group_name}] IPC bucket sync retry {attempt}/{retry_limit} after failure")
@@ -801,6 +859,19 @@ class ParamSyncColocated(ParamSyncDistributed):
             tensor_mb=round(tensor_bytes / (1024**2), 2),
             timeout_s=timeout_s,
         )
+        if converted_named_tensors:
+            largest_name, largest_param = max(
+                converted_named_tensors,
+                key=lambda kv: kv[1].numel() * kv[1].element_size(),
+            )
+            self._log_colocate_mem_debug(
+                stage="bucket_param_summary",
+                bucket_idx=bucket_idx,
+                first_param=converted_named_tensors[0][0],
+                last_param=converted_named_tensors[-1][0],
+                largest_param=largest_name,
+                largest_param_mb=round((largest_param.numel() * largest_param.element_size()) / (1024**2), 2),
+            )
 
         if not self._using_flattened_bucket():
             self._sync_bucket_with_tensor_path(converted_named_tensors, timeout_s=timeout_s, pbar=pbar)
@@ -810,12 +881,16 @@ class ParamSyncColocated(ParamSyncDistributed):
             tp_size = max(1, self.config.rollout.tensor_model_parallel_size)
             serialized_parts, long_lived_buckets = _serialize_bucket_ipc(converted_named_tensors)
             payload_mb = round(sum(len(part) for part in serialized_parts) / (1024**2), 2)
+            part_bytes = [len(part) for part in serialized_parts]
             self._log_colocate_mem_debug(
                 stage="bucket_after_ipc_serialize",
                 bucket_idx=bucket_idx,
                 param_count=len(converted_named_tensors),
                 part_count=len(serialized_parts),
                 payload_mb=payload_mb,
+                payload_bytes_total=sum(part_bytes),
+                payload_bytes_min=min(part_bytes) if part_bytes else 0,
+                payload_bytes_max=max(part_bytes) if part_bytes else 0,
                 tp_size=tp_size,
             )
             try:
