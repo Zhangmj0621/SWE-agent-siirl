@@ -463,6 +463,53 @@ class RolloutManager:
                 result.append(self.worker_handle[worker_idx])
         return result
 
+    def get_colocate_topology_snapshot(self) -> dict:
+        """Return stable topology payload for colocated route planning."""
+        import hashlib
+        import json
+        from urllib.parse import urlparse
+
+        # Derive node ranks from TP0 worker endpoint hosts.
+        tp_group_host: dict[int, str | None] = {}
+        for tp_group_idx, url in enumerate(self.worker_urls):
+            host = None
+            if isinstance(url, str) and url:
+                parsed = urlparse(url)
+                host = parsed.hostname or None
+            tp_group_host[tp_group_idx] = host
+
+        unique_hosts = sorted({h for h in tp_group_host.values() if h is not None})
+        host_to_node_rank = {host: idx for idx, host in enumerate(unique_hosts)}
+        nnodes = max(1, len(unique_hosts))
+
+        workers = []
+        for worker_idx, _worker in enumerate(self.worker_handle):
+            tp_group_local_rank = worker_idx % self.rollout_per_tp_group
+            tp_group_idx = worker_idx // self.rollout_per_tp_group
+            host = tp_group_host.get(tp_group_idx)
+            workers.append(
+                {
+                    "worker_idx": worker_idx,
+                    "tp_group_idx": tp_group_idx,
+                    "tp_group_local_rank": tp_group_local_rank,
+                    "node_rank": host_to_node_rank.get(host, -1),
+                    "nnodes": nnodes,
+                    "is_tp0": (tp_group_local_rank == 0),
+                    # URL is only set for TP0 workers.
+                    "url": self.worker_urls[tp_group_idx] if tp_group_local_rank == 0 and tp_group_idx < len(self.worker_urls) else None,
+                }
+            )
+
+        snapshot = {
+            "num_workers": self.num_workers,
+            "num_tp_groups": self.num_tp_groups,
+            "rollout_per_tp_group": self.rollout_per_tp_group,
+            "tp_size": self.tp_size,
+            "workers": workers,
+        }
+        snapshot["topology_hash"] = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[:16]
+        return snapshot
+
     def offload_for_train(self, timeout_s: int = 120, trace_id: str | None = None):
         """Release rollout GPU memory before trainer loads model.
 

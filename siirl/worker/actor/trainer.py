@@ -304,6 +304,16 @@ class Trainer:
         )
         init_gloo_group()
         logger.info(f"[Trainer rank={self.rank}] param_sync={cls.__name__} (colocate={self.config.trainer.colocate})")
+
+        # For colocated mode, fetch topology snapshot and pass to setup
+        if self.config.trainer.colocate and isinstance(self.param_sync, ParamSyncColocated):
+            rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
+            rollout_topology = ray.get(self.rollout_manager.get_colocate_topology_snapshot.remote())
+            self.param_sync.setup_param_sync_group(rollout_workers, rollout_topology=rollout_topology)
+        else:
+            rollout_workers = ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote())
+            self.param_sync.setup_param_sync_group(rollout_workers)
+
         self._maybe_init_validate_reuse_sync()
 
     def _broadcast_rank0_error(self, local_error: Exception | None) -> Exception | None:

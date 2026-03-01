@@ -20,6 +20,7 @@ from siirl.params.training_args import SiiRLArguments
 from siirl.utils.distributed_utils import get_gloo_group, init_process_group
 
 from . import mbridge_patch  # noqa: F401
+from .route_model import LaneRoute, RoutePlan, compute_route_plan, is_lane_leader, is_lane_participant, validate_route_plan
 
 COLOCATE_MEM_DEBUG_PREFIX = "[COLOCATE_MEM_DEBUG]"
 
@@ -482,7 +483,15 @@ class ParamSyncDistributed(ParamSyncInterface):
 
 
 class ParamSyncColocated(ParamSyncDistributed):
-    """Colocated weight sync uses IPC handles and skips NCCL group setup."""
+    """Colocated weight sync using topology-aware lane routing.
+
+    Flattened backend:
+    - Each lane maps to one TP0 rollout worker.
+    - Each source rank only syncs its colocated lane payload.
+    - Lane leader performs one RPC per bucket part.
+
+    Tensor backend keeps legacy rank0 sender behavior.
+    """
 
     _SUPPORTED_BACKENDS = {"tensor", "flattened_bucket"}
     _MAX_SYNC_RETRIES = 2
@@ -491,10 +500,19 @@ class ParamSyncColocated(ParamSyncDistributed):
     def __init__(self, config: SiiRLArguments, model: Sequence[torch.nn.Module], bridge: Bridge):
         super().__init__(config, model, bridge)
         self._sync_backend = self._resolve_sync_backend()
-        self._fallback_to_tensor = True
         self._max_sync_retries = self._MAX_SYNC_RETRIES
         self._tensor_path_logged = False
         self._trace_id = ""
+        # Route plan for lane-based dispatch.
+        self._route_plan: RoutePlan | None = None
+        self._route_source_ranks: set[int] = set()
+        self._route_epoch = 0
+        # IPC gather group for my lane (created once during setup).
+        self._ipc_gather_group = None
+        self._ipc_gather_src = -1
+        self._ipc_group_ready = False
+        # Cached TP size from rollout config.
+        self._tp_size = max(1, int(getattr(config.rollout, "tensor_model_parallel_size", 1)))
         self._refresh_sync_context()
 
     def _resolve_sync_backend(self) -> str:
@@ -516,20 +534,28 @@ class ParamSyncColocated(ParamSyncDistributed):
     def _using_flattened_bucket(self) -> bool:
         return self._sync_backend == "flattened_bucket"
 
-    def _switch_backend_to_tensor(self, reason: str) -> None:
-        if self._sync_backend == "tensor":
-            return
-        self._sync_backend = "tensor"
-        self._tensor_path_logged = False
-        logger.warning(f"[{self._group_name}] Switched colocated param sync backend to tensor. reason={reason}")
+    def _should_enter_bucket_sync(self) -> bool:
+        """Determine whether this rank should build/sync flattened buckets.
+
+        Rules:
+        - Tensor backend: keep legacy sender behavior (_is_pp_src_rank only).
+        - Flattened backend with route plan: rank must belong to route source ranks.
+        - Flattened backend without route plan: legacy sender behavior.
+        """
+        if not self._using_flattened_bucket():
+            return self._is_pp_src_rank
+        if self._route_plan is not None:
+            return dist.get_rank() in self._route_source_ranks
+        return self._is_pp_src_rank
 
     def _refresh_sync_context(self):
         self._is_pp_src_rank = mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         self._group_name = f"param_sync_colocated-pp_{pp_rank}"
+        self._tp_size = max(1, int(getattr(self.config.rollout, "tensor_model_parallel_size", 1)))
 
     def _log_colocate_mem_debug(self, stage: str, **fields) -> None:
-        if not self._is_pp_src_rank:
+        if not self._should_enter_bucket_sync() and not self._is_pp_src_rank:
             return
         mem = _cuda_memory_snapshot()
         merged = {
@@ -538,6 +564,7 @@ class ParamSyncColocated(ParamSyncDistributed):
             "trace_id": self._trace_id or "na",
             "backend": self._sync_backend,
             "weight_version": self.weight_version,
+            "rank": dist.get_rank(),
             **mem,
             **fields,
         }
@@ -546,7 +573,7 @@ class ParamSyncColocated(ParamSyncDistributed):
 
     def _clear_shared_cache(self) -> None:
         """Evict CUDA IPC handles so their pinned GPU storage can be reclaimed."""
-        if not self._is_pp_src_rank:
+        if not self._should_enter_bucket_sync() and not self._is_pp_src_rank:
             return
         cache_len_before = _shared_cache_len()
         cleared_entries = 0
@@ -600,7 +627,7 @@ class ParamSyncColocated(ParamSyncDistributed):
         )
 
     def _compact_cuda_cache(self, stage: str, *, force: bool = False) -> None:
-        if not self._is_pp_src_rank or not torch.cuda.is_available():
+        if (not self._should_enter_bucket_sync() and not self._is_pp_src_rank) or not torch.cuda.is_available():
             return
         gc.collect()
         device = torch.cuda.current_device()
@@ -749,7 +776,174 @@ class ParamSyncColocated(ParamSyncDistributed):
             pbar.update(1)
         self._compact_cuda_cache(stage="bucket_tensor")
 
-    def setup_param_sync_group(self, rollout_workers: Sequence[ActorHandle]):
+    # ==========================================================================
+    # Route Plan Building (for lane-based dispatch)
+    # ==========================================================================
+
+    def _build_colocate_route_plan(self, rollout_topology: dict) -> RoutePlan:
+        """Build and validate the colocated route plan."""
+        plan = compute_route_plan(
+            rollout_topology=rollout_topology,
+            rollout_workers=self.rollout_workers,
+            config_tp_size=self._tp_size,
+            route_epoch=self._route_epoch + 1,
+        )
+        validate_route_plan(plan, self._group_name)
+        self._route_epoch = plan.route_epoch
+        self._route_source_ranks = {rank for lane in plan.lanes for rank in lane.source_ranks}
+        return plan
+
+    def _ensure_ipc_gather_groups(self, plan: RoutePlan) -> None:
+        """Create one gloo gather group per lane (TP>1 only)."""
+        if self._ipc_group_ready:
+            return
+
+        if plan.tp_size == 1:
+            self._ipc_group_ready = True
+            self._log_colocate_mem_debug(
+                stage="ipc_gather_groups_skipped",
+                reason="tp_size=1, no gather needed",
+            )
+            return
+
+        my_rank = dist.get_rank()
+        for lane in plan.lanes:
+            group = dist.new_group(ranks=lane.source_ranks, backend="gloo")
+            if my_rank in lane.source_ranks:
+                if self._ipc_gather_group is not None:
+                    raise RuntimeError(f"[{self._group_name}] rank={my_rank} belongs to multiple lanes; invalid route plan")
+                self._ipc_gather_group = group
+                self._ipc_gather_src = lane.leader_rank
+
+        if my_rank in self._route_source_ranks and self._ipc_gather_group is None:
+            raise RuntimeError(f"[{self._group_name}] rank={my_rank} is route participant but has no IPC gather group")
+
+        self._ipc_group_ready = True
+        self._log_colocate_mem_debug(
+            stage="ipc_gather_groups_created",
+            tp_size=plan.tp_size,
+            ipc_gather_src=self._ipc_gather_src,
+        )
+
+    def _gather_lane_payload(self, lane: LaneRoute, local_payload: bytes) -> list[bytes] | None:
+        """Gather payloads from all source ranks to leader rank via gloo."""
+        my_rank = dist.get_rank()
+
+        if len(lane.source_ranks) == 1:
+            if my_rank == lane.leader_rank:
+                return [local_payload]
+            return None
+
+        if self._ipc_gather_group is None:
+            raise RuntimeError(f"[{self._group_name}] IPC gather group not initialized for TP>1 lane")
+
+        if my_rank == lane.leader_rank:
+            gathered: list[bytes | None] = [None] * len(lane.source_ranks)
+        else:
+            gathered = None
+
+        dist.gather_object(
+            local_payload,
+            object_gather_list=gathered,
+            dst=lane.leader_rank,
+            group=self._ipc_gather_group,
+        )
+
+        if my_rank != lane.leader_rank:
+            return None
+
+        if gathered is None or any(item is None for item in gathered):
+            raise RuntimeError(f"lane gather returned incomplete data for leader rank={lane.leader_rank}")
+        return [item for item in gathered if item is not None]
+
+    def _sync_flattened_bucket_by_lanes(
+        self,
+        plan: RoutePlan,
+        bucket_idx: int,
+        part_idx: int,
+        part_count: int,
+        serialized_part: bytes,
+        timeout_s: int,
+    ) -> list:
+        """Sync flattened bucket using lane-based routing.
+
+        For each lane:
+        1. Determine if this rank is a participant (in source_ranks)
+        2. Gather serialized payload to leader (TP>1) or use directly (TP=1)
+        3. Leader sends one RPC to target worker with flattened_bucket format
+
+        Args:
+            plan: Route plan with lane definitions
+            bucket_idx: Current bucket index
+            part_idx: Current part index within bucket
+            part_count: Total parts in this bucket
+            serialized_part: One pre-serialized IPC payload part
+            timeout_s: RPC timeout
+        """
+        refs = []
+        my_rank = dist.get_rank()
+
+        for lane in plan.lanes:
+            # Check if this rank participates in this lane
+            if not is_lane_participant(my_rank, lane):
+                continue
+
+            # For flattened_bucket, use pre-serialized IPC parts
+            # Each part is already in the correct flattened format
+            local_payload = serialized_part
+
+            # Gather to leader (no-op for TP=1)
+            gathered = self._gather_lane_payload(lane, local_payload)
+
+            # Only leader sends RPC
+            if not is_lane_leader(my_rank, lane):
+                continue
+
+            if gathered is None:
+                raise RuntimeError(f"lane gather returned None for leader rank={lane.leader_rank}")
+
+            sync_key = f"{self.weight_version}:{plan.route_epoch}:{bucket_idx}:{part_idx}:{lane.lane.lane_idx}"
+
+            self._log_colocate_mem_debug(
+                stage="lane_rpc_dispatch",
+                bucket_idx=bucket_idx,
+                part_idx=part_idx,
+                lane_idx=lane.lane.lane_idx,
+                sync_key=sync_key,
+                gathered_count=len(gathered),
+            )
+
+            refs.append(
+                lane.target_worker.param_sync_from_tensor.remote(
+                    serialized_named_tensors=gathered,
+                    load_format="flattened_bucket",
+                    flush_cache=False,
+                    weight_version=str(self.weight_version),
+                    trace_id=self._trace_id,
+                    bucket_idx=bucket_idx,
+                    part_idx=part_idx,
+                    part_count=part_count,
+                    sync_key=sync_key,
+                    lane_idx=lane.lane.lane_idx,
+                    route_epoch=plan.route_epoch,
+                )
+            )
+
+        return refs
+
+    def setup_param_sync_group(
+        self,
+        rollout_workers: Sequence[ActorHandle],
+        rollout_topology: dict | None = None,
+    ):
+        """Setup colocated param sync group with optional topology-based routing.
+
+        Args:
+            rollout_workers: Ray actor handles for TP0 rollout workers
+            rollout_topology: Optional topology snapshot for lane-based routing.
+                             If provided and using flattened_bucket backend,
+                             builds route plan for lane-leader dispatch.
+        """
         normalized_workers = self._normalize_rollout_workers(rollout_workers)
         self.rollout_workers = normalized_workers
         self._refresh_sync_context()
@@ -757,7 +951,72 @@ class ParamSyncColocated(ParamSyncDistributed):
         self.update_rollout_worker_connected(normalized_workers)
         self._connected_rollout_workers = list(normalized_workers)
         self._connected_rollout_worker_ids = {w._actor_id.hex() for w in normalized_workers}
-        logger.info(f"[{self._group_name}] Colocated param sync group: {len(normalized_workers)} workers ({self._sync_backend} backend)")
+
+        # Reset lane gather state whenever worker topology is refreshed.
+        self._ipc_gather_group = None
+        self._ipc_gather_src = -1
+        self._ipc_group_ready = False
+
+        # Build route plan for flattened_bucket backend.
+        if self._using_flattened_bucket():
+            if rollout_topology is None:
+                raise RuntimeError(f"[{self._group_name}] flattened_bucket requires rollout_topology in setup_param_sync_group")
+            self._route_plan = self._build_colocate_route_plan(rollout_topology)
+            self._ensure_ipc_gather_groups(self._route_plan)
+            logger.info(
+                f"[{self._group_name}] Colocated param sync: {len(normalized_workers)} workers, "
+                f"lanes={len(self._route_plan.lanes)} tp_size={self._route_plan.tp_size} "
+                f"topology_hash={self._route_plan.topology_hash} route_epoch={self._route_plan.route_epoch}"
+            )
+        else:
+            self._route_plan = None
+            self._route_source_ranks = set()
+            logger.info(
+                f"[{self._group_name}] Colocated param sync group: {len(normalized_workers)} workers " f"({self._sync_backend} backend)"
+            )
+
+    def _update_param_sync_bucket(
+        self,
+        name: str,
+        param: torch.nn.Parameter,
+        converted_named_tensors: list[tuple[str, torch.Tensor]],
+        buffer_size: int,
+        pbar: tqdm | None = None,
+    ):
+        """Accumulate one parameter into current bucket for this rank.
+
+        In flattened colocated mode, every route-participant rank builds its local
+        bucket. In tensor mode, only legacy source rank builds buckets.
+        """
+        if not self._should_enter_bucket_sync():
+            return buffer_size
+
+        buffer_limit = self.config.trainer.param_sync_buffer_size
+        param_size = param.numel() * param.element_size()
+        if param_size > buffer_limit:
+            self._log_colocate_mem_debug(
+                stage="bucket_single_param_exceeds_limit",
+                incoming_param=name,
+                incoming_mb=round(param_size / (1024**2), 2),
+                buffer_limit_mb=round(buffer_limit / (1024**2), 2),
+                buffered_params=len(converted_named_tensors),
+                buffered_mb=round(buffer_size / (1024**2), 2),
+            )
+        if buffer_size + param_size > buffer_limit:
+            self._log_colocate_mem_debug(
+                stage="bucket_flush_trigger",
+                next_bucket_idx=self._current_sync_bucket_count + 1,
+                buffered_params=len(converted_named_tensors),
+                buffered_mb=round(buffer_size / (1024**2), 2),
+                incoming_param=name,
+                incoming_mb=round(param_size / (1024**2), 2),
+                buffer_limit_mb=round(buffer_limit / (1024**2), 2),
+            )
+            self._update_bucket_weights(converted_named_tensors, pbar=pbar)
+            buffer_size = 0
+        converted_named_tensors.append((name, param))
+        buffer_size += param_size
+        return buffer_size
 
     @torch.no_grad()
     def update_weights_mixed(
@@ -843,7 +1102,23 @@ class ParamSyncColocated(ParamSyncDistributed):
         converted_named_tensors: list[tuple[str, torch.Tensor]],
         pbar: tqdm | None = None,
     ) -> None:
-        if not self._is_pp_src_rank or not self.rollout_workers:
+        """Update weights for one bucket using configured backend.
+
+        Flattened backend:
+        - only route-participant ranks build/send bucket payloads;
+        - each lane leader sends one RPC per bucket-part.
+
+        Tensor backend:
+        - keeps legacy rank0 sender behavior.
+        """
+        # Skip empty buckets
+        if not converted_named_tensors:
+            if pbar is not None:
+                pbar.update(1)
+            return
+
+        # Check if this rank should participate in this backend/route.
+        if not self._should_enter_bucket_sync() or not self.rollout_workers:
             converted_named_tensors.clear()
             if pbar is not None:
                 pbar.update(1)
@@ -874,11 +1149,18 @@ class ParamSyncColocated(ParamSyncDistributed):
             )
 
         if not self._using_flattened_bucket():
-            self._sync_bucket_with_tensor_path(converted_named_tensors, timeout_s=timeout_s, pbar=pbar)
+            # Tensor path: only rank0 sends RPC
+            if self._is_pp_src_rank:
+                self._sync_bucket_with_tensor_path(converted_named_tensors, timeout_s=timeout_s, pbar=pbar)
+            else:
+                converted_named_tensors.clear()
+                if pbar is not None:
+                    pbar.update(1)
             return
 
+        # Flattened bucket path with lane-based routing
         try:
-            tp_size = max(1, self.config.rollout.tensor_model_parallel_size)
+            tp_size = self._tp_size
             serialized_parts, long_lived_buckets = _serialize_bucket_ipc(converted_named_tensors)
             payload_mb = round(sum(len(part) for part in serialized_parts) / (1024**2), 2)
             part_bytes = [len(part) for part in serialized_parts]
@@ -893,18 +1175,31 @@ class ParamSyncColocated(ParamSyncDistributed):
                 payload_bytes_max=max(part_bytes) if part_bytes else 0,
                 tp_size=tp_size,
             )
+
             try:
                 t0 = time.monotonic()
-                for part_idx, part in enumerate(serialized_parts, start=1):
-                    serialized_named_tensors = [part for _ in range(tp_size)]
-                    self._sync_ipc_bucket_with_retry(
-                        serialized_named_tensors,
-                        timeout_s=timeout_s,
-                        bucket_idx=bucket_idx,
-                        part_idx=part_idx,
-                        part_count=len(serialized_parts),
+
+                # Use lane-based routing if route plan is available
+                if self._route_plan is not None:
+                    # Lane-based dispatch: each lane leader sends one RPC
+                    for part_idx, part in enumerate(serialized_parts, start=1):
+                        refs = self._sync_flattened_bucket_by_lanes(
+                            plan=self._route_plan,
+                            bucket_idx=bucket_idx,
+                            part_idx=part_idx,
+                            part_count=len(serialized_parts),
+                            serialized_part=part,
+                            timeout_s=timeout_s,
+                        )
+                        if refs:
+                            ray.get(refs, timeout=timeout_s)
+                        self._record_sync_bucket()
+                else:
+                    raise RuntimeError(
+                        f"[{self._group_name}] flattened_bucket requires route plan; "
+                        "call setup_param_sync_group(..., rollout_topology=...) before syncing"
                     )
-                    self._record_sync_bucket()
+
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 logger.debug(f"[{self._group_name}] IPC bucket sync: {len(converted_named_tensors)} params, {elapsed_ms:.1f}ms")
                 self._log_colocate_mem_debug(
@@ -920,18 +1215,18 @@ class ParamSyncColocated(ParamSyncDistributed):
                     bucket_idx=bucket_idx,
                     part_count=len(serialized_parts),
                 )
+
         except Exception as exc:
-            if not self._fallback_to_tensor:
-                raise
+            # Fail-fast: no automatic fallback to tensor
             self._log_colocate_mem_debug(
-                stage="bucket_fallback_to_tensor",
+                stage="bucket_flattened_failed",
                 bucket_idx=bucket_idx,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-            self._switch_backend_to_tensor(reason=f"{type(exc).__name__}: {exc}")
-            self._sync_bucket_with_tensor_path(converted_named_tensors, timeout_s=timeout_s, pbar=pbar)
-            return
+            if getattr(self.config.trainer, "colocate_flattened_fail_fast", True):
+                raise RuntimeError(f"[{self._group_name}] flattened_bucket sync failed (fail-fast): {exc}") from exc
+            raise
 
         converted_named_tensors.clear()
         if pbar is not None:

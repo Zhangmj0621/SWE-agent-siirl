@@ -627,6 +627,9 @@ class SglangEngine:
         bucket_idx: int | None = None,
         part_idx: int | None = None,
         part_count: int | None = None,
+        sync_key: str | None = None,
+        lane_idx: int | None = None,
+        route_epoch: int | None = None,
     ):
         import base64
 
@@ -661,6 +664,14 @@ class SglangEngine:
             payload["weight_version"] = weight_version
         if load_format is not None:
             payload["load_format"] = load_format
+        if sync_key is not None:
+            payload["sync_key"] = sync_key
+        if lane_idx is not None:
+            payload["lane_idx"] = lane_idx
+        if route_epoch is not None:
+            payload["route_epoch"] = route_epoch
+        if sync_key is not None:
+            logger.debug(f"[param_sync] sync_key={sync_key} lane_idx={lane_idx} route_epoch={route_epoch}")
         logger.info(
             "[COLOCATE_TRACE][SglangEngine] stage=param_sync_from_tensor_start trace_id={} "
             "rank={} node_rank={} weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} "

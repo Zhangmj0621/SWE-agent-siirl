@@ -116,6 +116,12 @@ class TrainingArguments:
     virtual_pipeline_model_parallel_size: int | None = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
     sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
 
+    # === Colocated Param Sync Configuration ===
+    colocate_flattened_fail_fast: bool = field(
+        default=True,
+        metadata={"help": "Fail fast when flattened_bucket sync fails in colocated mode (no auto fallback to tensor)"},
+    )
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

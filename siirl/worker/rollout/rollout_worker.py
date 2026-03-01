@@ -364,6 +364,9 @@ class RolloutWorker:
         bucket_idx: int | None = None,
         part_idx: int | None = None,
         part_count: int | None = None,
+        sync_key: str | None = None,
+        lane_idx: int | None = None,
+        route_epoch: int | None = None,
     ):
         trace_id = trace_id or "na"
         payload_parts = len(serialized_named_tensors) if isinstance(serialized_named_tensors, list) else 1
@@ -381,7 +384,7 @@ class RolloutWorker:
         logger.info(
             "[COLOCATE_TRACE][RolloutWorker] stage=param_sync_from_tensor_start trace_id={} rank={} "
             "weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} payload_parts={} payload_mb={} "
-            "payload_bytes={} payload_min={} payload_max={} debug_state={}",
+            "payload_bytes={} payload_min={} payload_max={} sync_key={} lane_idx={} route_epoch={} debug_state={}",
             trace_id,
             self.rank,
             weight_version,
@@ -394,6 +397,9 @@ class RolloutWorker:
             payload_bytes,
             payload_min if payload_min is not None else -1,
             payload_max if payload_max is not None else -1,
+            sync_key or "na",
+            lane_idx if lane_idx is not None else -1,
+            route_epoch if route_epoch is not None else -1,
             self.get_debug_state(),
         )
         try:
@@ -406,6 +412,9 @@ class RolloutWorker:
                 bucket_idx=bucket_idx,
                 part_idx=part_idx,
                 part_count=part_count,
+                sync_key=sync_key,
+                lane_idx=lane_idx,
+                route_epoch=route_epoch,
             )
             elapsed_ms = (time.monotonic() - start) * 1000
             logger.info(
