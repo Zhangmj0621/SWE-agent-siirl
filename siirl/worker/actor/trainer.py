@@ -502,7 +502,19 @@ class Trainer:
             self._log_colocate_trace("sync_onload_weights_done", trace_id=trace_id, timeout_s=rpc_timeout_s)
 
         try:
-            if isinstance(self.param_sync, ParamSyncDistributed):
+            if isinstance(self.param_sync, ParamSyncColocated):
+                if rollout_workers and any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
+                    self._log_colocate_trace("sync_setup_group_start", trace_id=trace_id)
+                    rollout_topology = ray.get(self.rollout_manager.get_colocate_topology_snapshot.remote())
+                    self.param_sync.setup_param_sync_group(rollout_workers, rollout_topology=rollout_topology)
+                    self._log_colocate_trace("sync_setup_group_done", trace_id=trace_id)
+                self.param_sync.update_weights_mixed(
+                    rollout_workers,
+                    tensor_workers,
+                    bump_weight_version=bump_weight_version,
+                    trace_id=trace_id,
+                )
+            elif isinstance(self.param_sync, ParamSyncDistributed):
                 if rollout_workers and any(not self.param_sync.has_connected_to_actor(x) for x in rollout_workers):
                     self._log_colocate_trace("sync_setup_group_start", trace_id=trace_id)
                     self.param_sync.setup_param_sync_group(rollout_workers)
@@ -536,6 +548,11 @@ class Trainer:
         return ray.get(self.rollout_manager.get_rollout_worker_on_tp0.remote(), timeout=rpc_timeout_s)
 
     def _ensure_regular_rollout_workers(self, regular_workers) -> None:
+        if isinstance(self.param_sync, ParamSyncColocated):
+            if regular_workers and any(not self.param_sync.has_connected_to_actor(x) for x in regular_workers):
+                rollout_topology = ray.get(self.rollout_manager.get_colocate_topology_snapshot.remote())
+                self.param_sync.setup_param_sync_group(regular_workers, rollout_topology=rollout_topology)
+            return
         if isinstance(self.param_sync, ParamSyncDistributed):
             if regular_workers and any(not self.param_sync.has_connected_to_actor(x) for x in regular_workers):
                 self.param_sync.setup_param_sync_group(regular_workers)
