@@ -86,8 +86,14 @@ class TrainingArguments:
     )
 
     # === Resource Allocation Configuration ===
-    actor_gpus: int = field(default=2, metadata={"help": "Number of GPUs for training (Actor/Ref/Critic)"})
-    rollout_gpus: int = field(default=6, metadata={"help": "Number of GPUs for rollout/inference"})
+    actor_gpus: int = field(
+        default=2,
+        metadata={"help": "Separated mode only. GPUs for training (Actor/Ref/Critic); ignored when trainer.colocate=True"},
+    )
+    rollout_gpus: int = field(
+        default=6,
+        metadata={"help": "Separated mode only. GPUs for rollout/inference; ignored when trainer.colocate=True"},
+    )
     colocate: bool = field(
         default=False,
         metadata={"help": "Share GPUs between training and rollout (colocated mode)"},

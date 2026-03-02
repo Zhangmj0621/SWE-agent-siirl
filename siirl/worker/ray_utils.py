@@ -273,12 +273,20 @@ def _allocate_colocated(config: SiiRLArguments) -> dict[str, GPUResources]:
 
     cfg = config.trainer
 
-    # In colocated mode, use actor_gpus or default to all available GPUs
-    total_gpus = cfg.actor_gpus if cfg.actor_gpus > 0 else (cfg.nnodes * cfg.n_gpus_per_node)
+    # In colocated mode, actor/rollout GPUs are always derived from cluster topology.
+    total_gpus = cfg.nnodes * cfg.n_gpus_per_node
+    if total_gpus <= 0:
+        raise ValueError(
+            "colocate: derived total_gpus must be > 0, " f"got nnodes({cfg.nnodes}) * n_gpus_per_node({cfg.n_gpus_per_node}) = {total_gpus}"
+        )
+    if cfg.actor_gpus != total_gpus or cfg.rollout_gpus != total_gpus:
+        logger.info(
+            "Colocated mode: auto-deriving trainer.actor_gpus/trainer.rollout_gpus "
+            f"from nnodes({cfg.nnodes}) * n_gpus_per_node({cfg.n_gpus_per_node}) = {total_gpus}"
+        )
+    cfg.actor_gpus = total_gpus
+    cfg.rollout_gpus = total_gpus
     validate_colocated_topology(config, total_gpus=total_gpus)
-    if cfg.rollout_gpus != total_gpus:
-        logger.info(f"Colocated mode: overriding trainer.rollout_gpus from {cfg.rollout_gpus} to {total_gpus}")
-        cfg.rollout_gpus = total_gpus
 
     logger.info(f"Allocating resources (colocated mode): " f"{total_gpus} GPUs shared between training and rollout")
 
