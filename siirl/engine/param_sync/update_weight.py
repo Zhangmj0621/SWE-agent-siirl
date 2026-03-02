@@ -22,8 +22,6 @@ from siirl.utils.distributed_utils import get_gloo_group, init_process_group
 from . import mbridge_patch  # noqa: F401
 from .route_model import LaneRoute, RoutePlan, compute_route_plan, is_lane_leader, is_lane_participant, validate_route_plan
 
-COLOCATE_MEM_DEBUG_PREFIX = "[COLOCATE_MEM_DEBUG]"
-
 
 def _import_flattened_tensor_bucket():
     """Import FlattenedTensorBucket with dual-path compatibility."""
@@ -538,7 +536,7 @@ class ParamSyncColocated(ParamSyncDistributed):
             **fields,
         }
         payload = " ".join(f"{k}={v}" for k, v in merged.items())
-        logger.info(f"{COLOCATE_MEM_DEBUG_PREFIX} {payload}")
+        logger.info(payload)
 
     def _clear_shared_cache(self) -> None:
         """Evict CUDA IPC handles so their pinned GPU storage can be reclaimed."""
@@ -553,14 +551,12 @@ class ParamSyncColocated(ParamSyncDistributed):
                     cache.clear()
             else:
                 logger.warning(
-                    "{} group={} stage=shared_cache_clear_skipped reason=shared_cache_unavailable",
-                    COLOCATE_MEM_DEBUG_PREFIX,
+                    "group={} stage=shared_cache_clear_skipped reason=shared_cache_unavailable",
                     self._group_name,
                 )
         except Exception as e:
             logger.warning(
-                "{} group={} stage=shared_cache_clear_failed error={}",
-                COLOCATE_MEM_DEBUG_PREFIX,
+                "group={} stage=shared_cache_clear_failed error={}",
                 self._group_name,
                 repr(e),
             )
@@ -570,8 +566,7 @@ class ParamSyncColocated(ParamSyncDistributed):
                 torch.cuda.ipc_collect()
             except Exception as e:
                 logger.warning(
-                    "{} group={} stage=ipc_collect_failed error={}",
-                    COLOCATE_MEM_DEBUG_PREFIX,
+                    "group={} stage=ipc_collect_failed error={}",
                     self._group_name,
                     repr(e),
                 )
