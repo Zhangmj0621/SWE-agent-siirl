@@ -58,7 +58,13 @@ class NaiveFlow:
                 self.env.tool_parser = ToolParser.get_tool_parser(tool_format, self.engine.tokenizer)
                 self.env.tool_parser_name = tool_format
 
-    async def __call__(self, sample: Sample, reward_fn=None, is_validate=False):
+    async def __call__(
+        self,
+        sample: Sample,
+        reward_fn=None,
+        is_validate=False,
+        request_seed: int | None = None,
+    ):
         """
         Naive rollout flow implementation for single-turn text generation and reward calculation.
         Generates response from prompt using inference engine, creates response mask, and computes reward score.
@@ -84,7 +90,11 @@ class NaiveFlow:
                 agent_data.state = await self._handle_pending_state(agent_data, loop)
             elif agent_data.state == AgentState.GENERATING:
                 gen_start = time.time()
-                agent_data.state = await self._handle_generating_state(agent_data, is_validate)
+                agent_data.state = await self._handle_generating_state(
+                    agent_data,
+                    is_validate,
+                    request_seed=request_seed,
+                )
                 generation_duration += time.time() - gen_start
             elif agent_data.state == AgentState.PROCESSING_ENV:
                 agent_data.state = await self._handle_processing_envs_state(agent_data, loop)
@@ -222,8 +232,18 @@ class NaiveFlow:
         env_response.text = env_response_text
         return env_response
 
-    async def _handle_generating_state(self, agent_data: AgentData, is_validate=False):
-        _, response_ids, rollout_log_prob = await self.engine.generate(agent_data.prompts_ids, is_validate, use_router=self.use_router)
+    async def _handle_generating_state(
+        self,
+        agent_data: AgentData,
+        is_validate=False,
+        request_seed: int | None = None,
+    ):
+        _, response_ids, rollout_log_prob = await self.engine.generate(
+            agent_data.prompts_ids,
+            is_validate,
+            use_router=self.use_router,
+            request_seed=request_seed,
+        )
         agent_data.response_ids = response_ids
         agent_data.rollout_log_prob += rollout_log_prob
         agent_data.prompts_ids += response_ids

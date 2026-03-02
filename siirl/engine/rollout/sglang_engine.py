@@ -220,19 +220,38 @@ class SglangEngine:
         # Keep a small buffer so the outer Ray wait is still the hard deadline.
         return ray_timeout if ray_timeout <= 5 else ray_timeout - 5
 
-    def _get_sampling_params(self, is_validate: bool, input_len: int | None = None) -> dict:
+    def _get_sampling_params(
+        self,
+        is_validate: bool,
+        input_len: int | None = None,
+        request_seed: int | None = None,
+    ) -> dict:
         """Get sampling parameters based on mode (train/validate)."""
         params = copy.deepcopy(self.sampling_params)
         if input_len is not None:
             params["max_new_tokens"] = min(self.max_model_len - input_len, self.max_response_length)
         if is_validate:
+            val_kwargs = self.config.rollout.val_kwargs
+            do_sample = bool(getattr(val_kwargs, "do_sample", False))
             params.update(
                 {
-                    "top_k": self.config.rollout.val_kwargs.top_k,
-                    "top_p": self.config.rollout.val_kwargs.top_p,
-                    "temperature": self.config.rollout.val_kwargs.temperature,
+                    "n": max(1, int(getattr(val_kwargs, "n", 1))),
+                    "top_k": int(getattr(val_kwargs, "top_k", -1)),
+                    "top_p": float(getattr(val_kwargs, "top_p", 1.0)),
+                    "temperature": float(getattr(val_kwargs, "temperature", 0.0)),
                 }
             )
+            if not do_sample:
+                params.update(
+                    {
+                        "temperature": 0.0,
+                        "top_p": 1.0,
+                        "top_k": 1,
+                        "n": 1,
+                    }
+                )
+        if request_seed is not None and ((not is_validate) or bool(getattr(self.config.rollout.val_kwargs, "do_sample", False))):
+            params["random_seed"] = int(request_seed)
         return params
 
     def _get_generate_url(self, use_router: bool = False) -> str:
@@ -241,9 +260,19 @@ class SglangEngine:
             return f"http://{self.router_address}/generate"
         return f"http://{self.ip}:{self.port}/generate"
 
-    async def generate(self, input_ids: list[int], is_validate: bool, use_router: bool = False):
+    async def generate(
+        self,
+        input_ids: list[int],
+        is_validate: bool,
+        use_router: bool = False,
+        request_seed: int | None = None,
+    ):
         """Single sample generation with optional router load balancing."""
-        sampling_params = self._get_sampling_params(is_validate, len(input_ids))
+        sampling_params = self._get_sampling_params(
+            is_validate,
+            len(input_ids),
+            request_seed=request_seed,
+        )
         url = self._get_generate_url(use_router=use_router)
 
         payload = {
@@ -275,6 +304,7 @@ class SglangEngine:
         show_progress: bool = True,
         progress_desc: str = "Validate",
         sort_by_length: bool = True,
+        request_seeds: list[int] | None = None,
         progress_callback: Callable[[int], None] | None = None,
     ) -> list[tuple[str, list[int], list[float]]]:
         """
@@ -316,6 +346,15 @@ class SglangEngine:
             sorted_indices = list(range(len(batch_input_ids)))
             sorted_input_ids = batch_input_ids
 
+        if request_seeds is not None and len(request_seeds) != len(batch_input_ids):
+            raise ValueError(f"request_seeds length mismatch: expected {len(batch_input_ids)}, got {len(request_seeds)}")
+        if request_seeds is None:
+            sorted_request_seeds = [None] * len(sorted_input_ids)
+        elif sort_by_length:
+            sorted_request_seeds = [request_seeds[idx] for idx in sorted_indices]
+        else:
+            sorted_request_seeds = request_seeds
+
         # Use semaphore to control concurrency (prevent overwhelming the server).
         # Router path: scale by num_engines (router distributes across all engines).
         # Local/validate path: use train_server_concurrency.
@@ -323,9 +362,13 @@ class SglangEngine:
         semaphore = asyncio.Semaphore(max_concurrent)
 
         # Create concurrent tasks for each sample (SGLang handles batching internally)
-        async def _generate_one(input_ids: list[int]):
+        async def _generate_one(input_ids: list[int], request_seed: int | None = None):
             async with semaphore:
-                sampling_params = self._get_sampling_params(is_validate, len(input_ids))
+                sampling_params = self._get_sampling_params(
+                    is_validate,
+                    len(input_ids),
+                    request_seed=request_seed,
+                )
                 payload = {
                     "input_ids": input_ids,
                     "sampling_params": sampling_params,
@@ -339,7 +382,7 @@ class SglangEngine:
             return output["text"], responses, log_probs
 
         # SGLang handles continuous batching internally
-        tasks = [_generate_one(ids) for ids in sorted_input_ids]
+        tasks = [_generate_one(ids, request_seed=seed) for ids, seed in zip(sorted_input_ids, sorted_request_seeds, strict=False)]
 
         if show_progress:
             from tqdm.asyncio import tqdm_asyncio

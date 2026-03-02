@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import copy
+import hashlib
 import importlib
 import os
 import time
@@ -310,7 +311,12 @@ class NaiveExecutor:
 
         return sample
 
-    async def generate(self, sample, is_validate=False):
+    async def generate(
+        self,
+        sample,
+        is_validate=False,
+        validate_request_seed: int | None = None,
+    ):
         """
         Asynchronous sample generation pipeline: preprocess → rollout → postprocess → data coordination.
         Uses semaphore to control concurrency and offloads CPU-bound processing to executor.
@@ -334,7 +340,20 @@ class NaiveExecutor:
                 sample = await loop.run_in_executor(None, self._pre_process, sample, is_validate)
 
                 # 2. Execute rollout flow (LLM generation with reward calculation)
-                sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
+                if validate_request_seed is None:
+                    sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
+                else:
+                    try:
+                        sample = await self.rollout_flow(
+                            sample,
+                            self.reward_fn,
+                            is_validate,
+                            request_seed=validate_request_seed,
+                        )
+                    except TypeError as exc:
+                        if "request_seed" not in str(exc):
+                            raise
+                        sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
 
                 # 3. Postprocess sample (CPU-bound padding and tensor formatting)
                 sample = await loop.run_in_executor(None, self._post_process, sample)
@@ -437,6 +456,22 @@ class NaiveExecutor:
             ground_truth=sample.reward_model["ground_truth"],
         )
 
+    def _get_validate_request_seed(self, sample: Sample) -> int:
+        base_seed = int(getattr(self.config.rollout, "seed", 0))
+        uid = getattr(sample, "uid", None)
+        if uid is not None:
+            key = f"uid:{uid}"
+        else:
+            raw_prompt_ids = getattr(sample, "raw_prompt_ids", None)
+            if raw_prompt_ids is None:
+                key = f"prompt:{getattr(sample, 'prompt_texts', '')}"
+            elif hasattr(raw_prompt_ids, "tolist"):
+                key = "ids:" + ",".join(map(str, raw_prompt_ids.tolist()))
+            else:
+                key = "ids:" + ",".join(map(str, list(raw_prompt_ids)))
+        offset = int.from_bytes(hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest(), byteorder="little")
+        return (base_seed + offset) % (2**31 - 1)
+
     async def _validate_single_turn(
         self,
         samples: list[Sample],
@@ -460,12 +495,14 @@ class NaiveExecutor:
                 return ids.tolist() if hasattr(ids, "tolist") else list(ids)
 
             batch_input_ids = [to_list(sample.raw_prompt_ids) for sample in samples]
+            request_seeds = [self._get_validate_request_seed(sample) for sample in samples]
             results = await self.engine.generate_batch(
                 batch_input_ids,
                 is_validate=True,
                 use_router=use_router,
                 show_progress=False,
                 progress_desc="Validate",
+                request_seeds=request_seeds,
                 progress_callback=progress_callback,
             )
 
@@ -493,9 +530,14 @@ class NaiveExecutor:
 
         return samples
 
-    async def _indexed_generate(self, idx: int, sample: Sample):
+    async def _indexed_generate(
+        self,
+        idx: int,
+        sample: Sample,
+        request_seed: int | None = None,
+    ):
         """Wrapper that returns (index, result) for correct ordering with as_completed."""
-        result = await self.generate(sample, is_validate=True)
+        result = await self.generate(sample, is_validate=True, validate_request_seed=request_seed)
         return idx, result
 
     def _resolve_validate_concurrency(self, use_router: bool) -> int:
@@ -526,7 +568,7 @@ class NaiveExecutor:
 
         async def _indexed_generate_limited(idx: int, sample: Sample):
             async with validate_semaphore:
-                return await self._indexed_generate(idx, sample)
+                return await self._indexed_generate(idx, sample, request_seed=self._get_validate_request_seed(sample))
 
         tasks: list[asyncio.Task] = []
         try:
