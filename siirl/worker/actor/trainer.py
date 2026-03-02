@@ -377,7 +377,7 @@ class Trainer:
         next_weight_version = self._next_weight_version_hint(bump_weight_version=bump_weight_version)
         return f"{phase}-step{self.global_step}-rank{self.rank}" f"-nextwv{next_weight_version}-ts{int(time.time() * 1000)}"
 
-    def _log_colocate_trace(self, _stage: str, _trace_id: str, **_fields) -> None:
+    def _log_colocate_trace(self, stage: str, trace_id: str, **fields) -> None:
         return
 
     def _wait_validate_gate(self):
