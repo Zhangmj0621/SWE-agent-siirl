@@ -483,7 +483,7 @@ class ParamSyncColocated(ParamSyncDistributed):
         self._refresh_sync_context()
 
     def _resolve_sync_backend(self) -> str:
-        backend = getattr(self.config.rollout, "colocate_param_sync_backend", "tensor")
+        backend = getattr(self.config.rollout, "colocate_param_sync_backend", "flattened_bucket")
 
         backend = str(backend).strip().lower()
         alias = {
@@ -494,8 +494,10 @@ class ParamSyncColocated(ParamSyncDistributed):
         }
         backend = alias.get(backend, backend)
         if backend not in self._SUPPORTED_BACKENDS:
-            logger.warning(f"[ParamSyncColocated] Unknown rollout.colocate_param_sync_backend={backend!r}, " "falling back to 'tensor'.")
-            backend = "tensor"
+            logger.warning(
+                f"[ParamSyncColocated] Unknown rollout.colocate_param_sync_backend={backend!r}, " "falling back to 'flattened_bucket'."
+            )
+            backend = "flattened_bucket"
         return backend
 
     def _using_flattened_bucket(self) -> bool:
@@ -657,7 +659,7 @@ class ParamSyncColocated(ParamSyncDistributed):
         if dist.get_rank() == 0 and not self._tensor_path_logged:
             logger.warning(
                 f"[{self._group_name}] Using tensor sync backend for colocated mode "
-                "(set rollout.colocate_param_sync_backend=flattened_bucket to opt into IPC bucket path)."
+                "(explicit override; default backend is flattened_bucket)."
             )
             self._tensor_path_logged = True
 

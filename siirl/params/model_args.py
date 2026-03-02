@@ -177,7 +177,7 @@ class RolloutArguments:
     load_format: str = field(default="dummy_dtensor", metadata={"help": "Weight loading format"})
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism"})
     colocate_param_sync_backend: str = field(
-        default="tensor",
+        default="flattened_bucket",
         metadata={"help": "Colocated param sync backend: tensor or flattened_bucket"},
     )
     colocate_release_weights_during_sync: bool = field(
