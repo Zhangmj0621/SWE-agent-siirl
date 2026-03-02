@@ -377,20 +377,8 @@ class Trainer:
         next_weight_version = self._next_weight_version_hint(bump_weight_version=bump_weight_version)
         return f"{phase}-step{self.global_step}-rank{self.rank}" f"-nextwv{next_weight_version}-ts{int(time.time() * 1000)}"
 
-    def _log_colocate_trace(self, stage: str, trace_id: str, **fields) -> None:
-        if not self._is_colocate:
-            return
-        payload = {
-            "stage": stage,
-            "trace_id": trace_id,
-            "rank": self.rank,
-            "local_rank": self.local_rank,
-            "global_step": self.global_step,
-            **self._cuda_debug_snapshot(),
-            **fields,
-        }
-        line = " ".join(f"{k}={v}" for k, v in payload.items())
-        logger.info(f"[COLOCATE_TRACE][Trainer] {line}")
+    def _log_colocate_trace(self, _stage: str, _trace_id: str, **_fields) -> None:
+        return
 
     def _wait_validate_gate(self):
         """Block until validate-reuse gate allows proceeding."""

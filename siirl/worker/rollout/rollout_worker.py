@@ -369,7 +369,6 @@ class RolloutWorker:
         route_epoch: int | None = None,
     ):
         trace_id = trace_id or "na"
-        payload_parts = len(serialized_named_tensors) if isinstance(serialized_named_tensors, list) else 1
         payload_bytes = 0
         payload_min = None
         payload_max = None
@@ -381,27 +380,6 @@ class RolloutWorker:
                     payload_min = item_len if payload_min is None else min(payload_min, item_len)
                     payload_max = item_len if payload_max is None else max(payload_max, item_len)
         start = time.monotonic()
-        logger.info(
-            "[COLOCATE_TRACE][RolloutWorker] stage=param_sync_from_tensor_start trace_id={} rank={} "
-            "weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} payload_parts={} payload_mb={} "
-            "payload_bytes={} payload_min={} payload_max={} sync_key={} lane_idx={} route_epoch={} debug_state={}",
-            trace_id,
-            self.rank,
-            weight_version,
-            load_format or "tensor",
-            bucket_idx if bucket_idx is not None else -1,
-            part_idx if part_idx is not None else -1,
-            part_count if part_count is not None else -1,
-            payload_parts,
-            round(payload_bytes / (1024**2), 2),
-            payload_bytes,
-            payload_min if payload_min is not None else -1,
-            payload_max if payload_max is not None else -1,
-            sync_key or "na",
-            lane_idx if lane_idx is not None else -1,
-            route_epoch if route_epoch is not None else -1,
-            self.get_debug_state(),
-        )
         try:
             result = self.engine.param_sync_from_tensor(
                 serialized_named_tensors,
@@ -416,29 +394,11 @@ class RolloutWorker:
                 lane_idx=lane_idx,
                 route_epoch=route_epoch,
             )
-            elapsed_ms = (time.monotonic() - start) * 1000
-            logger.info(
-                "[COLOCATE_TRACE][RolloutWorker] stage=param_sync_from_tensor_done trace_id={} rank={} "
-                "weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} elapsed_ms={} "
-                "payload_bytes={} payload_min={} payload_max={} debug_state={}",
-                trace_id,
-                self.rank,
-                weight_version,
-                load_format or "tensor",
-                bucket_idx if bucket_idx is not None else -1,
-                part_idx if part_idx is not None else -1,
-                part_count if part_count is not None else -1,
-                round(elapsed_ms, 2),
-                payload_bytes,
-                payload_min if payload_min is not None else -1,
-                payload_max if payload_max is not None else -1,
-                self.get_debug_state(),
-            )
             return result
         except Exception:
             elapsed_ms = (time.monotonic() - start) * 1000
             logger.error(
-                "[COLOCATE_TRACE][RolloutWorker] stage=param_sync_from_tensor_failed trace_id={} rank={} "
+                "[RolloutWorker] param_sync_from_tensor_failed trace_id={} rank={} "
                 "weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} elapsed_ms={} "
                 "payload_bytes={} payload_min={} payload_max={} err={} debug_state={}",
                 trace_id,

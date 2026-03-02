@@ -509,25 +509,6 @@ class SglangEngine:
                 raise RuntimeError(
                     f"SGLang process on {self.ip}:{self.port} is dead (exitcode={process.exitcode}); " f"cannot call /{endpoint}"
                 )
-            if endpoint == "update_weights_from_tensor":
-                payload_parts = 0
-                payload_chars = 0
-                if isinstance(payload, dict):
-                    parts = payload.get("serialized_named_tensors", [])
-                    if isinstance(parts, list):
-                        payload_parts = len(parts)
-                        payload_chars = sum(len(item) for item in parts if isinstance(item, str))
-                logger.info(
-                    "[COLOCATE_TRACE][SglangEngine] stage=make_request_pre endpoint={} attempt={}/{} "
-                    "timeout_s={} payload_parts={} payload_chars={} process={}",
-                    endpoint,
-                    attempt + 1,
-                    max_retries + 1,
-                    timeout_s,
-                    payload_parts,
-                    payload_chars,
-                    self._process_debug_state(),
-                )
             try:
                 request_start = time.monotonic()
                 response = requests.post(url, json=payload or {}, timeout=timeout_s)
@@ -670,34 +651,12 @@ class SglangEngine:
             payload["lane_idx"] = lane_idx
         if route_epoch is not None:
             payload["route_epoch"] = route_epoch
-        if sync_key is not None:
-            logger.debug(f"[param_sync] sync_key={sync_key} lane_idx={lane_idx} route_epoch={route_epoch}")
-        logger.info(
-            "[COLOCATE_TRACE][SglangEngine] stage=param_sync_from_tensor_start trace_id={} "
-            "rank={} node_rank={} weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} "
-            "payload_parts={} payload_mb={} payload_bytes={} payload_min={} payload_max={} encoded_chars={} process={}",
-            trace_id,
-            self.rank,
-            self.sgl_args.node_rank if hasattr(self, "sgl_args") else -1,
-            weight_version,
-            load_format or "tensor",
-            bucket_idx if bucket_idx is not None else -1,
-            part_idx if part_idx is not None else -1,
-            part_count if part_count is not None else -1,
-            len(encoded),
-            round(raw_payload_bytes / (1024**2), 2),
-            raw_payload_bytes,
-            raw_payload_min if raw_payload_min is not None else -1,
-            raw_payload_max if raw_payload_max is not None else -1,
-            encoded_payload_chars,
-            self._process_debug_state(),
-        )
         try:
             result = self._make_request("update_weights_from_tensor", payload)
         except Exception as e:
             elapsed_ms = (time.monotonic() - start) * 1000
             logger.error(
-                "[COLOCATE_TRACE][SglangEngine] stage=param_sync_from_tensor_failed trace_id={} "
+                "[SglangEngine] param_sync_from_tensor_failed trace_id={} "
                 "rank={} node_rank={} weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} "
                 "elapsed_ms={} payload_bytes={} payload_min={} payload_max={} encoded_chars={} err={} process={}",
                 trace_id,
@@ -717,22 +676,6 @@ class SglangEngine:
                 self._process_debug_state(),
             )
             raise
-        elapsed_ms = (time.monotonic() - start) * 1000
-        logger.info(
-            "[COLOCATE_TRACE][SglangEngine] stage=param_sync_from_tensor_done trace_id={} "
-            "rank={} node_rank={} weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} "
-            "elapsed_ms={} process={}",
-            trace_id,
-            self.rank,
-            self.sgl_args.node_rank if hasattr(self, "sgl_args") else -1,
-            weight_version,
-            load_format or "tensor",
-            bucket_idx if bucket_idx is not None else -1,
-            part_idx if part_idx is not None else -1,
-            part_count if part_count is not None else -1,
-            round(elapsed_ms, 2),
-            self._process_debug_state(),
-        )
         if weight_version:
             self._weight_version = int(weight_version)
         else:

@@ -558,13 +558,6 @@ class RolloutManager:
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] offload_for_train completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
-        self._log_worker_debug_states(
-            tp0_workers,
-            timeout_s=min(5, timeout_s),
-            phase="offload_for_train",
-            tag=f"post_success trace_id={trace_id}",
-            level="info",
-        )
 
     def onload_weights_for_sync(self, timeout_s: int = 120, trace_id: str | None = None):
         """Ensure weights are resident before IPC weight update in colocated mode."""
@@ -599,13 +592,6 @@ class RolloutManager:
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] onload_weights_for_sync completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
-        self._log_worker_debug_states(
-            tp0_workers,
-            timeout_s=min(5, timeout_s),
-            phase="onload_weights_for_sync",
-            tag=f"post_success trace_id={trace_id}",
-            level="info",
-        )
 
     def _wait_with_diagnostics(
         self,
@@ -656,7 +642,7 @@ class RolloutManager:
             f"did not complete within {timeout_s}s ({', '.join(stuck)})"
         )
 
-    def _log_worker_debug_states(self, workers: list, *, timeout_s: int, phase: str, tag: str, level: str = "error"):
+    def _log_worker_debug_states(self, workers: list, *, timeout_s: int, phase: str, tag: str):
         from loguru import logger
 
         if not workers:
@@ -706,24 +692,14 @@ class RolloutManager:
                     repr(e),
                 )
                 continue
-            if level == "info":
-                logger.info(
-                    "[COLOCATE_DEBUG][RolloutManager] worker debug state phase={} tag={} worker_idx={} url={} state={}",
-                    phase,
-                    tag,
-                    idx,
-                    url,
-                    state,
-                )
-            else:
-                logger.error(
-                    "[COLOCATE_DEBUG][RolloutManager] worker debug state phase={} tag={} worker_idx={} url={} state={}",
-                    phase,
-                    tag,
-                    idx,
-                    url,
-                    state,
-                )
+            logger.error(
+                "[COLOCATE_DEBUG][RolloutManager] worker debug state phase={} tag={} worker_idx={} url={} state={}",
+                phase,
+                tag,
+                idx,
+                url,
+                state,
+            )
 
         for ref in pending:
             idx, url = ref_meta.get(ref, (-1, "unknown"))
@@ -793,13 +769,6 @@ class RolloutManager:
             self._weights_onloaded_for_sync = False
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] resume_after_sync completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
-        self._log_worker_debug_states(
-            tp0_workers,
-            timeout_s=min(5, timeout_s),
-            phase="resume_after_sync",
-            tag=f"post_success trace_id={trace_id}",
-            level="info",
-        )
 
     def get_validate_reuse_sync_workers(self, trainer_rank: int):
         if not self._validate_reuse_coordinator.sync_required:
