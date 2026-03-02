@@ -25,7 +25,7 @@ from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from urllib3.exceptions import NewConnectionError
 
-from siirl.execution.rollout.concurrency import resolve_rollout_concurrency
+from siirl.execution.rollout.concurrency import resolve_max_num_seqs, resolve_rollout_concurrency
 from siirl.models.loader import load_tokenizer
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient, wait_until_ok
@@ -134,7 +134,7 @@ class SglangEngine:
             "port": self.port,
             # Server settings
             "trust_remote_code": config.trust_remote_code,
-            "max_running_requests": config.max_num_seqs,
+            "max_running_requests": resolve_max_num_seqs(self.config),
             "log_level": "warning",
             "mm_attention_backend": "fa3",
             "attention_backend": "fa3",
@@ -318,7 +318,7 @@ class SglangEngine:
 
         # Use semaphore to control concurrency (prevent overwhelming the server).
         # Router path: scale by num_engines (router distributes across all engines).
-        # Local/validate path: use validate_server_concurrency (single-engine scope).
+        # Local/validate path: use train_server_concurrency.
         max_concurrent = self._resolve_batch_concurrency(use_router)
         semaphore = asyncio.Semaphore(max_concurrent)
 

@@ -23,6 +23,7 @@ from collections import defaultdict, deque
 
 import ray
 
+from siirl.execution.rollout.concurrency import resolve_train_server_concurrency
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.enums import DistributedEnv
 from siirl.utils.net_utils.net import (
@@ -1179,9 +1180,14 @@ class RolloutManager:
                 all_val_samples.extend(val_batch)
 
             total_samples = len(all_val_samples)
-            chunk_size = max(1, int(getattr(self.config.rollout, "validate_chunk_size", 1024)))
+            configured_chunk_size = int(getattr(self.config.rollout, "validate_chunk_size", 0))
+            if configured_chunk_size > 0:
+                chunk_size = configured_chunk_size
+            else:
+                # Auto: one local-concurrency window per validate worker.
+                chunk_size = resolve_train_server_concurrency(self.config) * len(validate_workers)
             # Ensure chunk_size is at least num_workers so every worker gets work per chunk.
-            chunk_size = max(chunk_size, len(validate_workers))
+            chunk_size = max(1, chunk_size, len(validate_workers))
 
             logger.info(f"Validate dispatch: workers={len(validate_workers)}, " f"samples={total_samples}, chunk_size={chunk_size}")
 

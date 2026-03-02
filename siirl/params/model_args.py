@@ -189,22 +189,22 @@ class RolloutArguments:
     )
     max_num_batched_tokens: int = field(default=8192, metadata={"help": "Max batched tokens"})
     max_model_len: int | None = field(default=None, metadata={"help": "Max model length"})
-    max_num_seqs: int = field(default=1024, metadata={"help": "Max concurrent sequences"})
-    server_concurrency: int = field(
-        default=512,
-        metadata={"help": "Max concurrent client requests per rollout engine during batch generation"},
+    max_num_seqs: int = field(
+        default=0,
+        metadata={"help": ("Max concurrent sequences / max_running_requests. " "<=0 means auto derive as 4 * train_server_concurrency.")},
     )
     train_server_concurrency: int = field(
         default=256,
         metadata={"help": "Max concurrent client requests per worker during training rollout"},
     )
-    validate_server_concurrency: int = field(
-        default=256,
-        metadata={"help": "Max concurrent client requests per worker during validation (local, no router)"},
-    )
     validate_chunk_size: int = field(
-        default=1024,
-        metadata={"help": "Number of samples per validation chunk to limit peak concurrency"},
+        default=0,
+        metadata={
+            "help": (
+                "Number of samples per validation chunk to limit peak concurrency. "
+                "<=0 means auto derive as train_server_concurrency * validate_workers."
+            )
+        },
     )
     do_sample: bool = field(default=True, metadata={"help": "Enable sampling"})
     n: int = field(default=1, metadata={"help": "Number of responses"})
