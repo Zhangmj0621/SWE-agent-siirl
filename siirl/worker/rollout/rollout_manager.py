@@ -597,9 +597,9 @@ class RolloutManager:
         trace_id = trace_id or "na"
         if not self._train_offloaded:
             return
-        if not bool(getattr(self, "_weights_offloaded_for_sync_cycle", False)):
+        if not self._weights_offloaded_for_sync_cycle:
             return
-        if getattr(self, "_weights_onloaded_for_sync", False):
+        if self._weights_onloaded_for_sync:
             return
 
         tp0_workers = self.get_rollout_worker_on_tp0()
@@ -761,21 +761,24 @@ class RolloutManager:
         tp0_workers = self.get_rollout_worker_on_tp0()
         if not tp0_workers:
             return
-        offload_weights = bool(getattr(self, "_weights_offloaded_for_sync_cycle", False))
+        offload_weights = bool(self._weights_offloaded_for_sync_cycle)
         t0 = time.monotonic()
         try:
-            if offload_weights and not getattr(self, "_weights_onloaded_for_sync", False):
-                logger.info(
-                    f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}"
-                )
-                refs = [w.onload_memory.remote(["weights"]) for w in tp0_workers]
-                self._wait_with_diagnostics(
-                    refs,
-                    tp0_workers,
-                    timeout_s=timeout_s,
-                    phase="resume_after_sync",
-                    tag=f"weights trace_id={trace_id}",
-                )
+            if offload_weights:
+                if not self._weights_onloaded_for_sync:
+                    logger.info(
+                        f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}"
+                    )
+                    refs = [w.onload_memory.remote(["weights"]) for w in tp0_workers]
+                    self._wait_with_diagnostics(
+                        refs,
+                        tp0_workers,
+                        timeout_s=timeout_s,
+                        phase="resume_after_sync",
+                        tag=f"weights trace_id={trace_id}",
+                    )
+                # Clear only after successful weight onload so retries can retry this step.
+                self._weights_offloaded_for_sync_cycle = False
 
             logger.info(f"[RolloutManager] resume_after_sync: resuming kv_cache on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}")
             refs = [w.onload_memory.remote(["kv_cache"]) for w in tp0_workers]
@@ -789,7 +792,6 @@ class RolloutManager:
 
             ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
             self._train_offloaded = False
-            self._weights_offloaded_for_sync_cycle = False
         except Exception:
             logger.error("[RolloutManager] resume_after_sync failed\n" + traceback.format_exc())
             self._log_worker_debug_states(

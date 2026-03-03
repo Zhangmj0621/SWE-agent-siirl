@@ -170,7 +170,7 @@ class MainRunner:
                 ray.get(rollout_fut)
                 logger.success("RolloutManager initialized (colocate: pre-trainer)")
 
-                # Compatible with trainer bootstrap: repeated offload is idempotent.
+                # Bootstrap always offloads weights to maximize headroom for trainer init/checkpoint load.
                 colocate_offload_timeout = max(1, int(getattr(config.trainer, "colocate_timeout_s", 120)))
                 try:
                     ray.get(
@@ -184,10 +184,8 @@ class MainRunner:
                     logger.error("bootstrap-phase offload failure (pre-trainer-init)")
                     raise
 
-                trainer_group.init_actors()
-            else:
-                # Keep original non-colocate startup parallelism.
-                trainer_group.init_actors()
+            # Non-colocate keeps rollout init/trainer init overlap.
+            trainer_group.init_actors()
 
             # Load checkpoint if resume mode is enabled
             if config.trainer.resume_mode != "disable":
@@ -206,7 +204,7 @@ class MainRunner:
             logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
 
             # === 5. Async Training Loop ===
-            # run_dataloader is event-gated and won't consume GPU memory before bootstrap completes.
+            # run_dataloader waits on next_rollout(), so rollout GPU work starts after bootstrap.
             logger.info("Starting async training loop...")
             rollout_manager.run_dataloader.remote()
 

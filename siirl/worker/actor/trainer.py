@@ -317,6 +317,12 @@ class Trainer:
 
         self._maybe_init_validate_reuse_sync()
 
+    def _broadcast_rank0_int(self, local_value: int) -> int:
+        """Broadcast a rank-0 int32 scalar to all ranks via Gloo."""
+        value = torch.tensor([int(local_value)], dtype=torch.int32)
+        dist.broadcast(value, src=0, group=get_gloo_group())
+        return int(value.item())
+
     def _broadcast_rank0_error(self, local_error: Exception | None) -> Exception | None:
         """Broadcast rank 0 error flag to all ranks via Gloo so every rank fails consistently.
 
@@ -327,9 +333,8 @@ class Trainer:
             The original exception on rank 0, a RuntimeError placeholder on other ranks
             if rank 0 failed, or None if no error.
         """
-        flag = torch.tensor([1 if local_error is not None else 0], dtype=torch.int32)
-        dist.broadcast(flag, src=0, group=get_gloo_group())
-        if flag.item() == 0:
+        has_error = self._broadcast_rank0_int(1 if local_error is not None else 0)
+        if has_error == 0:
             return None
         if local_error is not None:
             return local_error
@@ -337,9 +342,7 @@ class Trainer:
 
     def _broadcast_rank0_bool(self, local_value: bool) -> bool:
         """Broadcast a rank-0 bool decision to keep all ranks on one control path."""
-        flag = torch.tensor([1 if local_value else 0], dtype=torch.int32)
-        dist.broadcast(flag, src=0, group=get_gloo_group())
-        return flag.item() == 1
+        return self._broadcast_rank0_int(1 if local_value else 0) == 1
 
     @property
     def _is_colocate(self) -> bool:
@@ -449,7 +452,10 @@ class Trainer:
             yield
         except Exception as e:
             primary_error = e
-            self._log_colocate_trace("offload_scope_error", trace_id=trace_id, label=label, error=repr(e))
+            try:
+                self._log_colocate_trace("offload_scope_error", trace_id=trace_id, label=label, error=repr(e))
+            except Exception:
+                logger.opt(exception=True).debug(f"[Trainer rank={self.rank}] trace logging failed in offload_scope_error label={label}")
             raise
         finally:
             try:
@@ -459,9 +465,17 @@ class Trainer:
                     self._colocate_scope_weights_offloaded = False
                     raise
                 logger.error(f"[Trainer rank={self.rank}] resume_after_sync failed during {label} cleanup: {resume_error}")
-                self._log_colocate_trace("offload_scope_resume_error", trace_id=trace_id, label=label, error=repr(resume_error))
+                try:
+                    self._log_colocate_trace("offload_scope_resume_error", trace_id=trace_id, label=label, error=repr(resume_error))
+                except Exception:
+                    logger.opt(exception=True).debug(
+                        f"[Trainer rank={self.rank}] trace logging failed in offload_scope_resume_error label={label}"
+                    )
             self._colocate_scope_weights_offloaded = False
-            self._log_colocate_trace("offload_scope_exit", trace_id=trace_id, label=label)
+            try:
+                self._log_colocate_trace("offload_scope_exit", trace_id=trace_id, label=label)
+            except Exception:
+                logger.opt(exception=True).debug(f"[Trainer rank={self.rank}] trace logging failed in offload_scope_exit label={label}")
 
     def update_rollout_weight(self, trace_id: str | None = None):
         """Sync trainer weights to rollout workers.

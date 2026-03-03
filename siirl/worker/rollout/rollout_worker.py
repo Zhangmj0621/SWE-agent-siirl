@@ -32,11 +32,12 @@ def _is_port_conflict(exc: BaseException) -> bool:
     """Check whether *exc* (or any chained cause) is an EADDRINUSE error."""
     cur: BaseException | None = exc
     while cur is not None:
-        if isinstance(cur, OSError) and cur.errno == errno.EADDRINUSE:
-            return True
-        cur_text = str(cur).lower()
-        if "address already in use" in cur_text or "eaddrinuse" in cur_text:
-            return True
+        if isinstance(cur, OSError):
+            if cur.errno == errno.EADDRINUSE:
+                return True
+            cur_text = str(cur).lower()
+            if "address already in use" in cur_text or "eaddrinuse" in cur_text:
+                return True
         cur = cur.__cause__ or cur.__context__
     return False
 
