@@ -158,6 +158,7 @@ class Trainer:
         self.checkpoint_manager = None
         self.param_sync = None
         self._validate_reuse_sync: ValidateReuseTrainerSync | None = None
+        self._colocate_scope_weights_offloaded = False
 
         # Training state
         self.global_step = 0
@@ -334,6 +335,12 @@ class Trainer:
             return local_error
         return RuntimeError(f"[Trainer rank={self.rank}] rank 0 reported failure (see rank 0 logs)")
 
+    def _broadcast_rank0_bool(self, local_value: bool) -> bool:
+        """Broadcast a rank-0 bool decision to keep all ranks on one control path."""
+        flag = torch.tensor([1 if local_value else 0], dtype=torch.int32)
+        dist.broadcast(flag, src=0, group=get_gloo_group())
+        return flag.item() == 1
+
     @property
     def _is_colocate(self) -> bool:
         return self.config.trainer.colocate and isinstance(self.param_sync, ParamSyncColocated)
@@ -394,10 +401,18 @@ class Trainer:
     def _colocate_offload(self, trace_id: str):
         """Rank-0 calls offload_for_train, broadcasts errors to all ranks."""
         error = None
+        weights_offloaded = False
         self._log_colocate_trace("offload_start", trace_id=trace_id)
         if self.rank == 0:
             try:
-                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=self._colocate_timeout_s, trace_id=trace_id))
+                weights_offloaded = bool(
+                    ray.get(
+                        self.rollout_manager.offload_for_train.remote(
+                            timeout_s=self._colocate_timeout_s,
+                            trace_id=trace_id,
+                        )
+                    )
+                )
             except Exception as e:
                 logger.error(f"[Trainer rank=0] offload_for_train failed: {e}")
                 error = e
@@ -405,6 +420,7 @@ class Trainer:
         if error is not None:
             self._log_colocate_trace("offload_failed", trace_id=trace_id, error=repr(error))
             raise error
+        self._colocate_scope_weights_offloaded = self._broadcast_rank0_bool(weights_offloaded)
         self._log_colocate_trace("offload_done", trace_id=trace_id)
 
     def _colocate_resume(self, trace_id: str):
@@ -440,9 +456,11 @@ class Trainer:
                 self._colocate_resume(trace_id=trace_id)
             except Exception as resume_error:
                 if primary_error is None:
+                    self._colocate_scope_weights_offloaded = False
                     raise
                 logger.error(f"[Trainer rank={self.rank}] resume_after_sync failed during {label} cleanup: {resume_error}")
                 self._log_colocate_trace("offload_scope_resume_error", trace_id=trace_id, label=label, error=repr(resume_error))
+            self._colocate_scope_weights_offloaded = False
             self._log_colocate_trace("offload_scope_exit", trace_id=trace_id, label=label)
 
     def update_rollout_weight(self, trace_id: str | None = None):
@@ -484,8 +502,8 @@ class Trainer:
         # If rollout WEIGHTS were released, onload them before IPC update.
         # update_weights_from_tensor requires destination weights to be resident.
         is_colocate = self.config.trainer.colocate and isinstance(self.param_sync, ParamSyncColocated)
-        offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
-        if is_colocate and offload_weights:
+        needs_onload_for_sync = is_colocate and bool(getattr(self, "_colocate_scope_weights_offloaded", False))
+        if needs_onload_for_sync:
             rpc_timeout_s = max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
             onload_error = None
             if self.rank == 0:

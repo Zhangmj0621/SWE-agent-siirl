@@ -14,6 +14,7 @@
 
 import asyncio
 import contextlib
+import errno
 import importlib
 import os
 import threading
@@ -25,6 +26,19 @@ from loguru import logger
 from siirl.engine.rollout.sglang_engine import SglangEngine
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.net import get_free_port, get_net_interface_ip
+
+
+def _is_port_conflict(exc: BaseException) -> bool:
+    """Check whether *exc* (or any chained cause) is an EADDRINUSE error."""
+    cur: BaseException | None = exc
+    while cur is not None:
+        if isinstance(cur, OSError) and cur.errno == errno.EADDRINUSE:
+            return True
+        cur_text = str(cur).lower()
+        if "address already in use" in cur_text or "eaddrinuse" in cur_text:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def async_run_wrapper(executor):
@@ -203,6 +217,8 @@ class RolloutWorker:
             except Exception as e:
                 with contextlib.suppress(Exception):
                     self.engine.shutdown()
+                if not _is_port_conflict(e):
+                    raise
                 if attempt < attempt_budget - 1:
                     logger.warning(f"Port {self.port} conflict (attempt {attempt + 1}/{attempt_budget}), retrying: {e}")
                 else:
