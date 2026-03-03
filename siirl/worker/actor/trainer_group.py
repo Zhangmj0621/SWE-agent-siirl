@@ -210,6 +210,12 @@ class TrainerGroup:
         logger.info(f"[TrainerGroup.init_actors] Creating {self.num_gpus} trainers")
         logger.info(f"  gpu_indices={self.gpu_indices}, local_ranks={self.local_ranks}")
         logger.info(f"  node_ips={self.node_ips}, is_shared={self.is_shared}")
+        if not (len(self.gpu_indices) == len(self.local_ranks) == len(self.node_ips) == self.num_gpus):
+            raise ValueError(
+                "TrainerGroup resource shape mismatch: "
+                f"indices={len(self.gpu_indices)}, local_ranks={len(self.local_ranks)}, "
+                f"node_ips={len(self.node_ips)}, num_gpus={self.num_gpus}"
+            )
 
         for rank, (bundle_idx, local_rank) in enumerate(zip(self.gpu_indices, self.local_ranks, strict=False)):
             env_vars = self._build_trainer_env(rank, local_rank)
@@ -281,7 +287,9 @@ class TrainerGroup:
     def put_weight(self):
         """
         Extract trained model parameters from actor and update to RolloutManager.
-        Supports model weight synchronization for rollout/inference.
+
+        In colocated mode, wraps sync with offload/resume to avoid OOM when
+        both SGLang and trainer share the same GPU.
         """
         logger.info("Extracting model weights from actor workers")
 
@@ -293,6 +301,17 @@ class TrainerGroup:
             logger.warning("RolloutManager not set, cannot update weights")
             return
 
-        futures = [trainer.update_rollout_weight.remote() for trainer in self.trainers]
-        ray.get(futures)
+        is_colocate = getattr(self.config.trainer, "colocate", False)
+        timeout = max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
+        offloaded = False
+        try:
+            if is_colocate:
+                ray.get(self.rollout_manager.offload_for_train.remote(timeout_s=timeout), timeout=timeout)
+                offloaded = True
+            futures = [trainer.update_rollout_weight.remote() for trainer in self.trainers]
+            ray.get(futures)
+        finally:
+            if offloaded:
+                ray.get(self.rollout_manager.resume_after_sync.remote(timeout_s=timeout), timeout=timeout)
+
         logger.info("Weight update completed")

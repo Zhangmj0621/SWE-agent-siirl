@@ -36,6 +36,33 @@ RAY_RUNTIME_ENV_VARS = {
 
 MAIN_RUNNER_CPU_RESERVATION = 5
 VALIDATE_PROGRESS_DRIVER_POLL_S = 0.5
+COLOCATE_MAX_GPU_MEM_UTIL = 0.45
+
+
+def _apply_colocate_guards(config: SiiRLArguments, logger) -> None:
+    if not config.trainer.colocate:
+        return
+
+    if config.trainer.validate_reuse_train_gpus:
+        logger.warning("colocate mode: force disabling validate_reuse_train_gpus")
+        config.trainer.validate_reuse_train_gpus = False
+
+    megatron_cfgs = [
+        ("actor.megatron", config.actor_ref.actor.megatron),
+        ("ref.megatron", config.actor_ref.ref.megatron),
+    ]
+    if config.actor_ref.algorithm.adv_estimator == "ppo":
+        megatron_cfgs.append(("critic.megatron", config.critic.megatron))
+
+    for name, megatron_cfg in megatron_cfgs:
+        if not megatron_cfg.param_offload:
+            logger.warning(f"colocate mode: force enabling {name}.param_offload")
+            megatron_cfg.param_offload = True
+
+    if config.rollout.gpu_memory_utilization > COLOCATE_MAX_GPU_MEM_UTIL:
+        current = config.rollout.gpu_memory_utilization
+        logger.warning(f"colocate mode: clamping rollout.gpu_memory_utilization from {current} to {COLOCATE_MAX_GPU_MEM_UTIL}")
+        config.rollout.gpu_memory_utilization = COLOCATE_MAX_GPU_MEM_UTIL
 
 
 @ray.remote(num_cpus=MAIN_RUNNER_CPU_RESERVATION)
@@ -65,12 +92,13 @@ class MainRunner:
 
         logger.info("MainRunner started. Beginning workflow setup...")
         start_time = time.time()
+        _apply_colocate_guards(config, logger)
         # === 0. Create Task Coordinator ===
         # Coordinator manages task lifecycle: graceful shutdown, failure propagation
         coordinator = create_coordinator()
         logger.info("TaskCoordinator created for lifecycle management")
 
-        # === 1. Allocate GPU Resources (Separated Mode) ===
+        # === 1. Allocate GPU Resources ===
         logger.info("Allocating GPU resources...")
         resources = allocate_resources(config)
         actor_resources = resources["actor"]

@@ -25,7 +25,7 @@ from sglang.srt.entrypoints.http_server import launch_server
 from sglang.srt.server_args import ServerArgs
 from urllib3.exceptions import NewConnectionError
 
-from siirl.execution.rollout.concurrency import resolve_rollout_concurrency
+from siirl.execution.rollout.concurrency import resolve_max_num_seqs, resolve_rollout_concurrency
 from siirl.models.loader import load_tokenizer
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient, wait_until_ok
@@ -134,7 +134,7 @@ class SglangEngine:
             "port": self.port,
             # Server settings
             "trust_remote_code": config.trust_remote_code,
-            "max_running_requests": config.max_num_seqs,
+            "max_running_requests": resolve_max_num_seqs(self.config),
             "log_level": "warning",
             "mm_attention_backend": "fa3",
             "attention_backend": "fa3",
@@ -215,19 +215,43 @@ class SglangEngine:
     def _rpc_timeout_s(self) -> int:
         return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
 
-    def _get_sampling_params(self, is_validate: bool, input_len: int | None = None) -> dict:
+    def _control_plane_timeout_s(self) -> int:
+        ray_timeout = max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
+        # Keep a small buffer so the outer Ray wait is still the hard deadline.
+        return ray_timeout if ray_timeout <= 5 else ray_timeout - 5
+
+    def _get_sampling_params(
+        self,
+        is_validate: bool,
+        input_len: int | None = None,
+        request_seed: int | None = None,
+    ) -> dict:
         """Get sampling parameters based on mode (train/validate)."""
         params = copy.deepcopy(self.sampling_params)
         if input_len is not None:
             params["max_new_tokens"] = min(self.max_model_len - input_len, self.max_response_length)
         if is_validate:
+            val_kwargs = self.config.rollout.val_kwargs
+            do_sample = bool(getattr(val_kwargs, "do_sample", False))
             params.update(
                 {
-                    "top_k": self.config.rollout.val_kwargs.top_k,
-                    "top_p": self.config.rollout.val_kwargs.top_p,
-                    "temperature": self.config.rollout.val_kwargs.temperature,
+                    "n": max(1, int(getattr(val_kwargs, "n", 1))),
+                    "top_k": int(getattr(val_kwargs, "top_k", -1)),
+                    "top_p": float(getattr(val_kwargs, "top_p", 1.0)),
+                    "temperature": float(getattr(val_kwargs, "temperature", 0.0)),
                 }
             )
+            if not do_sample:
+                params.update(
+                    {
+                        "temperature": 0.0,
+                        "top_p": 1.0,
+                        "top_k": 1,
+                        "n": 1,
+                    }
+                )
+        if request_seed is not None and ((not is_validate) or bool(getattr(self.config.rollout.val_kwargs, "do_sample", False))):
+            params["random_seed"] = int(request_seed)
         return params
 
     def _get_generate_url(self, use_router: bool = False) -> str:
@@ -236,9 +260,19 @@ class SglangEngine:
             return f"http://{self.router_address}/generate"
         return f"http://{self.ip}:{self.port}/generate"
 
-    async def generate(self, input_ids: list[int], is_validate: bool, use_router: bool = False):
+    async def generate(
+        self,
+        input_ids: list[int],
+        is_validate: bool,
+        use_router: bool = False,
+        request_seed: int | None = None,
+    ):
         """Single sample generation with optional router load balancing."""
-        sampling_params = self._get_sampling_params(is_validate, len(input_ids))
+        sampling_params = self._get_sampling_params(
+            is_validate,
+            len(input_ids),
+            request_seed=request_seed,
+        )
         url = self._get_generate_url(use_router=use_router)
 
         payload = {
@@ -270,6 +304,7 @@ class SglangEngine:
         show_progress: bool = True,
         progress_desc: str = "Validate",
         sort_by_length: bool = True,
+        request_seeds: list[int] | None = None,
         progress_callback: Callable[[int], None] | None = None,
     ) -> list[tuple[str, list[int], list[float]]]:
         """
@@ -311,16 +346,29 @@ class SglangEngine:
             sorted_indices = list(range(len(batch_input_ids)))
             sorted_input_ids = batch_input_ids
 
+        if request_seeds is not None and len(request_seeds) != len(batch_input_ids):
+            raise ValueError(f"request_seeds length mismatch: expected {len(batch_input_ids)}, got {len(request_seeds)}")
+        if request_seeds is None:
+            sorted_request_seeds = [None] * len(sorted_input_ids)
+        elif sort_by_length:
+            sorted_request_seeds = [request_seeds[idx] for idx in sorted_indices]
+        else:
+            sorted_request_seeds = request_seeds
+
         # Use semaphore to control concurrency (prevent overwhelming the server).
         # Router path: scale by num_engines (router distributes across all engines).
-        # Local/validate path: use validate_server_concurrency (single-engine scope).
+        # Local/validate path: use train_server_concurrency.
         max_concurrent = self._resolve_batch_concurrency(use_router)
         semaphore = asyncio.Semaphore(max_concurrent)
 
         # Create concurrent tasks for each sample (SGLang handles batching internally)
-        async def _generate_one(input_ids: list[int]):
+        async def _generate_one(input_ids: list[int], request_seed: int | None = None):
             async with semaphore:
-                sampling_params = self._get_sampling_params(is_validate, len(input_ids))
+                sampling_params = self._get_sampling_params(
+                    is_validate,
+                    len(input_ids),
+                    request_seed=request_seed,
+                )
                 payload = {
                     "input_ids": input_ids,
                     "sampling_params": sampling_params,
@@ -334,7 +382,7 @@ class SglangEngine:
             return output["text"], responses, log_probs
 
         # SGLang handles continuous batching internally
-        tasks = [_generate_one(ids) for ids in sorted_input_ids]
+        tasks = [_generate_one(ids, request_seed=seed) for ids, seed in zip(sorted_input_ids, sorted_request_seeds, strict=False)]
 
         if show_progress:
             from tqdm.asyncio import tqdm_asyncio
@@ -394,7 +442,7 @@ class SglangEngine:
 
     def flush_cache(self):
         """Flush the cache of the server."""
-        if self.rank != 0:
+        if self.sgl_args.node_rank != 0:
             return
         timeout_s = self._rpc_timeout_s()
         # flush cache will not return status_code 200 when there are pending requests
@@ -422,27 +470,135 @@ class SglangEngine:
         response.raise_for_status()
         return response
 
-    def _make_request(self, endpoint: str, payload: dict | None = None):
-        """Make a POST request to the specified endpoint with the given payload.
+    def release_memory_occupation(self, tags: list[str] | None = None):
+        """Release GPU memory occupation (weights/kv_cache) for colocated mode.
+
+        Tells the SGLang server to free specified GPU memory regions so that the
+        trainer can load its model onto the same GPU without OOM.
 
         Args:
-            endpoint: The API endpoint to call
-            payload: The JSON payload to send (default: empty dict)
-
-        Returns:
-            The JSON response from the server
+            tags: Memory region tags to release. Supported: ["weights", "kv_cache", "cuda_graph"].
+                  If None, releases all regions.
         """
+        payload = {"tags": tags} if tags is not None else {}
+        return self._make_request("release_memory_occupation", payload)
+
+    def resume_memory_occupation(self, tags: list[str] | None = None):
+        """Resume GPU memory occupation (weights/kv_cache) after colocated training.
+
+        Tells the SGLang server to re-allocate specified GPU memory regions after
+        the trainer has offloaded its model back to CPU.
+
+        Args:
+            tags: Memory region tags to resume. Supported: ["weights", "kv_cache", "cuda_graph"].
+                  If None, resumes all regions.
+        """
+        payload = {"tags": tags} if tags is not None else {}
+        return self._make_request("resume_memory_occupation", payload)
+
+    _CONTROL_PLANE_ENDPOINTS = frozenset(
+        {
+            "release_memory_occupation",
+            "resume_memory_occupation",
+        }
+    )
+
+    _RETRYABLE_ENDPOINTS = frozenset(
+        {
+            "update_weights_from_tensor",
+            "update_weights_from_distributed",
+            "release_memory_occupation",
+            "resume_memory_occupation",
+        }
+    )
+
+    def _control_plane_retry_params(self) -> tuple[int, int]:
+        """Use a single long control-plane call instead of short retries."""
+        return self._control_plane_timeout_s(), 0
+
+    def _process_debug_state(self) -> dict:
+        process = getattr(self, "process", None)
+        return {
+            "pid": getattr(process, "pid", None),
+            "alive": bool(process and process.is_alive()),
+            "exitcode": getattr(process, "exitcode", None),
+        }
+
+    def _probe_server_health(self, timeout_s: int = 2) -> str:
+        url = f"{self.sgl_args.url()}/health"
+        try:
+            response = requests.get(url, timeout=timeout_s)
+            return f"ok:{response.status_code}"
+        except Exception as e:
+            return f"error:{type(e).__name__}:{e}"
+
+    def _make_request(self, endpoint: str, payload: dict | None = None):
+        """Make a POST request with endpoint-aware timeout and retry strategy."""
         if self.sgl_args.node_rank != 0:
             return
 
         url = f"{self.sgl_args.url()}/{endpoint}"
-        response = requests.post(url, json=payload or {}, timeout=self._rpc_timeout_s())
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError:
-            logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
-            raise
-        return response.json()
+        is_control = endpoint in self._CONTROL_PLANE_ENDPOINTS
+        if is_control:
+            timeout_s, max_retries = self._control_plane_retry_params()
+        else:
+            timeout_s = self._rpc_timeout_s()
+            max_retries = 2 if endpoint in self._RETRYABLE_ENDPOINTS else 0
+        last_error: Exception | None = None
+
+        for attempt in range(max_retries + 1):
+            process = getattr(self, "process", None)
+            if process is not None and not process.is_alive():
+                raise RuntimeError(
+                    f"SGLang process on {self.ip}:{self.port} is dead (exitcode={process.exitcode}); " f"cannot call /{endpoint}"
+                )
+            try:
+                request_start = time.monotonic()
+                response = requests.post(url, json=payload or {}, timeout=timeout_s)
+                response.raise_for_status()
+                if is_control:
+                    elapsed_ms = (time.monotonic() - request_start) * 1000
+                    if elapsed_ms >= 5_000:
+                        logger.warning(
+                            "[COLOCATE_DEBUG][SglangEngine] slow control request endpoint={} timeout_s={} elapsed_ms={:.1f} process={}",
+                            endpoint,
+                            timeout_s,
+                            elapsed_ms,
+                            self._process_debug_state(),
+                        )
+                return response.json()
+            except requests.exceptions.HTTPError:
+                logger.error(f"[ERROR] HTTP {response.status_code}: {response.text[:500]}")
+                raise
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                last_error = e
+                if is_control:
+                    elapsed_ms = (time.monotonic() - request_start) * 1000
+                    health = self._probe_server_health(timeout_s=min(3, timeout_s))
+                    logger.error(
+                        "[COLOCATE_DEBUG][SglangEngine] control request failed endpoint={} attempt={}/{} timeout_s={} "
+                        "elapsed_ms={:.1f} process={} health_probe={} payload={}",
+                        endpoint,
+                        attempt + 1,
+                        max_retries + 1,
+                        timeout_s,
+                        elapsed_ms,
+                        self._process_debug_state(),
+                        health,
+                        payload,
+                    )
+                if attempt >= max_retries:
+                    raise
+                delay_s = min(1.0 * (2**attempt), 4.0)
+                logger.warning(
+                    f"[SglangEngine] request /{endpoint} failed on {self.ip}:{self.port}, "
+                    f"retry {attempt + 1}/{max_retries} in {delay_s:.1f}s: {e}"
+                )
+                time.sleep(delay_s)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Unexpected request failure for endpoint /{endpoint}")
 
     def init_param_sync_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         return self._make_request(
@@ -490,14 +646,79 @@ class SglangEngine:
         serialized_named_tensors,
         flush_cache=True,
         weight_version: str | None = None,
+        load_format: str | None = None,
+        trace_id: str | None = None,
+        bucket_idx: int | None = None,
+        part_idx: int | None = None,
+        part_count: int | None = None,
+        sync_key: str | None = None,
+        lane_idx: int | None = None,
+        route_epoch: int | None = None,
     ):
+        import base64
+
+        trace_id = trace_id or "na"
+        start = time.monotonic()
+        # HTTP JSON boundary: bytes must be base64-encoded; str passes through.
+        encoded = []
+        raw_payload_bytes = 0
+        raw_payload_min = None
+        raw_payload_max = None
+        for item in serialized_named_tensors:
+            if isinstance(item, (bytes, bytearray)):
+                item_len = len(item)
+                raw_payload_bytes += item_len
+                raw_payload_min = item_len if raw_payload_min is None else min(raw_payload_min, item_len)
+                raw_payload_max = item_len if raw_payload_max is None else max(raw_payload_max, item_len)
+                encoded.append(base64.b64encode(item).decode("ascii"))
+            else:
+                if isinstance(item, str):
+                    item_len = len(item)
+                    raw_payload_bytes += item_len
+                    raw_payload_min = item_len if raw_payload_min is None else min(raw_payload_min, item_len)
+                    raw_payload_max = item_len if raw_payload_max is None else max(raw_payload_max, item_len)
+                encoded.append(item)
+        encoded_payload_chars = sum(len(item) for item in encoded if isinstance(item, str))
+
         payload = {
-            "serialized_named_tensors": serialized_named_tensors,
+            "serialized_named_tensors": encoded,
             "flush_cache": flush_cache,
         }
         if weight_version is not None:
             payload["weight_version"] = weight_version
-        result = self._make_request("update_weights_from_tensor", payload)
+        if load_format is not None:
+            payload["load_format"] = load_format
+        if sync_key is not None:
+            payload["sync_key"] = sync_key
+        if lane_idx is not None:
+            payload["lane_idx"] = lane_idx
+        if route_epoch is not None:
+            payload["route_epoch"] = route_epoch
+        try:
+            result = self._make_request("update_weights_from_tensor", payload)
+        except Exception as e:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            logger.error(
+                "[SglangEngine] param_sync_from_tensor_failed trace_id={} "
+                "rank={} node_rank={} weight_version={} load_format={} bucket_idx={} part_idx={} part_count={} "
+                "elapsed_ms={} payload_bytes={} payload_min={} payload_max={} encoded_chars={} err={} process={}",
+                trace_id,
+                self.rank,
+                self.sgl_args.node_rank if hasattr(self, "sgl_args") else -1,
+                weight_version,
+                load_format or "tensor",
+                bucket_idx if bucket_idx is not None else -1,
+                part_idx if part_idx is not None else -1,
+                part_count if part_count is not None else -1,
+                round(elapsed_ms, 2),
+                raw_payload_bytes,
+                raw_payload_min if raw_payload_min is not None else -1,
+                raw_payload_max if raw_payload_max is not None else -1,
+                encoded_payload_chars,
+                repr(e),
+                self._process_debug_state(),
+            )
+            raise
         if weight_version:
             self._weight_version = int(weight_version)
         else:

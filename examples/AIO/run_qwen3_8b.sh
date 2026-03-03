@@ -2,11 +2,6 @@
 # ===================================================================================
 # ===                       USER CONFIGURATION SECTION                            ===
 # ===================================================================================
-# Single machine 8 GPUs: 2 GPUs for Actor (training), 6 GPUs for Rollout (inference)
-
-
-export SIIRL_DIR="${SIIRL_DIR:-{siirl-agentic-dir}}"
-export PYTHONPATH="$SIIRL_DIR:$PYTHONPATH"
 
 # --- Experiment and Model Definition ---
 export DATASET=deepscaler
@@ -79,6 +74,9 @@ TRAINING_CMD=(
     actor_ref.actor.optim.lr=1e-6
     actor_ref.actor.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE
     actor_ref.actor.ppo_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
+    actor_ref.actor.use_dynamic_batch=True
+    actor_ref.actor.max_tokens_per_gpu=16384
+    actor_ref.actor.use_workload_balance=True
     actor_ref.actor.use_kl_loss=True
     actor_ref.actor.clip_ratio=0.2
     actor_ref.actor.kl_loss_coef=0.01

@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import contextlib
+import inspect
 import multiprocessing
 import os
 import re
@@ -22,6 +23,7 @@ from collections import defaultdict, deque
 
 import ray
 
+from siirl.execution.rollout.concurrency import resolve_train_server_concurrency
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.enums import DistributedEnv
 from siirl.utils.net_utils.net import (
@@ -129,11 +131,17 @@ class RolloutManager:
         self.worker_urls = []
         self._validate_active = False
         self._validate_reuse_enabled = bool(
-            getattr(config.trainer, "validate_reuse_train_gpus", False) and self.train_gpu_resources is not None
+            getattr(config.trainer, "validate_reuse_train_gpus", False)
+            and self.train_gpu_resources is not None
+            and not self.gpu_resources.is_shared
         )
         self._trainer_world_size = self.train_gpu_resources.num_gpus if self.train_gpu_resources is not None else 0
         self._validate_reuse_coordinator = ValidateReuseCoordinator(trainer_world_size=self._trainer_world_size)
         self._validate_reuse_pool = ValidateReuseWorkerPool()
+
+        # Colocated lifecycle guard: prevents non-idempotent SGLang calls
+        # (pause_generation, offload_memory, resume) from being invoked twice.
+        self._train_offloaded = False
 
         # Cache for dist_init_addr (used in cross-node TP)
         self._dist_init_addrs = {}
@@ -184,11 +192,12 @@ class RolloutManager:
             bundle_idx = res.indices[first_gpu_idx]
             local_rank = res.local_ranks[first_gpu_idx]
 
+            worker_gpu_claim = 0.0 if self.gpu_resources.is_shared else 0.2
             worker = self._create_worker(
                 rank=worker_idx,
                 local_rank=local_rank,
                 bundle_idx=bundle_idx,
-                num_gpus=0.2,  # Fractional GPU for Ray scheduling
+                num_gpus=worker_gpu_claim,
                 device_name=self.device_name,
             )
             self.worker_handle.append(worker)
@@ -223,7 +232,6 @@ class RolloutManager:
         Returns:
             Ray actor handle to the created RolloutWorker instance
         """
-        # Set distributed environment variables
         env_vars = {
             DistributedEnv.WORLD_SIZE.value: str(world_size if world_size is not None else self.num_workers),
             DistributedEnv.RANK.value: str(rank),
@@ -233,6 +241,10 @@ class RolloutManager:
         }
         if os.getenv("GLOO_SOCKET_IFNAME"):
             env_vars["GLOO_SOCKET_IFNAME"] = os.getenv("GLOO_SOCKET_IFNAME")
+
+        # Colocated uses lightweight /health by default, unless user overrides it.
+        if self.gpu_resources.is_shared and os.getenv("SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION") is None:
+            env_vars["SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION"] = "false"
 
         # Generate unique actor name
         target_rollout_ray_class = rollout_ray_class or self.rollout_ray_class
@@ -452,6 +464,313 @@ class RolloutManager:
                 result.append(self.worker_handle[worker_idx])
         return result
 
+    def get_colocate_topology_snapshot(self) -> dict:
+        """Return stable topology payload for colocated route planning."""
+        import hashlib
+        import json
+        from urllib.parse import urlparse
+
+        # Derive node ranks from TP0 worker endpoint hosts.
+        tp_group_host: dict[int, str | None] = {}
+        for tp_group_idx, url in enumerate(self.worker_urls):
+            host = None
+            if isinstance(url, str) and url:
+                parsed = urlparse(url)
+                host = parsed.hostname or None
+            tp_group_host[tp_group_idx] = host
+
+        unique_hosts = sorted({h for h in tp_group_host.values() if h is not None})
+        host_to_node_rank = {host: idx for idx, host in enumerate(unique_hosts)}
+        nnodes = max(1, len(unique_hosts))
+
+        workers = []
+        for worker_idx, _worker in enumerate(self.worker_handle):
+            tp_group_local_rank = worker_idx % self.rollout_per_tp_group
+            tp_group_idx = worker_idx // self.rollout_per_tp_group
+            host = tp_group_host.get(tp_group_idx)
+            workers.append(
+                {
+                    "worker_idx": worker_idx,
+                    "tp_group_idx": tp_group_idx,
+                    "tp_group_local_rank": tp_group_local_rank,
+                    "node_rank": host_to_node_rank.get(host, -1),
+                    "nnodes": nnodes,
+                    "is_tp0": (tp_group_local_rank == 0),
+                    # URL is only set for TP0 workers.
+                    "url": self.worker_urls[tp_group_idx] if tp_group_local_rank == 0 and tp_group_idx < len(self.worker_urls) else None,
+                }
+            )
+
+        snapshot = {
+            "num_workers": self.num_workers,
+            "num_tp_groups": self.num_tp_groups,
+            "rollout_per_tp_group": self.rollout_per_tp_group,
+            "tp_size": self.tp_size,
+            "workers": workers,
+        }
+        snapshot["topology_hash"] = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[:16]
+        return snapshot
+
+    def offload_for_train(self, timeout_s: int = 120, trace_id: str | None = None):
+        """Release rollout GPU memory before trainer loads model.
+
+        Idempotent: repeated calls while already offloaded are no-ops.
+        Drains pending requests first because SGLang release_memory_occupation
+        asserts no in-progress requests.
+        """
+        from loguru import logger
+
+        trace_id = trace_id or "na"
+        if self._train_offloaded:
+            logger.debug(f"[RolloutManager] offload_for_train: already offloaded, skipping trace_id={trace_id}")
+            return
+
+        tp0_workers = self.get_rollout_worker_on_tp0()
+        if not tp0_workers:
+            return
+        offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
+        self._weights_onloaded_for_sync = False
+        tags = ["kv_cache"]
+        if offload_weights:
+            tags.append("weights")
+        logger.info(
+            f"[RolloutManager] offload_for_train: releasing {tags} on {len(tp0_workers)} TP0 workers "
+            f"trace_id={trace_id} timeout_s={timeout_s}"
+        )
+        t0 = time.monotonic()
+        pause_succeeded = False
+        try:
+            ray.get([w.pause_generation.remote() for w in tp0_workers], timeout=timeout_s)
+            pause_succeeded = True
+            ray.get([w.flush_cache.remote() for w in tp0_workers], timeout=timeout_s)
+            ray.get([w.offload_memory.remote(tags) for w in tp0_workers], timeout=timeout_s)
+            self._train_offloaded = True
+        except Exception:
+            if pause_succeeded:
+                with contextlib.suppress(Exception):
+                    ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
+            logger.error("[RolloutManager] offload_for_train failed\n" + traceback.format_exc())
+            self._log_worker_debug_states(
+                tp0_workers,
+                timeout_s=min(5, timeout_s),
+                phase="offload_for_train",
+                tag=f"{','.join(tags)} trace_id={trace_id}",
+            )
+            raise
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(f"[RolloutManager] offload_for_train completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
+
+    def onload_weights_for_sync(self, timeout_s: int = 120, trace_id: str | None = None):
+        """Ensure weights are resident before IPC weight update in colocated mode."""
+        from loguru import logger
+
+        trace_id = trace_id or "na"
+        if not bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False)):
+            return
+        if getattr(self, "_weights_onloaded_for_sync", False):
+            return
+
+        tp0_workers = self.get_rollout_worker_on_tp0()
+        if not tp0_workers:
+            return
+
+        logger.info(
+            f"[RolloutManager] onload_weights_for_sync: resuming weights on {len(tp0_workers)} TP0 workers "
+            f"trace_id={trace_id} timeout_s={timeout_s}"
+        )
+        t0 = time.monotonic()
+        try:
+            ray.get([w.onload_memory.remote(["weights"]) for w in tp0_workers], timeout=timeout_s)
+            self._weights_onloaded_for_sync = True
+        except Exception:
+            logger.error("[RolloutManager] onload_weights_for_sync failed\n" + traceback.format_exc())
+            self._log_worker_debug_states(
+                tp0_workers,
+                timeout_s=min(5, timeout_s),
+                phase="onload_weights_for_sync",
+                tag=f"weights trace_id={trace_id}",
+            )
+            raise
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(f"[RolloutManager] onload_weights_for_sync completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
+
+    def _wait_with_diagnostics(
+        self,
+        refs: list,
+        workers: list,
+        *,
+        timeout_s: int,
+        phase: str,
+        tag: str,
+    ):
+        """Wait for refs and raise timeout with per-worker diagnostics."""
+        from loguru import logger
+
+        ref_to_idx = {ref: idx for idx, ref in enumerate(refs)}
+        urls = getattr(self, "worker_urls", [])
+
+        ready, pending = ray.wait(refs, num_returns=len(refs), timeout=timeout_s)
+        for ref in ready:
+            idx = ref_to_idx.get(ref, -1)
+            url = urls[idx] if 0 <= idx < len(urls) else "unknown"
+            try:
+                ray.get(ref)
+            except Exception:
+                logger.error(
+                    f"[COLOCATE_DEBUG][RolloutManager] {phase} failed before timeout "
+                    f"tag={tag} worker_idx={idx} url={url}\n" + traceback.format_exc()
+                )
+                self._log_worker_debug_states(workers, timeout_s=min(5, timeout_s), phase=phase, tag=tag)
+                raise
+
+        if not pending:
+            return
+
+        pending_set = set(pending)
+        stuck = []
+        for idx, ref in enumerate(refs):
+            if ref not in pending_set:
+                continue
+            url = urls[idx] if idx < len(urls) else "unknown"
+            stuck.append(f"worker_idx={idx} url={url}")
+        logger.error(
+            f"[RolloutManager] {phase} timed out after {timeout_s}s "
+            f"tag={tag} total={len(refs)} done={len(ready)} stuck={len(pending)}: " + "; ".join(stuck)
+        )
+        self._log_worker_debug_states(workers, timeout_s=min(5, timeout_s), phase=phase, tag=tag)
+        raise TimeoutError(
+            f"[RolloutManager] {phase} timed out: {len(pending)}/{len(refs)} workers "
+            f"did not complete within {timeout_s}s ({', '.join(stuck)})"
+        )
+
+    def _log_worker_debug_states(self, workers: list, *, timeout_s: int, phase: str, tag: str):
+        from loguru import logger
+
+        if not workers:
+            return
+
+        urls = getattr(self, "worker_urls", [])
+        refs = []
+        for idx, worker in enumerate(workers):
+            try:
+                refs.append((idx, urls[idx] if idx < len(urls) else "unknown", worker.get_debug_state.remote()))
+            except Exception:
+                logger.warning(
+                    "[COLOCATE_DEBUG][RolloutManager] skip debug state fetch for worker_idx={} phase={} tag={}",
+                    idx,
+                    phase,
+                    tag,
+                )
+
+        if not refs:
+            return
+
+        obj_refs = [ref for _, _, ref in refs]
+        ref_meta = {ref: (idx, url) for idx, url, ref in refs}
+
+        try:
+            ready, pending = ray.wait(obj_refs, num_returns=len(obj_refs), timeout=timeout_s)
+        except Exception:
+            logger.warning(
+                "[COLOCATE_DEBUG][RolloutManager] failed to collect worker debug states phase={} tag={}\n{}",
+                phase,
+                tag,
+                traceback.format_exc(),
+            )
+            return
+
+        for ref in ready:
+            idx, url = ref_meta.get(ref, (-1, "unknown"))
+            try:
+                state = ray.get(ref)
+            except Exception as e:
+                logger.warning(
+                    "[COLOCATE_DEBUG][RolloutManager] worker debug state fetch failed phase={} tag={} worker_idx={} url={} err={}",
+                    phase,
+                    tag,
+                    idx,
+                    url,
+                    repr(e),
+                )
+                continue
+            logger.error(
+                "[COLOCATE_DEBUG][RolloutManager] worker debug state phase={} tag={} worker_idx={} url={} state={}",
+                phase,
+                tag,
+                idx,
+                url,
+                state,
+            )
+
+        for ref in pending:
+            idx, url = ref_meta.get(ref, (-1, "unknown"))
+            logger.warning(
+                "[COLOCATE_DEBUG][RolloutManager] worker debug state timeout phase={} tag={} worker_idx={} url={} timeout_s={}",
+                phase,
+                tag,
+                idx,
+                url,
+                timeout_s,
+            )
+
+    def resume_after_sync(self, timeout_s: int = 120, trace_id: str | None = None):
+        """Resume rollout GPU memory after weight sync.
+
+        Idempotent: repeated calls while not offloaded are no-ops.
+        Calls continue_generation to match the pause_generation from offload_for_train.
+        """
+        from loguru import logger
+
+        trace_id = trace_id or "na"
+        if not self._train_offloaded:
+            logger.debug(f"[RolloutManager] resume_after_sync: not offloaded, skipping trace_id={trace_id}")
+            return
+
+        tp0_workers = self.get_rollout_worker_on_tp0()
+        if not tp0_workers:
+            return
+        offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
+        t0 = time.monotonic()
+        try:
+            if offload_weights and not getattr(self, "_weights_onloaded_for_sync", False):
+                logger.info(
+                    f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}"
+                )
+                refs = [w.onload_memory.remote(["weights"]) for w in tp0_workers]
+                self._wait_with_diagnostics(
+                    refs,
+                    tp0_workers,
+                    timeout_s=timeout_s,
+                    phase="resume_after_sync",
+                    tag=f"weights trace_id={trace_id}",
+                )
+
+            logger.info(f"[RolloutManager] resume_after_sync: resuming kv_cache on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}")
+            refs = [w.onload_memory.remote(["kv_cache"]) for w in tp0_workers]
+            self._wait_with_diagnostics(
+                refs,
+                tp0_workers,
+                timeout_s=timeout_s,
+                phase="resume_after_sync",
+                tag=f"kv_cache trace_id={trace_id}",
+            )
+
+            ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
+            self._train_offloaded = False
+        except Exception:
+            logger.error("[RolloutManager] resume_after_sync failed\n" + traceback.format_exc())
+            self._log_worker_debug_states(
+                tp0_workers,
+                timeout_s=min(5, timeout_s),
+                phase="resume_after_sync",
+                tag=f"exception trace_id={trace_id}",
+            )
+            raise
+        finally:
+            self._weights_onloaded_for_sync = False
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(f"[RolloutManager] resume_after_sync completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
+
     def get_validate_reuse_sync_workers(self, trainer_rank: int):
         if not self._validate_reuse_coordinator.sync_required:
             return []
@@ -569,6 +888,64 @@ class RolloutManager:
                 )
         ray.get(futures)
 
+    def _router_health_kwargs(self) -> dict:
+        if self.gpu_resources.is_shared:
+            colocate_timeout = max(1, int(getattr(self.config.trainer, "colocate_timeout_s", 60)))
+            return {
+                "health_check_endpoint": "/health",
+                "health_check_timeout_secs": max(20, colocate_timeout),
+                "health_check_interval_secs": max(180, colocate_timeout * 3),
+                "disable_health_check": True,
+            }
+        return {
+            "health_check_endpoint": "/health",
+            "health_check_timeout_secs": 5,
+            "health_check_interval_secs": 60,
+            "disable_health_check": False,
+        }
+
+    def _build_router_args(self, RouterArgs, base_kwargs: dict, health_kwargs: dict):
+        """Build RouterArgs while keeping supported health kwargs on mixed versions."""
+        from loguru import logger
+
+        merged = dict(base_kwargs)
+        dropped = []
+
+        try:
+            sig = inspect.signature(RouterArgs)
+        except (TypeError, ValueError):
+            sig = None
+
+        if sig is not None:
+            params = sig.parameters
+            supports_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            if supports_var_kw:
+                merged.update(health_kwargs)
+            else:
+                supported = {name for name in params if name != "self"}
+                for key, value in health_kwargs.items():
+                    if key in supported:
+                        merged[key] = value
+                    else:
+                        dropped.append(key)
+        else:
+            # Fallback for C-extension callables without inspectable signatures.
+            for key, value in health_kwargs.items():
+                try:
+                    RouterArgs(**merged, **{key: value})
+                except TypeError:
+                    dropped.append(key)
+                else:
+                    merged[key] = value
+
+        if dropped:
+            logger.warning(
+                "[RolloutManager] RouterArgs does not support health kwargs {}; using compatible subset",
+                dropped,
+            )
+
+        return RouterArgs(**merged)
+
     def start_router(self, request_timeout: int = 3600):
         """
         Start SGLang router process and configure it with worker URLs.
@@ -582,14 +959,16 @@ class RolloutManager:
         router_port = self.config.rollout.router_port or get_free_port(router_ip, start_port=SGLANG_ROUTER_START_PORT)
         router_address = f"{router_ip}:{router_port}"
 
-        router_args = RouterArgs(
+        base_kwargs = dict(
             host=router_ip,
             port=router_port,
             worker_urls=self.worker_urls,
             balance_abs_threshold=0,
             log_level="warn",
-            request_timeout_secs=3600,
+            request_timeout_secs=max(1, int(request_timeout)),
         )
+        health_kwargs = self._router_health_kwargs()
+        router_args = self._build_router_args(RouterArgs, base_kwargs, health_kwargs)
 
         self.router_process = multiprocessing.Process(target=launch_router, args=(router_args,))
         self.router_process.daemon = True
@@ -801,9 +1180,14 @@ class RolloutManager:
                 all_val_samples.extend(val_batch)
 
             total_samples = len(all_val_samples)
-            chunk_size = max(1, int(getattr(self.config.rollout, "validate_chunk_size", 1024)))
+            configured_chunk_size = int(getattr(self.config.rollout, "validate_chunk_size", 0))
+            if configured_chunk_size > 0:
+                chunk_size = configured_chunk_size
+            else:
+                # Auto: one local-concurrency window per validate worker.
+                chunk_size = resolve_train_server_concurrency(self.config) * len(validate_workers)
             # Ensure chunk_size is at least num_workers so every worker gets work per chunk.
-            chunk_size = max(chunk_size, len(validate_workers))
+            chunk_size = max(1, chunk_size, len(validate_workers))
 
             logger.info(f"Validate dispatch: workers={len(validate_workers)}, " f"samples={total_samples}, chunk_size={chunk_size}")
 

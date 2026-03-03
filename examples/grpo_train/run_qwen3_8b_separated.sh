@@ -2,18 +2,19 @@
 # ===================================================================================
 # ===                       USER CONFIGURATION SECTION                            ===
 # ===================================================================================
-# Single machine 8 GPUs: 4 GPUs for Actor/Critic (training), 4 GPUs for Rollout.
+# Single machine 8 GPUs: 2 GPUs for Actor (training), 6 GPUs for Rollout (inference)
 
-# --- Experiment and Model Definition ---
+#  --- Experiment and Model Definition ---
 export DATASET=deepscaler
-export ALG=ppo
-export MODEL_NAME=qwen3-1.7b
+export ALG=grpo
+export MODEL_NAME=qwen3-8b
 
 # --- Path Definitions ---
+# Modify these paths according to your environment
 export HOME_DIR=${HOME_DIR:-{your-home-dir}}
 export TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/train.parquet}
 export TEST_DATA_PATH=${TEST_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/test.parquet}
-export MODEL_PATH=${MODEL_PATH:-$HOME_DIR/data/models/Qwen3-1.7B}
+export MODEL_PATH=${MODEL_PATH:-$HOME_DIR/data/models/Qwen3-8B}
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
@@ -25,9 +26,9 @@ export PPO_MINI_BATCH_SIZE=256
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
 export MAX_PROMPT_LENGTH=2048
 export MAX_RESPONSE_LENGTH=4096
-export ROLLOUT_GPU_MEMORY_UTILIZATION=0.8
-export ROLLOUT_TP=1
-export ROLLOUT_N=1
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.7
+export ROLLOUT_TP=2                    # Tensor parallelism for rollout
+export ROLLOUT_N=8                     # Number of samples per prompt
 export SAVE_FREQ=30
 export TEST_FREQ=10
 export TOTAL_EPOCHS=30
@@ -39,31 +40,38 @@ export NNODES=${PET_NNODES:-1}
 export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-29500}
-export ACTOR_GPUS=4
-export ROLLOUT_GPUS=4
+export ACTOR_GPUS=4                    # 4 GPUs for training (Actor/Ref)
+export ROLLOUT_GPUS=4                  # 4 GPUs for inference (SGLang)
 
 # --- Actor Parallelism Configuration ---
-export ACTOR_TP=1
-export ACTOR_PP=1
-export ACTOR_CP=1
+# TP (Tensor Parallel): Model sharding across GPUs within a group
+# PP (Pipeline Parallel): Model layer sharding across pipeline stages
+# CP (Context Parallel): Sequence parallelism for long context
+# DP (Data Parallel): Automatically computed as ACTOR_GPUS / (TP * PP * CP)
+export ACTOR_TP=4                      # Actor tensor parallelism (default: 1)
+export ACTOR_PP=1                      # Actor pipeline parallelism (default: 1)
+export ACTOR_CP=1                      # Actor context parallelism (default: 1)
+# With ACTOR_GPUS=2, TP=1, PP=1, CP=1 -> DP=2 (2 data parallel trainers)
 
 # --- Output Paths and Experiment Naming ---
 timestamp=$(date +"%Y%m%d_%H%M%S")
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}node_${ACTOR_GPUS}actor_${ROLLOUT_GPUS}rollout
-export PROJECT_NAME=siirl_agentic_${DATASET}_${ALG}
+export PROJECT_NAME=siirl_${DATASET}_${ALG}
 export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_experiment
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_tensorboard_$timestamp
 
-export WANDB_BASE_URL=${WANDB_BASE_URL:-https://xxx}
-export WANDB_API_KEY=${WANDB_API_KEY:-}
-
 # --- Define the Training Command and its Arguments ---
+# Parameter structure follows SiiRLArguments:
+#   - data: DataArguments
+#   - actor_ref: ActorRefArguments (model, actor, ref, algo)
+#   - rollout: RolloutArguments
+#   - algorithm: AlgorithmArguments
+#   - trainer: TrainingArguments
 TRAINING_CMD=(
     python3 -m siirl.async_train
     # === Algorithm Settings ===
-    actor_ref.algorithm.adv_estimator=$ALG
-    actor_ref.algorithm.gamma=1.0
-    actor_ref.algorithm.lam=1.0
+    algorithm.adv_estimator=$ALG
+    algorithm.kl_ctrl.kl_coef=0.001
     # === Data Settings ===
     data.train_files=$TRAIN_DATA_PATH
     data.val_files=$TEST_DATA_PATH
@@ -90,20 +98,11 @@ TRAINING_CMD=(
     actor_ref.actor.kl_loss_type=low_var_kl
     actor_ref.actor.megatron.param_offload=False
     actor_ref.actor.megatron.optimizer_offload=False
-    actor_ref.actor.megatron.use_mbridge=True
-    # === Critic Settings (PPO only) ===
-    critic.model.path=$MODEL_PATH
-    critic.model.trust_remote_code=True
-    critic.optim.lr=5e-6
-    critic.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE
-    critic.ppo_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
-    critic.ppo_epochs=1
-    critic.cliprange_value=0.5
-    critic.megatron.param_offload=False
-    critic.megatron.optimizer_offload=False
+    # Actor parallelism is configured via trainer.* below
     # === Reference Model Settings ===
     actor_ref.ref.log_prob_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_ref.ref.megatron.param_offload=True
+    actor_ref.actor.megatron.use_mbridge=True
     # === Rollout Settings (SGLang) ===
     rollout.name=sglang
     rollout.tensor_model_parallel_size=$ROLLOUT_TP
@@ -116,33 +115,32 @@ TRAINING_CMD=(
     trainer.actor_gpus=$ACTOR_GPUS
     trainer.rollout_gpus=$ROLLOUT_GPUS
     trainer.colocate=False
-    trainer.validate_reuse_train_gpus=True
     trainer.total_epochs=$TOTAL_EPOCHS
     trainer.save_freq=$SAVE_FREQ
     trainer.test_freq=$TEST_FREQ
     trainer.max_actor_ckpt_to_keep=$MAX_CKPT_KEEP
-    trainer.max_critic_ckpt_to_keep=$MAX_CKPT_KEEP
     trainer.default_local_dir=$CKPT_PATH
     trainer.project_name=$PROJECT_NAME
     trainer.experiment_name=$EXPERIMENT_NAME
-    trainer.logger="['console','tensorboard','wandb']"
+    trainer.logger="['console','tensorboard']"
     trainer.resume_mode=auto
     trainer.val_before_train=True
     # === Parallel Config ===
     trainer.tensor_model_parallel_size=$ACTOR_TP
     trainer.pipeline_model_parallel_size=$ACTOR_PP
     trainer.context_parallel_size=$ACTOR_CP
-    trainer.validate_reuse_train_gpus=True
 )
 
 # ===================================================================================
 # ===                          EXECUTION LOGIC                                    ===
 # ===================================================================================
 
+# --- Boilerplate Setup ---
 set -e
 set -o pipefail
 set -x
 
+# --- Infrastructure & Boilerplate Functions ---
 start_ray_cluster() {
     local RAY_HEAD_WAIT_TIMEOUT=600
     export RAY_RAYLET_NODE_MANAGER_CONFIG_NIC_NAME=${INTERFACE_NAME}
@@ -160,17 +158,10 @@ start_ray_cluster() {
         if [ "$NODE_RANK" = "0" ]; then
             echo "INFO: Starting Ray head node on $(hostname)..."
             export RAY_ADDRESS="$RAY_MASTER_ADDR:$RAY_MASTER_PORT"
-            ray start --head --port="$RAY_MASTER_PORT" --dashboard-port="$RAY_DASHBOARD_PORT" \
-                "${ray_start_common_opts[@]}" \
-                --system-config='{"gcs_server_request_timeout_seconds": 60, "gcs_rpc_server_reconnect_timeout_s": 60}'
-            local start_time
-            start_time=$(date +%s)
+            ray start --head --port="$RAY_MASTER_PORT" --dashboard-port="$RAY_DASHBOARD_PORT" "${ray_start_common_opts[@]}" --system-config='{"gcs_server_request_timeout_seconds": 60, "gcs_rpc_server_reconnect_timeout_s": 60}'
+            local start_time=$(date +%s)
             while ! ray health-check --address "$RAY_ADDRESS" &>/dev/null; do
-                if [ "$(( $(date +%s) - start_time ))" -ge "$RAY_HEAD_WAIT_TIMEOUT" ]; then
-                    echo "ERROR: Timed out waiting for head node. Exiting." >&2
-                    ray stop --force
-                    exit 1
-                fi
+                if [ "$(( $(date +%s) - start_time ))" -ge "$RAY_HEAD_WAIT_TIMEOUT" ]; then echo "ERROR: Timed out waiting for head node. Exiting." >&2; ray stop --force; exit 1; fi
                 echo "Head node not healthy yet. Retrying in 5s..."
                 sleep 5
             done
@@ -178,13 +169,9 @@ start_ray_cluster() {
         else
             local head_node_address="$MASTER_ADDR:$RAY_MASTER_PORT"
             echo "INFO: Worker node $(hostname) waiting for head at $head_node_address..."
-            local start_time
-            start_time=$(date +%s)
+            local start_time=$(date +%s)
             while ! ray health-check --address "$head_node_address" &>/dev/null; do
-                if [ "$(( $(date +%s) - start_time ))" -ge "$RAY_HEAD_WAIT_TIMEOUT" ]; then
-                    echo "ERROR: Timed out waiting for head. Exiting." >&2
-                    exit 1
-                fi
+                if [ "$(( $(date +%s) - start_time ))" -ge "$RAY_HEAD_WAIT_TIMEOUT" ]; then echo "ERROR: Timed out waiting for head. Exiting." >&2; exit 1; fi
                 echo "Head not healthy yet. Retrying in 5s..."
                 sleep 5
             done
@@ -197,7 +184,9 @@ start_ray_cluster() {
     fi
 }
 
+# --- Main Execution Function ---
 main() {
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
     ray stop --force 2>/dev/null || true
 
     export VLLM_USE_V1=1
@@ -212,16 +201,11 @@ main() {
 
     if [ "$NNODES" -gt 1 ] && [ "$NODE_RANK" = "0" ]; then
         echo "Waiting for all $NNODES nodes to join..."
-        local TIMEOUT=600
-        local start_time
-        start_time=$(date +%s)
+        local TIMEOUT=600; local start_time=$(date +%s)
         while true; do
-            if [ "$(( $(date +%s) - start_time ))" -ge "$TIMEOUT" ]; then
-                echo "Error: Timeout waiting for nodes." >&2
-                exit 1
-            fi
-            local ready_nodes
-            ready_nodes=$(python3 -c "
+            if [ "$(( $(date +%s) - start_time ))" -ge "$TIMEOUT" ]; then echo "Error: Timeout waiting for nodes." >&2; exit 1; fi
+            # Use Python API to check node count (avoids dashboard dependency)
+            local ready_nodes=$(python3 -c "
 import ray
 try:
     ray.init(address='auto', ignore_reinit_error=True)
@@ -232,9 +216,7 @@ except:
     print(0)
 " 2>/dev/null)
             ready_nodes=${ready_nodes:-0}
-            if [ "$ready_nodes" -ge "$NNODES" ]; then
-                break
-            fi
+            if [ "$ready_nodes" -ge "$NNODES" ]; then break; fi
             echo "Waiting... ($ready_nodes / $NNODES nodes ready)"
             sleep 5
         done
@@ -245,18 +227,16 @@ except:
         echo "INFO [RANK 0]: Starting main training command."
         eval "${TRAINING_CMD[@]}" "$@"
         echo "INFO [RANK 0]: Training finished."
-        sleep 30
-        ray stop --force >/dev/null 2>&1
+        sleep 30; ray stop --force >/dev/null 2>&1
     elif [ "$NNODES" -gt 1 ]; then
         local head_node_address="$MASTER_ADDR:$RAY_MASTER_PORT"
         echo "INFO [RANK $NODE_RANK]: Worker active. Monitoring head node at $head_node_address."
-        while ray health-check --address "$head_node_address" &>/dev/null; do
-            sleep 15
-        done
+        while ray health-check --address "$head_node_address" &>/dev/null; do sleep 15; done
         echo "INFO [RANK $NODE_RANK]: Head node down. Exiting."
     fi
 
     echo "INFO: Script finished on rank $NODE_RANK."
 }
 
+# --- Script Entrypoint ---
 main "$@"
