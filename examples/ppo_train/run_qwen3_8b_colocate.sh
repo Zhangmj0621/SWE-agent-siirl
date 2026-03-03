@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# ===================================================================================
-# ===                       USER CONFIGURATION SECTION                            ===
-# ===================================================================================
-# Single machine 8 GPUs: 4 GPUs for Actor/Critic (training), 4 GPUs for Rollout.
-
 # --- Experiment and Model Definition ---
 export DATASET=deepscaler
 export ALG=ppo
@@ -15,56 +10,53 @@ export TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/train
 export TEST_DATA_PATH=${TEST_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/test.parquet}
 export MODEL_PATH=${MODEL_PATH:-$HOME_DIR/data/models/Qwen3-1.7B}
 
-# Base output paths
+# --- Output ---
 export BASE_CKPT_PATH=ckpts
 export BASE_TENSORBOARD_PATH=tensorboard
 
-# --- Key Training Hyperparameters ---
+# --- Hyperparameters ---
 export TRAIN_BATCH_SIZE=512
 export PPO_MINI_BATCH_SIZE=256
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
 export MAX_PROMPT_LENGTH=2048
 export MAX_RESPONSE_LENGTH=4096
-export ROLLOUT_GPU_MEMORY_UTILIZATION=0.8
-export ROLLOUT_TP=1
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.7
+export ROLLOUT_TP=2
 export ROLLOUT_N=1
 export SAVE_FREQ=30
 export TEST_FREQ=10
 export TOTAL_EPOCHS=30
 export MAX_CKPT_KEEP=5
 
-# --- GPU Resource Allocation (Separated Mode) ---
+# --- Cluster ---
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
 export NNODES=${PET_NNODES:-1}
 export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-29500}
-export ACTOR_GPUS=4
-export ROLLOUT_GPUS=4
 
-# --- Actor Parallelism Configuration ---
-export ACTOR_TP=1
+# --- Megatron parallel config ---
+export ACTOR_TP=2
 export ACTOR_PP=1
 export ACTOR_CP=1
 
-# --- Output Paths and Experiment Naming ---
+# --- Names ---
 timestamp=$(date +"%Y%m%d_%H%M%S")
-export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}node_${ACTOR_GPUS}actor_${ROLLOUT_GPUS}rollout
+export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}node_${ACTOR_GPUS}gpu_colocate
 export PROJECT_NAME=siirl_agentic_${DATASET}_${ALG}
-export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_experiment
+export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_colocate
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_tensorboard_$timestamp
 
 export WANDB_BASE_URL=${WANDB_BASE_URL:-https://xxx}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 
-# --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
     python3 -m siirl.async_train
-    # === Algorithm Settings ===
+    # Algorithm
     actor_ref.algorithm.adv_estimator=$ALG
     actor_ref.algorithm.gamma=1.0
     actor_ref.algorithm.lam=1.0
-    # === Data Settings ===
+    # Data
     data.train_files=$TRAIN_DATA_PATH
     data.val_files=$TEST_DATA_PATH
     data.train_batch_size=$TRAIN_BATCH_SIZE
@@ -73,10 +65,10 @@ TRAINING_CMD=(
     data.filter_overlong_prompts=True
     data.truncation='error'
     data.shuffle=False
-    # === Actor/Ref Model Settings ===
+    # Model
     actor_ref.model.path=$MODEL_PATH
     actor_ref.model.trust_remote_code=True
-    # === Actor Training Settings ===
+    # Actor
     actor_ref.actor.optim.lr=1e-6
     actor_ref.actor.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE
     actor_ref.actor.ppo_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
@@ -88,10 +80,10 @@ TRAINING_CMD=(
     actor_ref.actor.clip_ratio=0.2
     actor_ref.actor.kl_loss_coef=0.01
     actor_ref.actor.kl_loss_type=low_var_kl
-    actor_ref.actor.megatron.param_offload=False
+    actor_ref.actor.megatron.param_offload=True
     actor_ref.actor.megatron.optimizer_offload=False
     actor_ref.actor.megatron.use_mbridge=True
-    # === Critic Settings (PPO only) ===
+    # Critic (PPO)
     critic.model.path=$MODEL_PATH
     critic.model.trust_remote_code=True
     critic.optim.lr=5e-6
@@ -99,24 +91,22 @@ TRAINING_CMD=(
     critic.ppo_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
     critic.ppo_epochs=1
     critic.cliprange_value=0.5
-    critic.megatron.param_offload=False
+    critic.megatron.param_offload=True
     critic.megatron.optimizer_offload=False
-    # === Reference Model Settings ===
+    # Ref
     actor_ref.ref.log_prob_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_ref.ref.megatron.param_offload=True
-    # === Rollout Settings (SGLang) ===
+    # Rollout
     rollout.name=sglang
     rollout.tensor_model_parallel_size=$ROLLOUT_TP
     rollout.gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTILIZATION
     rollout.n=$ROLLOUT_N
     rollout.trust_remote_code=True
-    # === Trainer Settings ===
+    # Trainer
     trainer.n_gpus_per_node=$N_GPUS_PER_NODE
     trainer.nnodes=$NNODES
-    trainer.actor_gpus=$ACTOR_GPUS
-    trainer.rollout_gpus=$ROLLOUT_GPUS
-    trainer.colocate=False
-    trainer.validate_reuse_train_gpus=True
+    trainer.colocate=True
+    trainer.validate_reuse_train_gpus=False
     trainer.total_epochs=$TOTAL_EPOCHS
     trainer.save_freq=$SAVE_FREQ
     trainer.test_freq=$TEST_FREQ
@@ -128,16 +118,11 @@ TRAINING_CMD=(
     trainer.logger="['console','tensorboard','wandb']"
     trainer.resume_mode=auto
     trainer.val_before_train=True
-    # === Parallel Config ===
+    # Parallel
     trainer.tensor_model_parallel_size=$ACTOR_TP
     trainer.pipeline_model_parallel_size=$ACTOR_PP
     trainer.context_parallel_size=$ACTOR_CP
-    trainer.validate_reuse_train_gpus=True
 )
-
-# ===================================================================================
-# ===                          EXECUTION LOGIC                                    ===
-# ===================================================================================
 
 set -e
 set -o pipefail
