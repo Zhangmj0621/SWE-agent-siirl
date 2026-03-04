@@ -163,7 +163,28 @@ class MainRunner:
             config.critic.optim.total_training_steps = total_training_steps
             logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
 
-            # Initialize trainer actors (creates Trainer Ray actors with models)
+            is_colocate = getattr(config.trainer, "colocate", False)
+
+            if is_colocate:
+                # Colocate startup must finish rollout init/offload before trainer init.
+                ray.get(rollout_fut)
+                logger.success("RolloutManager initialized (colocate: pre-trainer)")
+
+                # Bootstrap always offloads weights to maximize headroom for trainer init/checkpoint load.
+                colocate_offload_timeout = max(1, int(getattr(config.trainer, "colocate_timeout_s", 120)))
+                try:
+                    ray.get(
+                        rollout_manager.offload_for_train.remote(
+                            timeout_s=colocate_offload_timeout,
+                            trace_id="bootstrap-pre-trainer-init",
+                            offload_weights_override=True,
+                        )
+                    )
+                except Exception:
+                    logger.error("bootstrap-phase offload failure (pre-trainer-init)")
+                    raise
+
+            # Non-colocate keeps rollout init/trainer init overlap.
             trainer_group.init_actors()
 
             # Load checkpoint if resume mode is enabled
@@ -175,13 +196,15 @@ class MainRunner:
             init_time = time.time() - start_time
             logger.info(f"Initialization completed in {init_time:.1f}s")
 
-            # Wait rollout and Get Rollout Info
-            ray.get(rollout_fut)
+            if not is_colocate:
+                ray.get(rollout_fut)
+
             router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
             logger.success(f"RolloutManager initialized. Router at: {router_address}")
             logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
 
             # === 5. Async Training Loop ===
+            # run_dataloader waits on next_rollout(), so rollout GPU work starts after bootstrap.
             logger.info("Starting async training loop...")
             rollout_manager.run_dataloader.remote()
 

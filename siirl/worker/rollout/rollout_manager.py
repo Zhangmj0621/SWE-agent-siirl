@@ -142,6 +142,8 @@ class RolloutManager:
         # Colocated lifecycle guard: prevents non-idempotent SGLang calls
         # (pause_generation, offload_memory, resume) from being invoked twice.
         self._train_offloaded = False
+        self._weights_offloaded_for_sync_cycle = False
+        self._weights_onloaded_for_sync = False
 
         # Cache for dist_init_addr (used in cross-node TP)
         self._dist_init_addrs = {}
@@ -376,49 +378,65 @@ class RolloutManager:
             worker_ips[cfg["worker_idx"]] = ip
             node_workers[ip].append((worker, cfg))
 
-        # Allocate ports per node using first worker on each node
-        worker_ports = {}  # worker_idx -> port
+        # Allocate ports per node with retry slots so each worker retries
+        # only within its own deterministic port set (no cross-worker stealing).
+        retry_slots = max(1, PORT_RETRY_SLOTS)
+        worker_reserved_ports = {}  # worker_idx -> list[int]
         for _, workers_on_node in node_workers.items():
             first_worker = workers_on_node[0][0]
-            num_ports = len(workers_on_node)
-            ports = ray.get(first_worker.allocate_ports.remote(start_port=SGLANG_HTTP_START_PORT, count=num_ports))
+            worker_count = len(workers_on_node)
+            ports = ray.get(
+                first_worker.allocate_ports.remote(
+                    start_port=SGLANG_HTTP_START_PORT,
+                    count=worker_count * retry_slots,
+                )
+            )
             for i, (_, cfg) in enumerate(workers_on_node):
-                worker_ports[cfg["worker_idx"]] = ports[i]
+                worker_reserved_ports[cfg["worker_idx"]] = [ports[i + j * worker_count] for j in range(retry_slots)]
 
-        # Initialize engines with allocated ports
+        # Initialize engines with first reserved port
         init_futures = []
         worker_info = []
         for cfg in engine_configs:
             worker = self.worker_handle[cfg["worker_idx"]]
             ip = worker_ips[cfg["worker_idx"]]
-            port = worker_ports[cfg["worker_idx"]]
+            reserved = worker_reserved_ports[cfg["worker_idx"]]
 
             future = worker.init_engine.remote(
                 rank=cfg["worker_idx"],
                 dist_init_addr=cfg["dist_init_addr"],
                 ip=ip,
-                port=port,
+                port=reserved[0],
                 base_gpu_id=cfg["base_gpu_id"],
                 node_rank=cfg["node_rank"],
                 nnodes=cfg["nnodes"],
             )
             init_futures.append(future)
-            worker_info.append({"worker": worker, "cfg": cfg, "ip": ip, "port": port})
+            worker_info.append({"worker": worker, "cfg": cfg, "ip": ip, "reserved_ports": reserved})
 
         ray.get(init_futures)
 
-        # Phase 2: Launch servers (may retry with new ports on conflict)
+        # Phase 2: Launch servers with reserved port ownership
         launch_futures = []
         for info in worker_info:
-            launch_futures.append(info["worker"].launch_server.remote())
+            reserved = info["reserved_ports"]
+            launch_futures.append(
+                info["worker"].launch_server.remote(
+                    max_retries=len(reserved),
+                    reserved_ports=reserved,
+                )
+            )
         ray.get(launch_futures)
 
-        # Phase 3: Collect ACTUAL worker URLs (after possible port retries)
+        # Phase 3: Collect actual worker URLs and assert uniqueness
         self.worker_urls = []
         for info in worker_info:
             if info["cfg"]["is_tp0"]:
                 actual_port = ray.get(info["worker"].get_port.remote())
                 self.worker_urls.append(f"http://{info['ip']}:{actual_port}")
+
+        if len(self.worker_urls) != len(set(self.worker_urls)):
+            raise RuntimeError(f"Duplicate worker URLs detected after launch: {self.worker_urls}")
 
         logger.info(
             f"Initialized {self.num_workers} SGLang processes "
@@ -511,25 +529,35 @@ class RolloutManager:
         snapshot["topology_hash"] = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[:16]
         return snapshot
 
-    def offload_for_train(self, timeout_s: int = 120, trace_id: str | None = None):
+    def offload_for_train(
+        self,
+        timeout_s: int = 120,
+        trace_id: str | None = None,
+        offload_weights_override: bool | None = None,
+    ) -> bool:
         """Release rollout GPU memory before trainer loads model.
 
         Idempotent: repeated calls while already offloaded are no-ops.
         Drains pending requests first because SGLang release_memory_occupation
         asserts no in-progress requests.
+
+        Returns:
+            True if rollout weights are offloaded in this offload cycle.
         """
         from loguru import logger
 
         trace_id = trace_id or "na"
         if self._train_offloaded:
             logger.debug(f"[RolloutManager] offload_for_train: already offloaded, skipping trace_id={trace_id}")
-            return
+            return bool(self._weights_offloaded_for_sync_cycle)
 
         tp0_workers = self.get_rollout_worker_on_tp0()
         if not tp0_workers:
-            return
-        offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
+            return False
+        config_offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
+        offload_weights = config_offload_weights if offload_weights_override is None else bool(offload_weights_override)
         self._weights_onloaded_for_sync = False
+        self._weights_offloaded_for_sync_cycle = False
         tags = ["kv_cache"]
         if offload_weights:
             tags.append("weights")
@@ -545,6 +573,7 @@ class RolloutManager:
             ray.get([w.flush_cache.remote() for w in tp0_workers], timeout=timeout_s)
             ray.get([w.offload_memory.remote(tags) for w in tp0_workers], timeout=timeout_s)
             self._train_offloaded = True
+            self._weights_offloaded_for_sync_cycle = offload_weights
         except Exception:
             if pause_succeeded:
                 with contextlib.suppress(Exception):
@@ -559,15 +588,18 @@ class RolloutManager:
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(f"[RolloutManager] offload_for_train completed in {elapsed_ms:.1f}ms trace_id={trace_id}")
+        return offload_weights
 
     def onload_weights_for_sync(self, timeout_s: int = 120, trace_id: str | None = None):
         """Ensure weights are resident before IPC weight update in colocated mode."""
         from loguru import logger
 
         trace_id = trace_id or "na"
-        if not bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False)):
+        if not self._train_offloaded:
             return
-        if getattr(self, "_weights_onloaded_for_sync", False):
+        if not self._weights_offloaded_for_sync_cycle:
+            return
+        if self._weights_onloaded_for_sync:
             return
 
         tp0_workers = self.get_rollout_worker_on_tp0()
@@ -729,21 +761,24 @@ class RolloutManager:
         tp0_workers = self.get_rollout_worker_on_tp0()
         if not tp0_workers:
             return
-        offload_weights = bool(getattr(self.config.rollout, "colocate_release_weights_during_sync", False))
+        offload_weights = bool(self._weights_offloaded_for_sync_cycle)
         t0 = time.monotonic()
         try:
-            if offload_weights and not getattr(self, "_weights_onloaded_for_sync", False):
-                logger.info(
-                    f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}"
-                )
-                refs = [w.onload_memory.remote(["weights"]) for w in tp0_workers]
-                self._wait_with_diagnostics(
-                    refs,
-                    tp0_workers,
-                    timeout_s=timeout_s,
-                    phase="resume_after_sync",
-                    tag=f"weights trace_id={trace_id}",
-                )
+            if offload_weights:
+                if not self._weights_onloaded_for_sync:
+                    logger.info(
+                        f"[RolloutManager] resume_after_sync: resuming weights on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}"
+                    )
+                    refs = [w.onload_memory.remote(["weights"]) for w in tp0_workers]
+                    self._wait_with_diagnostics(
+                        refs,
+                        tp0_workers,
+                        timeout_s=timeout_s,
+                        phase="resume_after_sync",
+                        tag=f"weights trace_id={trace_id}",
+                    )
+                # Clear only after successful weight onload so retries can retry this step.
+                self._weights_offloaded_for_sync_cycle = False
 
             logger.info(f"[RolloutManager] resume_after_sync: resuming kv_cache on {len(tp0_workers)} TP0 workers " f"trace_id={trace_id}")
             refs = [w.onload_memory.remote(["kv_cache"]) for w in tp0_workers]
