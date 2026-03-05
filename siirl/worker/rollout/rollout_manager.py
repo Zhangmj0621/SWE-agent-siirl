@@ -162,6 +162,9 @@ class RolloutManager:
         # Initialize workers, engines, router and start rollout
         self.message_queue = deque()
 
+        # Used for staleness
+        self.staleness_cond = asyncio.Condition()
+
     def init(self):
         self.init_worker()
         self.init_engine()
@@ -1036,13 +1039,16 @@ class RolloutManager:
         Prefetch data asynchronously into dataloader queue.
         Make sure samples used per step is less than async_factor * train_batch_size.
         """
+        if total_remain_steps is None:
+            return
         putted_samples = 0
+        max_samples_per_step = self.config.trainer.async_factor * self.config.data.train_batch_size
         while putted_samples < total_remain_steps:
-            async with self.staleness_lock:
-                if self.staleness_sample_cnt >= self.config.trainer.async_factor * self.config.data.train_batch_size:
-                    await asyncio.sleep(0.001)
-                    continue
-                await self.data_coordinator.run_dataloader_single_sample.remote()
+            async with self.staleness_cond:
+                while self.staleness_sample_cnt >= max_samples_per_step:
+                    await self.staleness_cond.wait()
+            await self.data_coordinator.run_dataloader_single_sample.remote()
+            async with self.staleness_cond:
                 self.staleness_sample_cnt += 1
                 putted_samples += 1
 
@@ -1054,10 +1060,7 @@ class RolloutManager:
         dp_val_batch = (val_batch_size + self.dp_size - 1) // self.dp_size
         val_before_train = self.config.trainer.val_before_train
 
-        self.staleness_sample_cnt = 0
-        self.staleness_lock = asyncio.Lock()
-        total_remain_steps = (total_epochs - self.start_epoch) * self.num_train_batches - (self.global_steps % self.num_train_batches)
-        self.prefetch_task = asyncio.create_task(self.prefetch_data(total_remain_steps=total_remain_steps))
+        start_prefetch_task = False
         for epoch in range(self.start_epoch, total_epochs):
             for batch_idx in range(self.num_train_batches):
                 if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
@@ -1074,30 +1077,43 @@ class RolloutManager:
                 if val_before_train:
                     await self.validate(val_num_batch, dp_val_batch)
                     val_before_train = False
+
+                if not self.config.trainer.colocate:
+                    remain_sample_cnt = await self.data_coordinator.get_dataloader_queue_size.remote()
+                    async with self.staleness_cond:
+                        self.staleness_sample_cnt = remain_sample_cnt
+                        self.staleness_cond.notify_all()
+
+                if not self.config.trainer.colocate and not start_prefetch_task:
+                    self.staleness_sample_cnt = 0
+                    total_remain_steps = (total_epochs - self.start_epoch) * self.num_train_batches - (self.global_steps % self.num_train_batches)
+                    self.prefetch_task = asyncio.create_task(self.prefetch_data(total_remain_steps=total_remain_steps))
+                    start_prefetch_task = True
+
                 next_step = self.global_steps + 1
                 is_last_step = self.total_training_steps > 0 and next_step >= self.total_training_steps
-                has_batch = await self.data_coordinator.run_dataloader.remote(epoch)
-                if not has_batch:
-                    reason = (
-                        "[RolloutManager] Dataloader exhausted before expected training completion "
-                        f"epoch={epoch} batch_idx={batch_idx} global_steps={self.global_steps} "
-                        f"total_training_steps={self.total_training_steps}"
-                    )
-                    logger.warning(reason)
-                    if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
-                        self.report_completed()
-                    else:
-                        self.report_failure(reason)
-                    return
+                if self.config.trainer.colocate:
+                    has_batch = await self.data_coordinator.run_dataloader.remote(epoch)
+                    if not has_batch:
+                        reason = (
+                            "[RolloutManager] Dataloader exhausted before expected training completion "
+                            f"epoch={epoch} batch_idx={batch_idx} global_steps={self.global_steps} "
+                            f"total_training_steps={self.total_training_steps}"
+                        )
+                        logger.warning(reason)
+                        if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
+                            self.report_completed()
+                        else:
+                            self.report_failure(reason)
+                        return
+                else:
+                    # Since we prefetch data asynchronously, we do nothing here
+                    pass
                 self.global_steps = next_step
                 if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     await self.validate(val_num_batch, dp_val_batch)
                 train_step = rollout_to_train_step(self.global_steps)
                 logger.info(f"Start rollout generation for train_step={train_step} (rollout_index={self.global_steps})")
-                logger.info(f"Start Rollout Step {self.global_steps}")
-                remain_sample_cnt = await self.data_coordinator.get_dataloader_queue_size.remote()
-                async with self.staleness_lock: 
-                    self.staleness_sample_cnt = remain_sample_cnt
 
     def next_rollout(self):
         self.event.set()
