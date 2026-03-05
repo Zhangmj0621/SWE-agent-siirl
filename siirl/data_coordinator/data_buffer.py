@@ -482,6 +482,7 @@ class DataCoordinator:
 
     @ray.method(concurrency_group="dataloader")
     async def get_dataloader(self, batch_size, is_validate=False):
+        # TODO: current logic is only fetch the left sample in dataloader queue, we can optimize by cache-aware prefetch in rollout manager
         data_queue = self.dataloader_queue
         if is_validate:
             data_queue = self.dataloader_val_queue
