@@ -206,12 +206,12 @@ class MainRunner:
             # === 5. Async Training Loop ===
             # run_dataloader waits on next_rollout(), so rollout GPU work starts after bootstrap.
             logger.info("Starting async training loop...")
-            rollout_manager.run_dataloader.remote()
+            dataloader_ref = rollout_manager.run_dataloader.remote()
 
             trainer_group.train()
 
             # === 6. Wait for completion or failure ===
-            self._wait_for_completion(coordinator, logger)
+            self._wait_for_completion(coordinator, logger, dataloader_ref=dataloader_ref)
 
             # === 7. Check final status and raise if failed ===
             final_status = ray.get(coordinator.get_status.remote())
@@ -233,7 +233,7 @@ class MainRunner:
             # Note: MetricTracker cleanup is handled inside Trainer (rank=0)
             self._cleanup_and_report(coordinator, trainer_group, rollout_manager, start_time, logger)
 
-    def _wait_for_completion(self, coordinator, logger, check_interval: float = 5.0):
+    def _wait_for_completion(self, coordinator, logger, dataloader_ref=None, check_interval: float = 5.0):
         """
         Wait for training to complete, fail, or shutdown.
 
@@ -242,6 +242,21 @@ class MainRunner:
         logger.info("Monitoring task status...")
 
         while True:
+            if dataloader_ref is not None:
+                ready, _ = ray.wait([dataloader_ref], timeout=0)
+                if ready:
+                    try:
+                        ray.get(dataloader_ref)
+                        logger.info("RolloutManager.run_dataloader finished")
+                    except Exception as e:
+                        logger.error(f"RolloutManager.run_dataloader failed: {e}")
+                        current_status = ray.get(coordinator.get_status.remote())
+                        if current_status == "running":
+                            ray.get(coordinator.report_failure.remote("rollout_manager", f"run_dataloader failed: {e}"))
+                        raise
+                    finally:
+                        dataloader_ref = None
+
             status = ray.get(coordinator.get_status.remote())
             if status != "running":
                 break

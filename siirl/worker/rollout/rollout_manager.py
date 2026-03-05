@@ -1031,46 +1031,53 @@ class RolloutManager:
     async def run_dataloader(self):
         from loguru import logger
 
-        total_epochs = self.config.trainer.total_epochs
-        val_num_batch, val_batch_size = ray.get(self.data_coordinator.val_info.remote())
-        dp_val_batch = (val_batch_size + self.dp_size - 1) // self.dp_size
-        val_before_train = self.config.trainer.val_before_train
-        for epoch in range(self.start_epoch, total_epochs):
-            for batch_idx in range(self.num_train_batches):
-                if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
-                    logger.info(
-                        "[RolloutManager] Reached total training steps, stop dataloader loop "
-                        f"global_steps={self.global_steps} total_training_steps={self.total_training_steps}"
-                    )
-                    self.report_completed()
-                    return
-                if epoch == self.start_epoch and batch_idx < self.batches_to_skip:
-                    continue
-                await self.event.wait()
-                self.event.clear()
-                if val_before_train:
-                    await self.validate(val_num_batch, dp_val_batch)
-                    val_before_train = False
-                next_step = self.global_steps + 1
-                is_last_step = self.total_training_steps > 0 and next_step >= self.total_training_steps
-                has_batch = await self.data_coordinator.run_dataloader.remote(epoch)
-                if not has_batch:
-                    reason = (
-                        "[RolloutManager] Dataloader exhausted before expected training completion "
-                        f"epoch={epoch} batch_idx={batch_idx} global_steps={self.global_steps} "
-                        f"total_training_steps={self.total_training_steps}"
-                    )
-                    logger.warning(reason)
+        try:
+            total_epochs = self.config.trainer.total_epochs
+            val_num_batch, val_batch_size = ray.get(self.data_coordinator.val_info.remote())
+            dp_val_batch = (val_batch_size + self.dp_size - 1) // self.dp_size
+            val_before_train = self.config.trainer.val_before_train
+            for epoch in range(self.start_epoch, total_epochs):
+                for batch_idx in range(self.num_train_batches):
                     if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
+                        logger.info(
+                            "[RolloutManager] Reached total training steps, stop dataloader loop "
+                            f"global_steps={self.global_steps} total_training_steps={self.total_training_steps}"
+                        )
                         self.report_completed()
-                    else:
-                        self.report_failure(reason)
-                    return
-                self.global_steps = next_step
-                if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
-                    await self.validate(val_num_batch, dp_val_batch)
-                train_step = rollout_to_train_step(self.global_steps)
-                logger.info(f"Start rollout generation for train_step={train_step} (rollout_index={self.global_steps})")
+                        return
+                    if epoch == self.start_epoch and batch_idx < self.batches_to_skip:
+                        continue
+                    await self.event.wait()
+                    self.event.clear()
+                    if val_before_train:
+                        await self.validate(val_num_batch, dp_val_batch)
+                        val_before_train = False
+                    next_step = self.global_steps + 1
+                    is_last_step = self.total_training_steps > 0 and next_step >= self.total_training_steps
+                    has_batch = await self.data_coordinator.run_dataloader.remote(epoch)
+                    if not has_batch:
+                        reason = (
+                            "[RolloutManager] Dataloader exhausted before expected training completion "
+                            f"epoch={epoch} batch_idx={batch_idx} global_steps={self.global_steps} "
+                            f"total_training_steps={self.total_training_steps}"
+                        )
+                        logger.warning(reason)
+                        if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
+                            self.report_completed()
+                        else:
+                            self.report_failure(reason)
+                        return
+                    self.global_steps = next_step
+                    if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                        await self.validate(val_num_batch, dp_val_batch)
+                    train_step = rollout_to_train_step(self.global_steps)
+                    logger.info(f"Start rollout generation for train_step={train_step} (rollout_index={self.global_steps})")
+        except Exception as e:
+            reason = f"[RolloutManager] run_dataloader failed at rollout_index={self.global_steps}: {e}"
+            logger.error(reason)
+            logger.error(f"[RolloutManager] run_dataloader traceback:\n{traceback.format_exc()}")
+            self.report_failure(reason)
+            raise
 
     def next_rollout(self):
         self.event.set()
