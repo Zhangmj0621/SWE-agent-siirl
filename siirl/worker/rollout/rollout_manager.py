@@ -1043,7 +1043,7 @@ class RolloutManager:
         if total_remain_steps is None:
             return
         putted_samples = 0
-        max_samples_per_step = self.config.trainer.async_factor * self.config.data.train_batch_size
+        max_samples_per_step: int = self.config.trainer.async_factor * self.config.data.train_batch_size
         while putted_samples < total_remain_steps:
             async with self.staleness_cond:
                 while self.staleness_sample_cnt >= max_samples_per_step:
