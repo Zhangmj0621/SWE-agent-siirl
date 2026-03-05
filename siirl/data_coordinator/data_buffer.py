@@ -495,17 +495,29 @@ class DataCoordinator:
 
     @ray.method(concurrency_group="dataloader")
     def save_dataloader_state(self):
-        """Save dataloader state dict."""
+        """Save dataloader state and pending dataloader queues."""
         if self.dataloader is None:
             return None
-        return self.dataloader.state_dict()
+        return {
+            "dataloader_state": self.dataloader.state_dict(),
+            "train_queue": list(self.dataloader_queue),
+            "val_queue": list(self.dataloader_val_queue),
+        }
 
     @ray.method(concurrency_group="dataloader")
     def load_dataloader_state(self, state_dict):
-        """Load dataloader state dict."""
+        """Load dataloader state and pending dataloader queues."""
         if self.dataloader is None or state_dict is None:
             return
+        if isinstance(state_dict, dict) and "dataloader_state" in state_dict:
+            self.dataloader.load_state_dict(state_dict["dataloader_state"])
+            self.dataloader_queue = deque(state_dict.get("train_queue", []))
+            self.dataloader_val_queue = deque(state_dict.get("val_queue", []))
+            return
+
         self.dataloader.load_state_dict(state_dict)
+        self.dataloader_queue.clear()
+        self.dataloader_val_queue.clear()
 
 
 # ====================================================================
