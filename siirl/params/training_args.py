@@ -63,7 +63,7 @@ class TrainingArguments:
     max_critic_ckpt_to_keep: int = field(default=100, metadata={"help": "Maximum number of critic ckpts."})
     validation_data_dir: str | None = field(default=None, metadata={"help": "Validation data directory."})
     device: str | None = field(default="cuda", metadata={"help": "Training device."})
-    async_factor: int = field(default=1, metadata={"help": "Control async speed"})
+    async_factor: float = field(default=1, metadata={"help": "Control async speed"})
     param_sync_buffer_size: int = field(
         default=512 * 1024**2,
         metadata={
