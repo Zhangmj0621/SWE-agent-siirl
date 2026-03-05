@@ -434,7 +434,12 @@ class DataCoordinator:
     
     @ray.method(concurrency_group="dataloader")
     async def run_dataloader_single_sample(self, is_validate=False):
-        batch = self.dataloader.run_single_sample(is_validation_step=is_validate)
+        try:
+            batch = self.dataloader.run_single_sample(is_validation_step=is_validate)
+        except StopIteration:
+            return False
+        if batch is None:
+            return False
         tensor_dict = preprocess_dataloader(batch)
         samples = await Dict2Samples(tensor_dict, True)
         if is_validate:

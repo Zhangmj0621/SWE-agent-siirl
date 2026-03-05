@@ -272,7 +272,7 @@ class DataLoaderNode:
             if hasattr(self.train_dataloader.sampler, "set_epoch") and isinstance(self.train_dataloader.sampler, DistributedSampler):
                 logger.debug(f" Setting epoch {epoch} for DistributedSampler.")
                 self.train_dataloader.sampler.set_epoch(epoch)
-                
+
             iterator = iter(self.train_dataloader)
             for batch_dict in iterator:
                 yield epoch, batch_dict
@@ -356,6 +356,8 @@ class DataLoaderNode:
 
             return batch
 
+        except StopIteration:
+            raise
         except Exception as e:
             error_msg = f"Error during data loading : {e}"
             logger.exception(error_msg)  # Log with stack trace
