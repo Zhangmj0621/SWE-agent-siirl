@@ -1031,7 +1031,7 @@ class RolloutManager:
     async def prefetch_data(
         self,
         total_remain_steps: int | None = None,
-        ):
+    ):
         """
         Prefetch data asynchronously into dataloader queue.
         Make sure samples used per step is less than async_factor * train_batch_size.
