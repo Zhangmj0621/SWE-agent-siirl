@@ -266,7 +266,7 @@ class DataLoaderNode:
         """
         Create a continuous data iterator across epoch
         """
-        for epoch in range(self.config.rollout.total_epochs):
+        for epoch in range(self.global_config.trainer.total_epochs):
             logger.info(f" New epoch ({epoch}) or first step. Initializing train iterator.")
             self._current_epoch = epoch
             if hasattr(self.train_dataloader.sampler, "set_epoch") and isinstance(self.train_dataloader.sampler, DistributedSampler):

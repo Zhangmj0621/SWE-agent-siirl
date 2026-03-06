@@ -1083,7 +1083,7 @@ class RolloutManager:
                     val_before_train = False
 
                 if not self.config.trainer.colocate:
-                    remain_sample_cnt = await self.data_coordinator.get_dataloader_queue_size.remote()
+                    remain_sample_cnt = await self.data_coordinator.get_dataloader_size.remote()
                     async with self.staleness_cond:
                         self.staleness_sample_cnt = remain_sample_cnt
                         self.staleness_cond.notify_all()

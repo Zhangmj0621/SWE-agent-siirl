@@ -119,7 +119,10 @@ def Dict2Samples(data: TensorDict, async_mode: bool = False) -> list[Sample] | a
         local_sample.responses = data["responses"][index].numpy() if "responses" in data else None
         local_sample.response_mask = data["response_mask"][index].numpy() if "response_mask" in data else None
         local_sample.values = data["values"][index].numpy() if "values" in data else None
-        local_sample.raw_prompt_ids = data["raw_prompt_ids"][index] if "raw_prompt_ids" in data else None
+        raw_prompt_ids = data["raw_prompt_ids"][index] if "raw_prompt_ids" in data else None
+        if isinstance(raw_prompt_ids, np.ndarray):
+            raw_prompt_ids = raw_prompt_ids.tolist()
+        local_sample.raw_prompt_ids = raw_prompt_ids
         local_sample.advantages = data["advantages"][index].numpy() if "advantages" in data else None
         local_sample.raw_prompt = data["raw_prompt"][index] if "raw_prompt" in data else None
         local_sample.returns = data["returns"][index].numpy() if "returns" in data else None
