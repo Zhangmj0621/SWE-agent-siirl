@@ -287,7 +287,7 @@ class RoutingReplayManager:
 
             self_router.register_forward_pre_hook(_pre_hook)
 
-        def patched_routing(self_router, logits):
+        def patched_routing(self_router, logits, padding_mask=None):
             """
             Wraps TopKRouter.routing() to intercept expert routing decisions.
 
@@ -318,10 +318,10 @@ class RoutingReplayManager:
                 or stage == RoutingReplayStage.FALLTHROUGH
                 or cache is None
             ):
-                return original_routing(self_router, logits)
+                return original_routing(self_router, logits, padding_mask=padding_mask)
 
             if stage == RoutingReplayStage.RECORD:
-                scores, routing_map = original_routing(self_router, logits)
+                scores, routing_map = original_routing(self_router, logits, padding_mask=padding_mask)
                 cache.record(routing_map)
                 return scores, routing_map
 
@@ -393,6 +393,12 @@ class RoutingReplayManager:
             scaling_factor = getattr(self_router.config, "moe_router_topk_scaling_factor", None)
             if scaling_factor:
                 scores = scores * scaling_factor
+
+            # Ensure routing_map is bool to match Megatron's convention.
+            # fill_from_rollout now creates bool directly, but RECORD path
+            # already returns bool from original_routing. This is defensive.
+            if not routing_map.dtype == torch.bool:
+                routing_map = routing_map.bool()
 
             return scores, routing_map
 
@@ -475,11 +481,13 @@ class RoutingReplayManager:
                 flat_indices = layer_indices.reshape(-1, topk).to(torch.int64)
 
                 # Convert expert indices → routing_map [n_tokens, num_experts]
+                # Must be bool to match Megatron's TopKRouter output and satisfy
+                # MoEAlltoAllTokenDispatcher's dtype assertion.
                 n_tokens = flat_indices.shape[0]
-                routing_map = torch.zeros(n_tokens, num_experts, dtype=torch.float32)
+                routing_map = torch.zeros(n_tokens, num_experts, dtype=torch.bool)
                 # Clamp to valid expert range (padding tokens have index 0, which is valid)
                 flat_indices = flat_indices.clamp(0, num_experts - 1)
-                routing_map.scatter_(1, flat_indices, 1.0)
+                routing_map.scatter_(1, flat_indices, True)
 
                 self._caches[layer_idx].record(routing_map)
 
