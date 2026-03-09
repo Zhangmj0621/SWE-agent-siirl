@@ -1069,9 +1069,9 @@ class RolloutManager:
             dp_val_batch = (val_batch_size + self.dp_size - 1) // self.dp_size
             val_before_train = self.config.trainer.val_before_train
 
-        start_prefetch_task = False
-        # First put train_batch_size samples into pending_queue
-        prepare_before_start = False
+            start_prefetch_task = False
+            # First put train_batch_size samples into pending_queue
+            prepare_before_start = False
             for epoch in range(self.start_epoch, total_epochs):
                 for batch_idx in range(self.num_train_batches):
                     if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
