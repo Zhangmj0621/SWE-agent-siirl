@@ -76,13 +76,13 @@ class Sample(BaseModel):
         arbitrary_types_allowed = True
 
 
-def preprocess_dataloader(data: dict, n: int = 1):
+def preprocess_dataloader(data: dict, n: int = 1, uid_base: int = 0):
     batch_size = len(data["input_ids"])
 
     # Create integer indices for GRPO grouping
     # Each prompt gets a unique index (0, 1, 2, ..., batch_size-1)
     # This will be repeated to [0,0,0,...,1,1,1,...,2,2,2,...] after repeat
-    uid = np.arange(batch_size, dtype=np.int64)
+    uid = np.arange(uid_base, uid_base + batch_size, dtype=np.int64)
     data["uid"] = uid
 
     # Manually repeat all numpy arrays and torch tensors

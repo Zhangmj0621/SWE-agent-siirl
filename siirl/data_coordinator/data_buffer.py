@@ -53,6 +53,7 @@ class DataCoordinator:
         self.dataloader_val_queue: deque[Sample] = deque()
         self.dataloader = None
         self.dataloader_lock = asyncio.Lock()
+        self._next_train_uid = 0
 
     async def put(self, sample_info: SampleInfo, sample_ref: Any):
         """
@@ -440,7 +441,11 @@ class DataCoordinator:
             return False
         if batch is None:
             return False
-        tensor_dict = preprocess_dataloader(batch)
+        uid_base = 0
+        if not is_validate:
+            uid_base = self._next_train_uid
+            self._next_train_uid += len(batch["input_ids"])
+        tensor_dict = preprocess_dataloader(batch, uid_base=uid_base)
         samples = await Dict2Samples(tensor_dict, True)
         if is_validate:
             async with self.dataloader_lock:
@@ -464,7 +469,11 @@ class DataCoordinator:
             return False
         if batch is None:
             return False
-        tensor_dict = preprocess_dataloader(batch)
+        uid_base = 0
+        # if not is_validate:
+        #     uid_base = self._next_train_uid
+        #     self._next_train_uid += len(batch["input_ids"])
+        tensor_dict = preprocess_dataloader(batch, uid_base=uid_base)
         samples = await Dict2Samples(tensor_dict, True)
         if is_validate:
             async with self.dataloader_lock:
@@ -503,6 +512,7 @@ class DataCoordinator:
             "dataloader_state": self.dataloader.state_dict(),
             "train_queue": list(self.dataloader_queue),
             "val_queue": list(self.dataloader_val_queue),
+            "next_train_uid": self._next_train_uid,
         }
 
     @ray.method(concurrency_group="dataloader")
@@ -514,11 +524,17 @@ class DataCoordinator:
             self.dataloader.load_state_dict(state_dict["dataloader_state"])
             self.dataloader_queue = deque(state_dict.get("train_queue", []))
             self.dataloader_val_queue = deque(state_dict.get("val_queue", []))
+            if "next_train_uid" in state_dict:
+                self._next_train_uid = int(state_dict["next_train_uid"])
+            else:
+                queued_uids = [int(sample.uid) for sample in self.dataloader_queue if getattr(sample, "uid", None) is not None]
+                self._next_train_uid = (max(queued_uids) + 1) if queued_uids else 0
             return
 
         self.dataloader.load_state_dict(state_dict)
         self.dataloader_queue.clear()
         self.dataloader_val_queue.clear()
+        self._next_train_uid = 0
 
 
 # ====================================================================
