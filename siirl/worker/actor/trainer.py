@@ -991,6 +991,9 @@ class Trainer:
 
                     with Timer("get_batch") as get_batch_timer:
                         while (batch_data := self.get_batch(batch_size)) is None:
+                            if self._check_should_stop():
+                                logger.info(f"[Trainer rank={self.rank}] Stop signal received while waiting batch, exiting...")
+                                return
                             did_sync = self._validate_reuse_sync.try_sync() if self._validate_reuse_sync is not None else False
                             gate_decision = (
                                 self._validate_reuse_sync.wait_idle()
@@ -1026,6 +1029,9 @@ class Trainer:
 
                     with Timer("get_batch") as get_batch_timer:
                         while (batch_data := self.get_batch(batch_size)) is None:
+                            if self._check_should_stop():
+                                logger.info(f"[Trainer rank={self.rank}] Stop signal received while waiting batch, exiting...")
+                                return
                             did_sync = self._validate_reuse_sync.try_sync() if self._validate_reuse_sync is not None else False
                             gate_decision = (
                                 self._validate_reuse_sync.wait_idle()
