@@ -34,6 +34,11 @@ class DataCoordinator:
     and consumers (Trainers). It does not store the actual sample data, only the sample
     metadata (SampleInfo) and object references (ObjectRef). This allows it to implement
     complex global sampling strategies at a very low cost.
+    
+    Important change!!!
+    To ensure rollout worker not blocked by main loop, we expect to prefetch some sample from dataloader to pending_queue.
+    Specifically, we prefetch global bsz samples to pending_queue.
+    This strategy is designed for both colocation and disaggregation since it doesn't cause off-policy.
     """
 
     def __init__(self, nnodes: int, ppo_mini_batch_size: int, world_size: int):
@@ -49,10 +54,18 @@ class DataCoordinator:
         self._cache = []
 
         # # dataloader
-        self.dataloader_queue: deque[Sample] = deque()
-        self.dataloader_val_queue: deque[Sample] = deque()
+        self.pending_queue = asyncio.Queue()
+        self.dataloader_queue = asyncio.Queue()
+        self.dataloader_val_queue = asyncio.Queue()
         self.dataloader = None
-        self.dataloader_lock = asyncio.Lock()
+
+        # Background task used to move samples from pending_queue -> dataloader_queue.
+        self._prepare_data_task: asyncio.Task | None = None
+        self._prepare_data_event = asyncio.Event()
+        self._prepare_data_stop = False
+        self._prepare_data_reserve = 0
+
+        # Used to avoid uid = 0 in async mode
         self._next_train_uid = 0
 
     async def put(self, sample_info: SampleInfo, sample_ref: Any):
@@ -434,6 +447,45 @@ class DataCoordinator:
         return self.dataloader.num_val_batches, self.dataloader.val_batch_size
     
     @ray.method(concurrency_group="dataloader")
+    async def prepare_data(
+        self,
+        train_batch_size
+    ):
+        """
+        Start or wake up background moving task.
+        Keep at least ``train_batch_size`` samples in pending_queue.
+        """
+        reserve = max(0, int(train_batch_size))
+        self._prepare_data_reserve = reserve
+        self._prepare_data_stop = False
+        if self._prepare_data_task is None or self._prepare_data_task.done():
+            self._prepare_data_task = asyncio.create_task(self._prepare_data_loop())
+        # Wake up the background task.
+        self._prepare_data_event.set()
+        return True
+
+    async def _prepare_data_loop(self):
+        while not self._prepare_data_stop:
+            await self._prepare_data_event.wait()
+            self._prepare_data_event.clear()
+
+            while not self._prepare_data_stop:
+                moved = False
+                reserve = self._prepare_data_reserve
+                moved_count = 0
+                while self.pending_queue.qsize() > reserve:
+                    sample = self.pending_queue.get_nowait()
+                    await self.dataloader_queue.put(sample)
+                    moved = True
+                    moved_count += 1
+                    if moved_count % 128 == 0:
+                        await asyncio.sleep(0)
+
+                if not moved:
+                    break
+                await asyncio.sleep(0)
+
+    @ray.method(concurrency_group="dataloader")
     async def run_dataloader_single_sample(self, is_validate=False):
         try:
             batch = self.dataloader.run_single_sample(is_validation_step=is_validate)
@@ -448,18 +500,19 @@ class DataCoordinator:
         tensor_dict = preprocess_dataloader(batch, uid_base=uid_base)
         samples = await Dict2Samples(tensor_dict, True)
         if is_validate:
-            async with self.dataloader_lock:
-                self.dataloader_val_queue.extend(samples)
+            for sample in samples:
+                await self.dataloader_val_queue.put(sample)
         else:
-            async with self.dataloader_lock:
-                self.dataloader_queue.extend(samples)
+            for sample in samples:
+                await self.pending_queue.put(sample)
+            self._prepare_data_event.set()
         return True
                 
     @ray.method(concurrency_group="dataloader")
-    async def get_dataloader_size(self):
+    async def get_dataloader_size(self, train_batch_size):
         data_queue = self.dataloader_queue
-        async with self.dataloader_lock:
-            return len(data_queue)
+        remain_pending_size = self.pending_queue.qsize() - train_batch_size
+        return data_queue.qsize() + (remain_pending_size if remain_pending_size > 0 else 0)
 
     @ray.method(concurrency_group="dataloader")
     async def run_dataloader(self, epoch=0, is_validate=False):
@@ -476,18 +529,13 @@ class DataCoordinator:
         tensor_dict = preprocess_dataloader(batch, uid_base=uid_base)
         samples = await Dict2Samples(tensor_dict, True)
         if is_validate:
-            async with self.dataloader_lock:
-                self.dataloader_val_queue.extend(samples)
+            for sample in samples:
+                await self.dataloader_val_queue.put(sample)
         else:
-            async with self.dataloader_lock:
-                self.dataloader_queue.extend(samples)
+            for sample in samples:
+                await self.pending_queue.put(sample)
+            self._prepare_data_event.set()
         return True
-                
-    @ray.method(concurrency_group="dataloader")
-    async def get_dataloader_size(self):
-        data_queue = self.dataloader_queue
-        async with self.dataloader_lock:
-            return len(data_queue)
 
     @ray.method(concurrency_group="dataloader")
     async def get_dataloader(self, batch_size, is_validate=False):
@@ -495,13 +543,13 @@ class DataCoordinator:
         data_queue = self.dataloader_queue
         if is_validate:
             data_queue = self.dataloader_val_queue
-        async with self.dataloader_lock:
-            if len(data_queue) > batch_size:
-                return [data_queue.popleft() for _ in range(batch_size)]
-            else:
-                all_popped = list(data_queue)
-                data_queue.clear()
-                return all_popped
+        if data_queue.qsize() > batch_size:
+            return [await data_queue.get() for _ in range(batch_size)]
+        else:
+            all_popped = []
+            for _ in range(data_queue.qsize()):
+                all_popped.append(await data_queue.get())
+            return all_popped
 
     @ray.method(concurrency_group="dataloader")
     def save_dataloader_state(self):
@@ -510,8 +558,9 @@ class DataCoordinator:
             return None
         return {
             "dataloader_state": self.dataloader.state_dict(),
-            "train_queue": list(self.dataloader_queue),
-            "val_queue": list(self.dataloader_val_queue),
+            "pending_queue": list(self.pending_queue._queue),
+            "train_queue": list(self.dataloader_queue._queue),
+            "val_queue": list(self.dataloader_val_queue._queue),
             "next_train_uid": self._next_train_uid,
         }
 
@@ -522,18 +571,30 @@ class DataCoordinator:
             return
         if isinstance(state_dict, dict) and "dataloader_state" in state_dict:
             self.dataloader.load_state_dict(state_dict["dataloader_state"])
-            self.dataloader_queue = deque(state_dict.get("train_queue", []))
-            self.dataloader_val_queue = deque(state_dict.get("val_queue", []))
+            self.pending_queue: asyncio.Queue = asyncio.Queue()
+            pending_items = list(state_dict.get("pending_queue", []))
+            for item in pending_items:
+                self.pending_queue.put_nowait(item)
+            self.dataloader_queue: asyncio.Queue = asyncio.Queue()
+            train_items = list(state_dict.get("train_queue", []))
+            for item in train_items:
+                self.dataloader_queue.put_nowait(item)
+            self.dataloader_val_queue = asyncio.Queue()
+            val_items = list(state_dict.get("val_queue", []))
+            for item in val_items:
+                self.dataloader_val_queue.put_nowait(item)
             if "next_train_uid" in state_dict:
                 self._next_train_uid = int(state_dict["next_train_uid"])
             else:
-                queued_uids = [int(sample.uid) for sample in self.dataloader_queue if getattr(sample, "uid", None) is not None]
+                queued_uids = [int(sample.uid) for sample in train_items if getattr(sample, "uid", None) is not None]
                 self._next_train_uid = (max(queued_uids) + 1) if queued_uids else 0
+            self._prepare_data_event.set()
             return
 
         self.dataloader.load_state_dict(state_dict)
-        self.dataloader_queue.clear()
-        self.dataloader_val_queue.clear()
+        self.pending_queue = asyncio.Queue()
+        self.dataloader_queue = asyncio.Queue()
+        self.dataloader_val_queue = asyncio.Queue()
         self._next_train_uid = 0
 
 

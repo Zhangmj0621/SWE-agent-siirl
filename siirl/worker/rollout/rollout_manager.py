@@ -1044,7 +1044,7 @@ class RolloutManager:
             return
         putted_samples = 0
         max_samples_per_step: int = self.config.trainer.async_factor * self.config.data.train_batch_size
-        while putted_samples < total_remain_steps:
+        while putted_samples < total_remain_steps - self.config.data.train_batch_size:
             async with self.staleness_cond:
                 while self.staleness_sample_cnt >= max_samples_per_step:
                     await self.staleness_cond.wait()
@@ -1056,6 +1056,10 @@ class RolloutManager:
                 self.staleness_sample_cnt += 1
                 putted_samples += 1
 
+    async def prepare_data(self,):
+        await self.data_coordinator.prepare_data.remote(self.config.data.train_batch_size)
+        return
+
     async def run_dataloader(self):
         from loguru import logger
 
@@ -1065,6 +1069,8 @@ class RolloutManager:
         val_before_train = self.config.trainer.val_before_train
 
         start_prefetch_task = False
+        # First put train_batch_size samples into pending_queue
+        prepare_before_start = False
         for epoch in range(self.start_epoch, total_epochs):
             for batch_idx in range(self.num_train_batches):
                 if self.total_training_steps > 0 and self.global_steps >= self.total_training_steps:
@@ -1083,10 +1089,22 @@ class RolloutManager:
                     val_before_train = False
 
                 if not self.config.trainer.colocate:
-                    remain_sample_cnt = await self.data_coordinator.get_dataloader_size.remote()
+                    remain_sample_cnt = await self.data_coordinator.get_dataloader_size.remote(self.config.data.train_batch_size)
                     async with self.staleness_cond:
                         self.staleness_sample_cnt = remain_sample_cnt
                         self.staleness_cond.notify_all()
+
+                has_batch = True
+                if not prepare_before_start:
+                    if self.config.trainer.colocate:
+                        has_batch = await self.data_coordinator.run_dataloader.remote(epoch)
+                    else:
+                        for _ in range(self.config.data.train_batch_size):
+                            has_batch = await self.data_coordinator.run_dataloader_single_sample.remote()
+                            if not has_batch:
+                                break
+                    await self.prepare_data()
+                    prepare_before_start = True
 
                 if not self.config.trainer.colocate and not start_prefetch_task:
                     self.staleness_sample_cnt = 0
@@ -1096,9 +1114,12 @@ class RolloutManager:
 
                 next_step = self.global_steps + 1
                 is_last_step = self.total_training_steps > 0 and next_step >= self.total_training_steps
-                has_batch = True
                 if self.config.trainer.colocate:
-                    has_batch = await self.data_coordinator.run_dataloader.remote(epoch)
+                    if batch_idx == self.num_train_batches - 1:
+                        if epoch != total_epochs - 1:
+                            has_batch = await self.data_coordinator.run_dataloader.remote(epoch + 1)
+                    else:
+                        has_batch = await self.data_coordinator.run_dataloader.remote(epoch)
                 else:
                     # Since we prefetch data asynchronously, we do nothing here
                     pass
