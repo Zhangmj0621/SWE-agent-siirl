@@ -53,6 +53,7 @@ Usage in the training loop:
 
 from __future__ import annotations
 
+import os
 import threading
 from contextlib import contextmanager
 from enum import Enum
@@ -156,6 +157,10 @@ class RoutingReplayManager:
         self._installed = False
         # The currently active cache (set by per-router forward pre-hooks)
         self._active_cache: RoutingReplayCache | None = None
+        # How tokens are flattened when building routing_map from [batch, seq, ...].
+        # In many Megatron codepaths, logits are [seq, batch, ...] and flattened via view(-1),
+        # which corresponds to "seq_batch" order. See fill_from_rollout().
+        self._token_layout = os.environ.get("SIIRL_ROUTING_REPLAY_TOKEN_LAYOUT", "seq_batch")
 
     @classmethod
     def get(cls) -> RoutingReplayManager:
@@ -413,6 +418,8 @@ class RoutingReplayManager:
         micro_batch_size: int,
         num_experts: int,
         sequence_parallel: bool = False,
+        attention_mask: torch.Tensor | None = None,
+        token_layout: str | None = None,
     ) -> None:
         """
         Fill routing caches from rollout-captured expert indices.
@@ -428,8 +435,26 @@ class RoutingReplayManager:
             micro_batch_size: Number of samples per micro-batch (for splitting).
             num_experts: Total number of MoE experts (for routing_map construction).
             sequence_parallel: Whether sequence parallel is enabled (requires TP slicing).
+            attention_mask: Optional attention mask of shape [batch_size, max_seq_len].
+                Used to detect padded tokens and avoid routing them to a single expert.
+            token_layout: Flattening order used by the training-time router.
+                - "seq_batch": tokens are ordered by sequence first, then batch
+                  (matches flattening [seq, batch, ...] via view(-1)).
+                - "batch_seq": tokens are ordered by batch first, then sequence
+                  (matches flattening [batch, seq, ...] via reshape(-1)).
         """
         from megatron.core import parallel_state as mpu
+
+        if micro_batch_size <= 0:
+            raise ValueError(f"[RoutingReplay] micro_batch_size must be > 0, got {micro_batch_size}")
+        if num_experts <= 0:
+            raise ValueError(f"[RoutingReplay] num_experts must be > 0, got {num_experts}")
+
+        layout = (token_layout or self._token_layout).strip().lower()
+        if layout not in ("seq_batch", "batch_seq"):
+            raise ValueError(
+                f"[RoutingReplay] Invalid token_layout={layout!r}. Expected 'seq_batch' or 'batch_seq'."
+            )
 
         num_moe_layers = len(self._caches)
         if num_moe_layers == 0:
@@ -453,6 +478,12 @@ class RoutingReplayManager:
         tp_rank = mpu.get_tensor_model_parallel_rank()
         tp_size = mpu.get_tensor_model_parallel_world_size()
 
+        if attention_mask is not None:
+            if hasattr(attention_mask, "data"):
+                attention_mask = attention_mask.data
+            # Keep on CPU for cheap masking/scatter bookkeeping.
+            attention_mask = attention_mask.to(dtype=torch.bool, device="cpu", non_blocking=True)
+
         # Split into micro-batches along batch dimension
         n_micro_batches = (batch_size + micro_batch_size - 1) // micro_batch_size
         for mb_idx in range(n_micro_batches):
@@ -461,6 +492,7 @@ class RoutingReplayManager:
             # [mb_size, max_seq_len, num_moe_layers, topk]
             mb_routing = routing_4d[mb_start:mb_end]
             mb_size = mb_routing.shape[0]
+            mb_attn = attention_mask[mb_start:mb_end] if attention_mask is not None else None
 
             for layer_idx in range(num_moe_layers):
                 # [mb_size, max_seq_len, topk]
@@ -473,26 +505,55 @@ class RoutingReplayManager:
                     )
                     chunk = max_seq_len // tp_size
                     layer_indices = layer_indices[:, tp_rank * chunk : (tp_rank + 1) * chunk, :]
+                    layer_valid = (
+                        mb_attn[:, tp_rank * chunk : (tp_rank + 1) * chunk] if mb_attn is not None else None
+                    )
                     tokens_per_sample = chunk
                 else:
+                    layer_valid = mb_attn
                     tokens_per_sample = max_seq_len
 
-                # Flatten to [mb_size * tokens_per_sample, topk]
-                flat_indices = layer_indices.reshape(-1, topk).to(torch.int64)
+                # Flatten to [n_tokens, topk] using the same token order as training-time routing.
+                # Rollout data is [batch, seq, ...]; many Megatron MoE routers flatten [seq, batch, ...].
+                if layout == "seq_batch":
+                    layer_indices = layer_indices.permute(1, 0, 2)  # [seq, batch, topk]
+                    if layer_valid is not None:
+                        layer_valid = layer_valid.permute(1, 0)  # [seq, batch]
+
+                flat_indices = layer_indices.reshape(-1, topk).to(dtype=torch.int64, device="cpu")
+                flat_valid = layer_valid.reshape(-1).to(dtype=torch.bool, device="cpu") if layer_valid is not None else None
+
+                # Tokens with unknown routing (e.g. prompt fill or padding) should not all map to expert 0.
+                # We treat negative indices as "unknown" and assign them deterministically.
+                known = (flat_indices >= 0).all(dim=1)
+                unknown = ~known
+                if flat_valid is not None:
+                    unknown = unknown | (~flat_valid)
 
                 # Convert expert indices → routing_map [n_tokens, num_experts]
                 # Must be bool to match Megatron's TopKRouter output and satisfy
                 # MoEAlltoAllTokenDispatcher's dtype assertion.
                 n_tokens = flat_indices.shape[0]
-                routing_map = torch.zeros(n_tokens, num_experts, dtype=torch.bool)
-                # Clamp to valid expert range (padding tokens have index 0, which is valid)
-                flat_indices = flat_indices.clamp(0, num_experts - 1)
-                routing_map.scatter_(1, flat_indices, True)
+                routing_map = torch.zeros(n_tokens, num_experts, dtype=torch.bool, device="cpu")
+
+                if unknown.any():
+                    # Deterministic, reasonably balanced assignment for unknown tokens.
+                    # Use token row index so the assignment is stable across replays.
+                    unk_rows = torch.nonzero(unknown, as_tuple=False).squeeze(-1)
+                    base = unk_rows.to(dtype=torch.int64).unsqueeze(1)
+                    offsets = torch.arange(topk, dtype=torch.int64).unsqueeze(0)
+                    unk_idx = (base + offsets) % max(num_experts, 1)
+                    routing_map.scatter_(1, unk_idx, True)
+
+                if (~unknown).any():
+                    known_rows = torch.nonzero(~unknown, as_tuple=False).squeeze(-1)
+                    known_idx = flat_indices[known_rows].clamp(0, num_experts - 1)
+                    routing_map[known_rows].scatter_(1, known_idx, True)
 
                 self._caches[layer_idx].record(routing_map)
 
         logger.debug(
             f"[RoutingReplay] Filled {n_micro_batches} micro-batches × {num_moe_layers} layers "
             f"from rollout data (batch={batch_size}, seq={max_seq_len}, topk={topk}, "
-            f"num_experts={num_experts})"
+            f"num_experts={num_experts}, layout={layout})"
         )

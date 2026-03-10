@@ -106,27 +106,33 @@ class NaiveFlow:
         if agent_data.routed_experts is not None:
             n_real_tokens = len(agent_data.prompts_ids)  # prompt + response
             flat_len = len(agent_data.routed_experts)
-            if n_real_tokens > 0 and flat_len >= n_real_tokens:
+            if n_real_tokens <= 0:
+                raise RuntimeError("[RoutingReplay] n_real_tokens <= 0, cannot reshape routed_experts")
+
+            if flat_len % n_real_tokens == 0:
                 moe_dim = flat_len // n_real_tokens
-                sample.rollout_routed_experts = agent_data.routed_experts[:n_real_tokens * moe_dim].reshape(
-                    n_real_tokens, moe_dim
-                )
+                sample.rollout_routed_experts = agent_data.routed_experts.reshape(n_real_tokens, moe_dim)
             else:
-                # Fallback: try response-only routing
+                # Fallback: response-only routing (prompt routing unknown).
                 n_response = len(agent_data.response_ids)
-                if n_response > 0 and flat_len >= n_response:
-                    moe_dim = flat_len // n_response
-                    routing = agent_data.routed_experts[:n_response * moe_dim].reshape(n_response, moe_dim)
-                    # Prepend zeros for prompt tokens (they'll be computed live)
-                    n_prompt = n_real_tokens - n_response
-                    sample.rollout_routed_experts = np.concatenate([
-                        np.zeros((n_prompt, moe_dim), dtype=np.int32), routing
-                    ], axis=0)
-                else:
-                    logger.warning(
-                        f"[RoutingReplay] Unexpected routed_experts length {flat_len}, "
-                        f"total_tokens={n_real_tokens}, response_tokens={len(agent_data.response_ids)}"
+                if n_response <= 0 or flat_len % n_response != 0:
+                    raise RuntimeError(
+                        f"[RoutingReplay] Unexpected routed_experts length {flat_len}: "
+                        f"total_tokens={n_real_tokens}, response_tokens={n_response}. "
+                        f"Expected divisibility by total or response tokens."
                     )
+                moe_dim = flat_len // n_response
+                routing = agent_data.routed_experts.reshape(n_response, moe_dim)
+                # Use -1 sentinel for prompt tokens so training can avoid routing them all to expert 0.
+                n_prompt = n_real_tokens - n_response
+                if n_prompt < 0:
+                    raise RuntimeError(
+                        f"[RoutingReplay] response tokens ({n_response}) > total tokens ({n_real_tokens})"
+                    )
+                sample.rollout_routed_experts = np.concatenate(
+                    [np.full((n_prompt, moe_dim), -1, dtype=np.int32), routing],
+                    axis=0,
+                )
 
         # Track reward computation time
         reward_start = time.time()
