@@ -287,7 +287,7 @@ class RoutingReplayManager:
 
             self_router.register_forward_pre_hook(_pre_hook)
 
-        def patched_routing(self_router, logits, padding_mask=None):
+        def patched_routing(self_router, logits, **kwargs):
             """
             Wraps TopKRouter.routing() to intercept expert routing decisions.
 
@@ -318,10 +318,10 @@ class RoutingReplayManager:
                 or stage == RoutingReplayStage.FALLTHROUGH
                 or cache is None
             ):
-                return original_routing(self_router, logits, padding_mask=padding_mask)
+                return original_routing(self_router, logits, **kwargs)
 
             if stage == RoutingReplayStage.RECORD:
-                scores, routing_map = original_routing(self_router, logits, padding_mask=padding_mask)
+                scores, routing_map = original_routing(self_router, logits, **kwargs)
                 cache.record(routing_map)
                 return scores, routing_map
 
@@ -339,7 +339,7 @@ class RoutingReplayManager:
                 else:
                     routing_map = cache.pop_backward()
             else:
-                return original_routing(self_router, logits)
+                return original_routing(self_router, logits, **kwargs)
 
             # Recompute scores from current logits for gradient flow.
             # Must replicate the exact score computation that Megatron's
