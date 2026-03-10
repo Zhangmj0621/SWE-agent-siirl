@@ -191,7 +191,7 @@ class DataLoaderNode:
 
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
-            batch_size=train_batch_size,
+            batch_size=train_batch_size if self.global_config.trainer.colocate else 1,
             num_workers=self.num_loader_workers,
             drop_last=True,
             collate_fn=default_collate_fn,
@@ -261,6 +261,107 @@ class DataLoaderNode:
             DataLoader: The dataloader used for validation data.
         """
         return self.val_dataloader
+
+    def _create_continuous_iterator(self):
+        """
+        Create a continuous data iterator across epoch
+        """
+        for epoch in range(self.global_config.trainer.total_epochs):
+            logger.info(f" New epoch ({epoch}) or first step. Initializing train iterator.")
+            self._current_epoch = epoch
+            if hasattr(self.train_dataloader.sampler, "set_epoch") and isinstance(self.train_dataloader.sampler, DistributedSampler):
+                logger.debug(f" Setting epoch {epoch} for DistributedSampler.")
+                self.train_dataloader.sampler.set_epoch(epoch)
+
+            iterator = iter(self.train_dataloader)
+            for batch_dict in iterator:
+                yield epoch, batch_dict
+
+    def _create_continuous_val_iterator(self):
+        """
+        Create a continuous data iterator across epoch
+        """
+        iterator = iter(self.val_dataloader)
+        for batch_dict in iterator:
+            yield batch_dict
+
+    def run_single_sample(
+        self,
+        is_validation_step: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Executes the data loading process for a sample or validation.
+
+        Args:
+            is_validation_step (bool): Flag indicating if validation data is requested.
+            **kwargs: Additional arguments (not used directly in this basic version but
+                      part of the Node.execute signature).
+
+        Returns:
+            Any: A single data for async rollout or a batch of data for validation. The structure depends on the collate_fn.
+
+        Raises:
+            StopIteration: If the dataloader is exhausted and cannot provide more data
+                           (though this might be handled by the DAG scheduler).
+        """
+
+        try:
+            if is_validation_step:
+                if not self.val_dataloader:  # Handles empty validation dataset
+                    logger.warning(f"Rank {self.group_rank}: Validation dataloader is not available or empty.")
+                    return None  # Or an empty batch marker
+
+                # Validation dataloader loads the entire validation set as one batch.
+                # We get a fresh iterator each time for validation.
+                if self._current_val_iter is None:
+                    self._current_val_iter = self._create_continuous_val_iterator()
+
+                try:
+                    batch = next(self._current_val_iter)
+                    logger.debug("Yielding validation batch.")
+                    # Reset for next validation call, as it's one batch
+                    self._current_val_iter = None
+                except StopIteration:
+                    logger.warning("Validation dataloader exhausted unexpectedly (should be one batch). Resetting.")
+                    # This case should ideally not happen if batch_size = len(dataset) and it's not empty
+                    self._current_val_iter = self._create_continuous_val_iterator()  # Get a fresh iterator
+                    try:
+                        batch = next(self._current_val_iter)
+                    except StopIteration:
+                        logger.error("Validation dataloader is empty even after reset.")
+                        return None
+            else:  # Training step
+                if not self.train_dataloader:  # Handles empty training dataset
+                    logger.warning(f"Rank {self.group_rank}: Training dataloader is not available or empty.")
+                    return None  # Or an empty batch marker
+
+                if self._current_train_iter is None:
+                    self._current_train_iter = self._create_continuous_iterator()
+
+                try:
+                    epoch, batch = next(self._current_train_iter)
+                    logger.debug(f"Yielding training batch.")
+                except StopIteration:
+                    # This means the current epoch's data is exhausted.
+                    # The DAG scheduler should ideally handle this by moving to the next epoch
+                    # or terminating if all epochs are done.
+                    # For this node, it signals completion for this particular call if data is expected.
+                    error_msg = f"Training dataloader exhausted. This might be expected at the training end."
+                    logger.info(f"{error_msg}")
+                    # We might not want to mark FAILED here, as it's a natural end of an iterator.
+                    # The caller (DAG executor) should decide if more data was expected.
+                    # For now, let's re-raise StopIteration to signal the caller.
+                    raise  # Re-raise StopIteration
+
+            return batch
+
+        except StopIteration:
+            raise
+        except Exception as e:
+            error_msg = f"Error during data loading : {e}"
+            logger.exception(error_msg)  # Log with stack trace
+            raise  # Re-raise the exception so the DAG executor can handle it
 
     def run(
         self,
