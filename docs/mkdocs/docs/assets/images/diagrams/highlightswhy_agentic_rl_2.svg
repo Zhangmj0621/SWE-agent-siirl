@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="800" height="400" fill="#fff"/>
+  <rect x="20" y="10" width="760" height="340" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="760" height="32" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="400" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Benefits of Agentic RL</text>
+
+  <!-- ====== Layer 1: All component boxes ====== -->
+
+  <!-- Agentic Training box (top center) -->
+  <rect x="300" y="80" width="200" height="40" rx="1" fill="#FFFFFF" stroke="#81C784" stroke-width="0.8"/>
+  <text x="400" y="104" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Agentic Training</text>
+
+  <!-- Tool Use container -->
+  <rect x="40" y="180" width="160" height="100" rx="2" fill="#F3E5F5" stroke="#CE93D8" stroke-width="1.2"/>
+  <rect x="40" y="180" width="160" height="26" rx="2" fill="#E1BEE7" stroke="#CE93D8" stroke-width="1.2"/>
+  <text x="120" y="198" text-anchor="middle" fill="#7B1FA2" font-size="13" font-weight="bold">Tool Use</text>
+  <rect x="50" y="221" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="120" y="240" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Learn tool APIs</text>
+
+  <!-- Reasoning container -->
+  <rect x="230" y="180" width="160" height="100" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="230" y="180" width="160" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="310" y="198" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Reasoning</text>
+  <rect x="240" y="221" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="310" y="240" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Multi-step logic</text>
+
+  <!-- Grounding container -->
+  <rect x="420" y="180" width="160" height="100" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <rect x="420" y="180" width="160" height="26" rx="2" fill="#FFECB3" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="500" y="198" text-anchor="middle" fill="#F57F17" font-size="13" font-weight="bold">Grounding</text>
+  <rect x="430" y="221" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="500" y="240" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Real-world data</text>
+
+  <!-- Robustness container -->
+  <rect x="610" y="180" width="160" height="100" rx="2" fill="#FFF3E0" stroke="#FFB74D" stroke-width="1.2"/>
+  <rect x="610" y="180" width="160" height="26" rx="2" fill="#FFE0B2" stroke="#FFB74D" stroke-width="1.2"/>
+  <text x="690" y="198" text-anchor="middle" fill="#E65100" font-size="13" font-weight="bold">Robustness</text>
+  <rect x="620" y="221" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="690" y="240" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Errors</text>
+
+  <!-- ====== Layer 2: All arrows (orthogonal L-paths, no diagonals) ====== -->
+
+  <!-- Agentic Training -> Tool Use (L-path: down then left) -->
+  <path d="M 340 120 L 340 155 L 120 155 L 120 180" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Agentic Training -> Reasoning (L-path: down then slight left) -->
+  <path d="M 370 120 L 370 155 L 310 155 L 310 180" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Agentic Training -> Grounding (L-path: down then right) -->
+  <path d="M 430 120 L 430 155 L 500 155 L 500 180" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Agentic Training -> Robustness (L-path: down then right) -->
+  <path d="M 460 120 L 460 155 L 690 155 L 690 180" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="400" y="385" text-anchor="middle" fill="#555" font-size="10">Figure 2: Why agentic training improves model capabilities</text>
+</svg>

@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 580" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="900" height="580" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="520" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="32" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="450" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">GRPO Training Pipeline</text>
+
+  <!-- ====== Layer 1: All component boxes ====== -->
+
+  <!-- Group Sampling Phase container -->
+  <rect x="30" y="55" width="840" height="200" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="30" y="55" width="840" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="450" y="73" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Group Sampling Phase</text>
+
+  <!-- Group Advantage Computation container -->
+  <rect x="30" y="280" width="400" height="120" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <rect x="30" y="280" width="400" height="26" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="230" y="298" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Group Advantage Computation</text>
+
+  <!-- Policy Update container -->
+  <rect x="30" y="420" width="400" height="100" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <rect x="30" y="420" width="400" height="26" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="230" y="438" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Policy Update</text>
+
+  <!-- Sub-components in Group Sampling Phase (header ends at y=81, sub-components start at y=96+) -->
+  <rect x="50" y="100" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="110" y="119" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Prompt x_i</text>
+
+  <rect x="200" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="270" y="119" text-anchor="middle" fill="#424242" font-size="12">SGLang Engine</text>
+
+  <!-- Row 1 of samples: y_1..y_4 (shifted from y=80 to y=96 for 15px clearance below header) -->
+  <rect x="380" y="96" width="100" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="430" y="113" text-anchor="middle" fill="#424242" font-size="12">y_1 : r=0.8</text>
+  <rect x="500" y="96" width="100" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="550" y="113" text-anchor="middle" fill="#424242" font-size="12">y_2 : r=0.2</text>
+  <rect x="620" y="96" width="100" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="670" y="113" text-anchor="middle" fill="#424242" font-size="12">y_3 : r=1.0</text>
+  <rect x="740" y="96" width="100" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="790" y="113" text-anchor="middle" fill="#424242" font-size="12">y_4 : r=0.4</text>
+
+  <!-- Row 2 of samples: y_5..y_8 (shifted from y=120 to y=136) -->
+  <rect x="380" y="136" width="100" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="430" y="153" text-anchor="middle" fill="#424242" font-size="12">y_5 : r=0.7</text>
+  <rect x="500" y="136" width="100" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="550" y="153" text-anchor="middle" fill="#424242" font-size="12">y_6 : r=0.3</text>
+  <rect x="620" y="136" width="100" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="670" y="153" text-anchor="middle" fill="#424242" font-size="12">y_7 : r=0.9</text>
+  <rect x="740" y="136" width="100" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="790" y="153" text-anchor="middle" fill="#424242" font-size="12">y_8 : r=0.5</text>
+
+  <!-- Group of 8 samples summary -->
+  <rect x="50" y="196" width="180" height="30" rx="1" fill="#FFFFFF" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="140" y="215" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Group of 8 samples</text>
+
+  <!-- Group Advantage sub-components (header ends at y=306, 15px clearance -> y=321) -->
+  <rect x="50" y="321" width="150" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="125" y="340" text-anchor="middle" fill="#424242" font-size="12">Group Statistics</text>
+
+  <rect x="230" y="321" width="180" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="320" y="340" text-anchor="middle" fill="#424242" font-size="12">Advantage_i = r_i - u</text>
+
+  <!-- Policy Update sub-components (header ends at y=446, 15px clearance -> y=461) -->
+  <rect x="50" y="461" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="110" y="480" text-anchor="middle" fill="#424242" font-size="12">Ref Forward</text>
+
+  <rect x="200" y="461" width="150" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="275" y="480" text-anchor="middle" fill="#424242" font-size="12">Clipped PPO Loss</text>
+
+  <!-- ====== Layer 2: All arrows + bg rects + labels ====== -->
+
+  <!-- Prompt -> SGLang Engine -->
+  <line x1="170" y1="115" x2="200" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- SGLang Engine -> samples (L-shaped orthogonal: right then up to row 1) -->
+  <rect x="343" y="102" width="34" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 340 115 L 365 115 L 365 109 L 380 109" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="360" y="112" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">G samples</text>
+
+  <!-- Group of 8 samples -> Group Statistics (orthogonal: down then left to center) -->
+  <path d="M 140 226 L 140 336 L 50 336" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Group Statistics -> Advantage -->
+  <line x1="200" y1="336" x2="230" y2="336" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Advantage -> Ref Forward (orthogonal: down then left) -->
+  <path d="M 320 351 L 320 476 L 170 476" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Ref Forward -> Clipped PPO Loss -->
+  <line x1="170" y1="476" x2="200" y2="476" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="450" y="565" text-anchor="middle" fill="#555" font-size="10">Figure 1: Group Relative Policy Optimization workflow</text>
+</svg>

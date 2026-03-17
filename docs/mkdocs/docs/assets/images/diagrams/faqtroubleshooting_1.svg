@@ -1,0 +1,193 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 998 975" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="998" height="975" fill="#fff"/>
+  <rect x="20" y="10" width="958" height="915" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="958" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="499" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Faq > Troubleshooting (Fig. 1)</text>
+
+  <!-- Layer 1: All containers and boxes -->
+
+  <!-- Decision diamond container -->
+  <rect x="24" y="48" width="180" height="88" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="24" y="48" width="180" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="114" y="66" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Where does the error occur?</text>
+  <polygon points="114,90 188,120 114,150 40,120" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="1"/>
+  <text x="114" y="124" text-anchor="middle" fill="#424242" font-size="10.5">Training stage?</text>
+
+  <!-- ROW 1: Problem categories (y=175) -->
+  <!-- Initialization container -->
+  <rect x="24" y="170" width="575" height="50" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="311" y="184" text-anchor="middle" fill="#616161" font-size="11" font-weight="bold">Initialization</text>
+  <rect x="40" y="192" width="148" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="114" y="209" text-anchor="middle" fill="#424242" font-size="11">Ray connection?</text>
+  <rect x="213" y="192" width="148" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="287" y="209" text-anchor="middle" fill="#424242" font-size="11">GPU allocation?</text>
+  <rect x="386" y="192" width="148" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="460" y="209" text-anchor="middle" fill="#424242" font-size="11">SGLang startup?</text>
+
+  <!-- Training Loop container -->
+  <rect x="620" y="170" width="340" height="50" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="790" y="184" text-anchor="middle" fill="#2E7D32" font-size="11" font-weight="bold">Training Loop</text>
+  <rect x="636" y="192" width="140" height="26" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="706" y="209" text-anchor="middle" fill="#424242" font-size="11">OOM error?</text>
+  <rect x="800" y="192" width="140" height="26" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="870" y="209" text-anchor="middle" fill="#424242" font-size="11">No progress?</text>
+
+  <!-- ROW 2: Multi-Turn / Agentic (y=245) -->
+  <rect x="24" y="245" width="736" height="50" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="392" y="259" text-anchor="middle" fill="#1565C0" font-size="11" font-weight="bold">Multi-Turn / Agentic</text>
+  <!-- 4 boxes, container inner span = 736 - 2*16 = 704, w=148 each, gap=(704-4*148)/3 = 36 -->
+  <rect x="40" y="267" width="148" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="114" y="284" text-anchor="middle" fill="#424242" font-size="11">Reward = 0?</text>
+  <rect x="224" y="267" width="148" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="298" y="284" text-anchor="middle" fill="#424242" font-size="11">Tool calls not detected?</text>
+  <rect x="408" y="267" width="148" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="482" y="284" text-anchor="middle" fill="#424242" font-size="11">AIO connection failed?</text>
+  <rect x="592" y="267" width="148" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="666" y="284" text-anchor="middle" fill="#424242" font-size="11">Tool timeout?</text>
+
+  <!-- ROW 3: Checkpoint + Trajectories (y=320) -->
+  <rect x="24" y="320" width="260" height="50" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="154" y="334" text-anchor="middle" fill="#1565C0" font-size="11" font-weight="bold">Trajectories</text>
+  <!-- 1 box in Trajectories: w=130 -->
+  <rect x="89" y="342" width="130" height="26" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="154" y="359" text-anchor="middle" fill="#424242" font-size="11">Trajectories too short?</text>
+
+  <rect x="310" y="320" width="290" height="50" rx="2" fill="#FFF3E0" stroke="#FFB74D" stroke-width="1.2"/>
+  <text x="455" y="334" text-anchor="middle" fill="#E65100" font-size="11" font-weight="bold">Checkpoint</text>
+  <!-- 2 boxes in Checkpoint: container inner = 290 - 2*16 = 258, w=120 each, gap=(258-240)/1 = 18 -->
+  <rect x="326" y="342" width="120" height="26" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="386" y="359" text-anchor="middle" fill="#424242" font-size="11">Resume fails?</text>
+  <rect x="464" y="342" width="120" height="26" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="524" y="359" text-anchor="middle" fill="#424242" font-size="11">Disk full?</text>
+
+  <!-- SOLUTIONS SECTION -->
+  <!-- Divider -->
+  <line x1="30" y1="400" x2="968" y2="400" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <rect x="472" y="407" width="54" height="14" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="499" y="418" text-anchor="middle" fill="#9E9E9E" font-size="10" font-style="italic">Solutions</text>
+
+  <!-- Solution boxes (y=435..onwards) -->
+  <!-- Row A: Init solutions -->
+  <rect x="40" y="435" width="244" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="162" y="452" text-anchor="middle" fill="#424242" font-size="11">ray stop &amp;&amp; ray start --head</text>
+  <rect x="310" y="435" width="274" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="447" y="452" text-anchor="middle" fill="#424242" font-size="11">Reduce actor_gpus + rollout_gpus</text>
+  <rect x="610" y="435" width="252" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="736" y="452" text-anchor="middle" fill="#424242" font-size="11">Reduce gpu_memory_utilization</text>
+
+  <!-- Row B: Training solutions -->
+  <rect x="40" y="485" width="364" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="222" y="502" text-anchor="middle" fill="#424242" font-size="11">Reduce micro_batch_size or enable offloading</text>
+  <rect x="430" y="485" width="312" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="586" y="502" text-anchor="middle" fill="#424242" font-size="11">Check tool env &amp; DataCoordinator logs</text>
+
+  <!-- Row C: Multi-turn solutions -->
+  <rect x="40" y="535" width="260" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="170" y="552" text-anchor="middle" fill="#424242" font-size="11">Verify reward_fn &amp; data format</text>
+  <rect x="326" y="535" width="290" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="471" y="552" text-anchor="middle" fill="#424242" font-size="11">Set tool_format: hermes or gpt-oss</text>
+
+  <!-- Row D: AIO solutions -->
+  <rect x="40" y="585" width="268" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="174" y="602" text-anchor="middle" fill="#424242" font-size="11">Check AIO Proxy health endpoint</text>
+  <rect x="334" y="585" width="178" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="423" y="602" text-anchor="middle" fill="#424242" font-size="11">Scale AIO instances</text>
+
+  <!-- Row E: Trajectory/Checkpoint solutions -->
+  <rect x="40" y="635" width="364" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="222" y="652" text-anchor="middle" fill="#424242" font-size="11">Increase max_env_turns &amp; max_assistant_turns</text>
+  <rect x="430" y="635" width="215" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="537" y="652" text-anchor="middle" fill="#424242" font-size="11">Check resume_mode &amp; path</text>
+
+  <!-- Row F -->
+  <rect x="40" y="685" width="252" height="26" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="166" y="702" text-anchor="middle" fill="#424242" font-size="11">Set max_actor_ckpt_to_keep: 5</text>
+
+  <!-- Layer 2: All arrows (orthogonal L-shapes) -->
+
+  <!-- Decision → Initialization categories -->
+  <rect x="90" y="150" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 40 120 L 30 120 L 30 160 L 114 160 L 114 192" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="114" y="160" fill="#607D8B" font-size="8.5" font-style="italic">Startup fails</text>
+
+  <rect x="263" y="150" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 114 150 L 114 160 L 287 160 L 287 192" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="287" y="160" fill="#607D8B" font-size="8.5" font-style="italic">GPU alloc</text>
+
+  <rect x="436" y="150" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 114 150 L 114 160 L 460 160 L 460 192" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="460" y="160" fill="#607D8B" font-size="8.5" font-style="italic">SGLang err</text>
+
+  <!-- Decision → Training categories -->
+  <rect x="682" y="150" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 188 120 L 706 120 L 706 192" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="706" y="160" fill="#607D8B" font-size="8.5" font-style="italic">OOM</text>
+
+  <rect x="846" y="150" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 188 120 L 870 120 L 870 192" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="870" y="160" fill="#607D8B" font-size="8.5" font-style="italic">No progress</text>
+
+  <!-- Decision → Multi-turn categories -->
+  <rect x="90" y="231" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 114 150 L 114 237 L 114 237 L 114 267" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="114" y="241" fill="#607D8B" font-size="8.5" font-style="italic">Bad rewards</text>
+
+  <rect x="274" y="231" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 114 150 L 114 237 L 298 237 L 298 267" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="298" y="241" fill="#607D8B" font-size="8.5" font-style="italic">Tool issues</text>
+
+  <rect x="458" y="231" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 114 150 L 114 237 L 482 237 L 482 267" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="482" y="241" fill="#607D8B" font-size="8.5" font-style="italic">AIO error</text>
+
+  <rect x="642" y="231" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 114 150 L 114 237 L 666 237 L 666 267" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="666" y="241" fill="#607D8B" font-size="8.5" font-style="italic">Timeout</text>
+
+  <!-- Decision → Row 3 categories -->
+  <rect x="130" y="303" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 114 150 L 114 309 L 154 309 L 154 342" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="154" y="313" fill="#607D8B" font-size="8.5" font-style="italic">Short rollouts</text>
+
+  <rect x="362" y="303" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 114 150 L 114 309 L 386 309 L 386 342" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="386" y="313" fill="#607D8B" font-size="8.5" font-style="italic">Ckpt error</text>
+
+  <rect x="500" y="303" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 114 150 L 114 309 L 524 309 L 524 342" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="524" y="313" fill="#607D8B" font-size="8.5" font-style="italic">Disk issues</text>
+
+  <!-- Problem → Solution arrows (vertical) -->
+  <!-- Ray connection → ray stop -->
+  <line x1="114" y1="218" x2="114" y2="435" stroke="#78909C" stroke-width="1.0" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- GPU allocation → Reduce gpus -->
+  <line x1="287" y1="218" x2="287" y2="435" stroke="#78909C" stroke-width="1.0" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- SGLang startup → Reduce gpu_mem -->
+  <path d="M 460 218 L 460 425 L 736 425 L 736 435" stroke="#78909C" stroke-width="1.0" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- OOM → micro_batch -->
+  <path d="M 706 218 L 706 425 L 222 425 L 222 485" stroke="#78909C" stroke-width="1.0" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- No progress → Check logs -->
+  <path d="M 870 218 L 870 475 L 586 475 L 586 485" stroke="#78909C" stroke-width="1.0" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- Reward=0 → Verify reward_fn -->
+  <line x1="114" y1="293" x2="114" y2="535" stroke="#78909C" stroke-width="1.0" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- Tool calls not detected → Set tool_format -->
+  <path d="M 298 293 L 298 525 L 471 525 L 471 535" stroke="#78909C" stroke-width="1.0" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- AIO connection → Check health -->
+  <path d="M 482 293 L 482 575 L 174 575 L 174 585" stroke="#78909C" stroke-width="1.0" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- Tool timeout → Scale AIO -->
+  <path d="M 666 293 L 666 575 L 423 575 L 423 585" stroke="#78909C" stroke-width="1.0" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- Trajectories too short → Increase turns -->
+  <path d="M 154 368 L 154 625 L 222 625 L 222 635" stroke="#78909C" stroke-width="1.0" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- Resume fails → Check resume_mode -->
+  <path d="M 386 368 L 386 625 L 537 625 L 537 635" stroke="#78909C" stroke-width="1.0" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <!-- Disk full → max_ckpt -->
+  <path d="M 524 368 L 524 675 L 166 675 L 166 685" stroke="#78909C" stroke-width="1.0" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="499" y="960" text-anchor="middle" fill="#555" font-size="10">Figure 1: Troubleshooting Decision Tree</text>
+</svg>

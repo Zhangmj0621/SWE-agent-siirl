@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-p" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#AB47BC"/>
+    </marker>
+    <marker id="arr-a" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#FFB300"/>
+    </marker>
+  </defs>
+  <rect width="800" height="340" fill="#fff"/>
+  <rect x="20" y="10" width="760" height="280" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="760" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="400" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Trajectory Training Flow</text>
+
+  <!-- Layer 1: All containers and boxes -->
+  <!-- Rollout Phase -->
+  <rect x="30" y="55" width="450" height="190" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="30" y="55" width="450" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="255" y="73" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Rollout Phase</text>
+
+  <!-- Training Phase -->
+  <rect x="510" y="55" width="260" height="190" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <rect x="510" y="55" width="260" height="26" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="640" y="73" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Training Phase</text>
+
+  <!-- Rollout sub-boxes (row 1) -->
+  <rect x="50" y="100" width="100" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="100" y="119" text-anchor="middle" fill="#424242" font-size="12">Prompt</text>
+  <rect x="190" y="100" width="100" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="240" y="119" text-anchor="middle" fill="#424242" font-size="12">Generate</text>
+  <rect x="330" y="100" width="100" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="380" y="119" text-anchor="middle" fill="#424242" font-size="12">Tool Call</text>
+
+  <!-- Rollout sub-boxes (row 2) -->
+  <rect x="120" y="170" width="280" height="30" rx="1" fill="#FFFFFF" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="260" y="189" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Complete Trajectory</text>
+
+  <!-- Training sub-boxes -->
+  <rect x="530" y="100" width="100" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="580" y="119" text-anchor="middle" fill="#424242" font-size="12">Reward</text>
+  <rect x="660" y="100" width="100" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="710" y="119" text-anchor="middle" fill="#424242" font-size="12">Loss</text>
+  <rect x="590" y="170" width="100" height="30" rx="1" fill="#FFFFFF" stroke="#81C784" stroke-width="0.8"/>
+  <text x="640" y="189" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Update</text>
+
+  <!-- Layer 2: All arrows + labels -->
+  <!-- Prompt → Generate -->
+  <line x1="150" y1="115" x2="190" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Generate → Tool Call -->
+  <line x1="290" y1="115" x2="330" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Tool Call → Generate (response loop, horizontal back) -->
+  <rect x="283" y="132" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 380 130 L 380 140 L 240 140 L 240 130" stroke="#AB47BC" stroke-width="1.2" fill="none" marker-end="url(#arr-p)"/>
+  <text x="307" y="142" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">response</text>
+
+  <!-- Generate → Complete Trajectory (vertical) -->
+  <line x1="240" y1="130" x2="240" y2="170" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Complete Trajectory → Reward (horizontal, L-shape) -->
+  <rect x="462" y="145" width="44" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 400 185 L 484 185 L 484 130 L 530 130" stroke="#FFB300" stroke-width="1.3" fill="none" marker-end="url(#arr-a)"/>
+  <text x="484" y="155" fill="#F57F17" font-size="8.5" font-style="italic">scored</text>
+
+  <!-- Reward → Loss -->
+  <line x1="630" y1="115" x2="660" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Loss → Update (vertical) -->
+  <line x1="710" y1="130" x2="710" y2="155" stroke="#78909C" stroke-width="1.2"/>
+  <path d="M 710 155 L 710 170 L 690 170" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="400" y="325" text-anchor="middle" fill="#555" font-size="10">Figure 2: How agentic trajectories are trained</text>
+</svg>

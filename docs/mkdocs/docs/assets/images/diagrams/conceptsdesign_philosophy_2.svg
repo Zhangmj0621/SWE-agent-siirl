@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 360" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+  </defs>
+  <rect width="800" height="360" fill="#fff"/>
+  <rect x="20" y="10" width="760" height="300" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="760" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="400" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Sync vs Async Training</text>
+
+  <!-- Left container: Synchronous (x=40, y=55, w=340, h=200) -->
+  <rect x="40" y="55" width="340" height="200" rx="2" fill="#FFEBEE" stroke="#EF9A9A" stroke-width="1.2"/>
+  <rect x="40" y="55" width="340" height="26" rx="2" fill="#FFCDD2" stroke="#EF9A9A" stroke-width="1.2"/>
+  <text x="210" y="73" text-anchor="middle" fill="#C62828" font-size="13" font-weight="bold">Synchronous (Blocking)</text>
+
+  <!-- Right container: Asynchronous (x=420, y=55, w=340, h=200) -->
+  <rect x="420" y="55" width="340" height="200" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <rect x="420" y="55" width="340" height="26" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="590" y="73" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Asynchronous (Overlap)</text>
+
+  <!-- Layer 1: All boxes -->
+  <!-- Left side boxes -->
+  <rect x="60" y="100" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="125" y="119" text-anchor="middle" fill="#424242" font-size="12">Rollout</text>
+  <rect x="60" y="150" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="125" y="169" text-anchor="middle" fill="#424242" font-size="12">Wait...</text>
+  <rect x="60" y="200" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="125" y="219" text-anchor="middle" fill="#424242" font-size="12">Train</text>
+  <rect x="220" y="150" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#EF9A9A" stroke-width="0.8"/>
+  <text x="285" y="169" text-anchor="middle" fill="#424242" font-size="12">GPU Idle!</text>
+
+  <!-- Right side boxes -->
+  <rect x="440" y="100" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="505" y="119" text-anchor="middle" fill="#424242" font-size="12">Rollout 1</text>
+  <rect x="440" y="150" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="505" y="169" text-anchor="middle" fill="#424242" font-size="12">Rollout 2</text>
+  <rect x="600" y="100" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="665" y="119" text-anchor="middle" fill="#424242" font-size="12">Train 1</text>
+  <rect x="600" y="150" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="665" y="169" text-anchor="middle" fill="#424242" font-size="12">Train 2</text>
+
+  <!-- Layer 2: All arrows -->
+  <!-- Left side vertical arrows -->
+  <line x1="125" y1="130" x2="125" y2="150" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="125" y1="180" x2="125" y2="200" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Right side horizontal arrows (rollout -> train) -->
+  <line x1="570" y1="115" x2="600" y2="115" stroke="#90A4AE" stroke-width="1.2" stroke-dasharray="6,3" marker-end="url(#arr-dash)"/>
+  <line x1="570" y1="165" x2="600" y2="165" stroke="#90A4AE" stroke-width="1.2" stroke-dasharray="6,3" marker-end="url(#arr-dash)"/>
+
+  <!-- Caption -->
+  <text x="400" y="345" text-anchor="middle" fill="#555" font-size="10">Figure 2: Sync vs Async</text>
+</svg>

@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 720" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+    <marker id="seq-arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="880" height="720" fill="#fff"/>
+  <rect x="20" y="10" width="840" height="660" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="840" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="440.0" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Rollout &amp; NaiveFlow Execution Path</text>
+  <rect x="50" y="52" width="260" height="68" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="180.0" y="68" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">RolloutManager</text>
+  <rect x="370" y="52" width="260" height="68" rx="2" fill="#F3E5F5" stroke="#CE93D8" stroke-width="1.2"/>
+  <text x="500.0" y="68" text-anchor="middle" fill="#7B1FA2" font-size="13" font-weight="bold">AgentExecutor</text>
+  <rect x="50" y="155" width="780" height="480" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="440.0" y="171" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">NaiveFlow State Machine</text>
+  <rect x="66" y="94" width="228" height="30" rx="1" fill="#FFFFFF" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="180.0" y="113.0" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">RolloutManager.rollout()</text>
+  <rect x="386" y="94" width="228" height="30" rx="1" fill="#FFFFFF" stroke="#CE93D8" stroke-width="0.8"/>
+  <text x="500.0" y="113.0" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">AgentExecutor.execute()</text>
+  <rect x="330" y="200" width="240" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="450.0" y="219.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">_handle_pending_state()</text>
+  <rect x="330" y="265" width="240" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="450.0" y="284.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">_handle_generating_state()</text>
+  <rect x="330" y="330" width="260" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="460.0" y="349.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">ToolParser.extract_tool_calls()</text>
+  <rect x="330" y="395" width="260" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="460.0" y="414.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">_handle_processing_envs_state()</text>
+  <rect x="330" y="460" width="260" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="460.0" y="479.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">ToolEnv.create() + step() + release()</text>
+  <polygon points="417.0,520 442,545.0 417.0,570 392,545.0" fill="#FFFFFF" stroke="#FFB74D" stroke-width="1"/>
+  <text x="417.0" y="549.0" text-anchor="middle" fill="#424242" font-size="10.5">More?</text>
+  <rect x="530" y="530" width="170" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="615.0" y="549.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Compute reward</text>
+  <line x1="294" y1="109.0" x2="386" y2="109.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="340.0" y="103.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">dispatch</text>
+  <line x1="500.0" y1="124" x2="450.0" y2="200" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="475.0" y="156.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">invoke flow</text>
+  <line x1="450.0" y1="230" x2="450.0" y2="265" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="450.0" y="241.5" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">tokenize prompt</text>
+  <line x1="450.0" y1="295" x2="460.0" y2="330" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="455.0" y="306.5" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">SGLang inference</text>
+  <line x1="460.0" y1="360" x2="460.0" y2="395" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="460.0" y="371.5" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">tool calls found</text>
+  <line x1="460.0" y1="425" x2="460.0" y2="460" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="460.0" y="436.5" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">execute tools</text>
+  <line x1="460.0" y1="490" x2="417.0" y2="520" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M392,545.0 L200,545 L200,280 L330,280.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="200" y="274" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Yes</text>
+  <line x1="442" y1="545.0" x2="530" y2="545.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="486.0" y="539.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">No: TERMINATED</text>
+  <text x="440.0" y="705" text-anchor="middle" fill="#555" font-size="10">Figure 2: NaiveFlow State Machine</text>
+</svg>

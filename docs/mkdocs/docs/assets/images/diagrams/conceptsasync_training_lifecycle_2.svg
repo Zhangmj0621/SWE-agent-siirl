@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 700" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="900" height="700" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="640" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="450" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Training Iteration Sequence</text>
+
+  <!-- Vertical lifelines -->
+  <line x1="50" y1="60" x2="50" y2="600" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="220" y1="60" x2="220" y2="600" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="390" y1="60" x2="390" y2="600" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="560" y1="60" x2="560" y2="600" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="730" y1="60" x2="730" y2="600" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+
+  <!-- Lifeline headers -->
+  <rect x="10" y="60" width="80" height="26" rx="1" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="0.8"/>
+  <text x="50" y="77" text-anchor="middle" fill="#616161" font-size="10" font-weight="600">MainRunner</text>
+  <rect x="170" y="60" width="100" height="26" rx="1" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="220" y="77" text-anchor="middle" fill="#1565C0" font-size="10" font-weight="600">RolloutManager</text>
+  <rect x="340" y="60" width="100" height="26" rx="1" fill="#E3F2FD" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="390" y="77" text-anchor="middle" fill="#1565C0" font-size="10" font-weight="600">SGLang</text>
+  <rect x="510" y="60" width="100" height="26" rx="1" fill="#FFF8E1" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="560" y="77" text-anchor="middle" fill="#F57F17" font-size="10" font-weight="600">DataCoordinator</text>
+  <rect x="680" y="60" width="100" height="26" rx="1" fill="#E8F5E9" stroke="#81C784" stroke-width="0.8"/>
+  <text x="730" y="77" text-anchor="middle" fill="#2E7D32" font-size="10" font-weight="600">TrainerGroup</text>
+
+  <!-- Message 1: start_rollout() -->
+  <line x1="50" y1="110" x2="220" y2="110" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="99" y="97" width="72" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="135" y="107" text-anchor="middle" fill="#607D8B" font-size="10" font-style="italic">start_rollout()</text>
+
+  <!-- Message 2: generate(prompts) -->
+  <line x1="220" y1="148" x2="390" y2="148" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="260" y="135" width="90" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="305" y="145" text-anchor="middle" fill="#607D8B" font-size="10" font-style="italic">generate(prompts)</text>
+
+  <!-- Multi-turn generation note -->
+  <rect x="410" y="170" width="120" height="38" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="418" y="186" fill="#6D4C00" font-size="10.5">Multi-turn</text>
+  <text x="418" y="200" fill="#6D4C00" font-size="10.5">generation</text>
+
+  <!-- Message 3: completions (return) -->
+  <line x1="390" y1="232" x2="220" y2="232" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="271" y="219" width="68" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="305" y="229" text-anchor="middle" fill="#607D8B" font-size="10" font-style="italic">completions</text>
+
+  <!-- Compute rewards note -->
+  <rect x="240" y="258" width="120" height="28" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="248" y="276" fill="#6D4C00" font-size="10.5">Compute rewards</text>
+
+  <!-- Message 4: submit_samples() -->
+  <line x1="220" y1="306" x2="560" y2="306" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="348" y="293" width="84" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="390" y="303" text-anchor="middle" fill="#607D8B" font-size="10" font-style="italic">submit_samples()</text>
+
+  <!-- Message 5: get_batch() -->
+  <line x1="560" y1="344" x2="730" y2="344" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="610" y="331" width="60" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="645" y="341" text-anchor="middle" fill="#607D8B" font-size="10" font-style="italic">get_batch()</text>
+
+  <!-- Self-loop: forward + backward -->
+  <path d="M 730 382 L 760 382 L 760 400 L 730 400" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="768" y="394" fill="#78909C" font-size="10">forward + backward</text>
+
+  <!-- Message 6: batch_done() (return) -->
+  <line x1="730" y1="430" x2="560" y2="430" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="613" y="417" width="60" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="645" y="427" text-anchor="middle" fill="#607D8B" font-size="10" font-style="italic">batch_done()</text>
+
+  <!-- Message 7: sync_weights() -->
+  <line x1="730" y1="468" x2="220" y2="468" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="438" y="455" width="74" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="475" y="465" text-anchor="middle" fill="#607D8B" font-size="10" font-style="italic">sync_weights()</text>
+
+  <!-- Message 8: iteration_complete() (return) -->
+  <line x1="220" y1="506" x2="50" y2="506" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="93" y="493" width="94" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="135" y="503" text-anchor="middle" fill="#607D8B" font-size="10" font-style="italic">iteration_complete()</text>
+
+  <!-- Caption -->
+  <text x="450" y="685" text-anchor="middle" fill="#555" font-size="10">Figure 2: Detailed sequence of one async training iteration</text>
+</svg>

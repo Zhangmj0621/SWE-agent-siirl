@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 716" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="seq-arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="620" height="716" fill="#fff"/>
+  <rect x="20" y="10" width="580" height="656" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="580" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="310" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Advanced &gt; Performance Tuning (Fig. 2)</text>
+
+  <!-- Layer 1: Lifeline boxes + lines -->
+  <line x1="60" y1="88" x2="60" y2="666" stroke="#CFD8DC" stroke-width="1" stroke-dasharray="4,3"/>
+  <rect x="1" y="60" width="118" height="28" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="1" y="60" width="118" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="60" y="78" text-anchor="middle" fill="#1565C0" font-size="12" font-weight="600">RolloutManager</text>
+
+  <line x1="240" y1="88" x2="240" y2="666" stroke="#CFD8DC" stroke-width="1" stroke-dasharray="4,3"/>
+  <rect x="177.5" y="60" width="125" height="28" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="240" y="78" text-anchor="middle" fill="#F57F17" font-size="12" font-weight="600">DataCoordinator</text>
+
+  <line x1="420" y1="88" x2="420" y2="666" stroke="#CFD8DC" stroke-width="1" stroke-dasharray="4,3"/>
+  <rect x="368" y="60" width="104" height="28" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="420" y="78" text-anchor="middle" fill="#2E7D32" font-size="12" font-weight="600">TrainerGroup</text>
+
+  <!-- Note boxes -->
+  <rect x="80" y="106" width="120" height="52" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="88" y="120" fill="#6D4C00" font-size="10.5">async_factor = 2</text>
+  <text x="88" y="134" fill="#6D4C00" font-size="10.5">(buffer 2 batches</text>
+  <text x="88" y="148" fill="#6D4C00" font-size="10.5">ahead)</text>
+
+  <rect x="80" y="234" width="120" height="28" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="88" y="248" fill="#6D4C00" font-size="10.5">Rollout continues...</text>
+
+  <rect x="80" y="494" width="120" height="28" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="88" y="508" fill="#6D4C00" font-size="10.5">Uses updated weights</text>
+
+  <!-- Layer 2: All arrows + bg rects + labels -->
+  <!-- Rollout → DC: Scored batch 1 -->
+  <rect x="108" y="156" width="84" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="60" y1="170" x2="240" y2="170" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="150" y="165" text-anchor="middle" fill="#607D8B" font-size="10.5">Scored batch 1</text>
+
+  <!-- Rollout → DC: Scored batch 2 -->
+  <rect x="108" y="190" width="84" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="60" y1="204" x2="240" y2="204" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="150" y="199" text-anchor="middle" fill="#607D8B" font-size="10.5">Scored batch 2</text>
+
+  <!-- DC → Trainer: Training batch 1 -->
+  <rect x="288" y="260" width="84" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="240" y1="274" x2="420" y2="274" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="330" y="269" text-anchor="middle" fill="#607D8B" font-size="10.5">Training batch 1</text>
+
+  <!-- Trainer self-call: Forward + Backward -->
+  <path d="M 420 308 L 450 308 L 450 326 L 420 326" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="454" y="320" fill="#78909C" font-size="10.5">Forward + Backward</text>
+
+  <!-- Rollout → DC: Scored batch 3 -->
+  <rect x="108" y="338" width="84" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="60" y1="352" x2="240" y2="352" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="150" y="347" text-anchor="middle" fill="#607D8B" font-size="10.5">Scored batch 3</text>
+
+  <!-- DC → Trainer: Training batch 2 -->
+  <rect x="288" y="372" width="84" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="240" y1="386" x2="420" y2="386" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="330" y="381" text-anchor="middle" fill="#607D8B" font-size="10.5">Training batch 2</text>
+
+  <!-- Trainer self-call: Forward + Backward -->
+  <path d="M 420 420 L 450 420 L 450 438 L 420 438" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="454" y="432" fill="#78909C" font-size="10.5">Forward + Backward</text>
+
+  <!-- Trainer → Rollout: Weight sync -->
+  <rect x="204" y="450" width="72" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="420" y1="464" x2="60" y2="464" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="240" y="459" text-anchor="middle" fill="#607D8B" font-size="10.5">Weight sync</text>
+
+  <!-- Rollout → DC: Scored batch 4 -->
+  <rect x="108" y="520" width="84" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="60" y1="534" x2="240" y2="534" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="150" y="529" text-anchor="middle" fill="#607D8B" font-size="10.5">Scored batch 4</text>
+
+  <!-- DC → Trainer: Training batch 3 -->
+  <rect x="288" y="554" width="84" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="240" y1="568" x2="420" y2="568" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="330" y="563" text-anchor="middle" fill="#607D8B" font-size="10.5">Training batch 3</text>
+
+  <!-- Trainer self-call: Forward + Backward -->
+  <path d="M 420 602 L 450 602 L 450 620 L 420 620" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="454" y="614" fill="#78909C" font-size="10.5">Forward + Backward</text>
+
+  <!-- Caption -->
+  <text x="310" y="701" text-anchor="middle" fill="#555" font-size="10">Figure 2: Buffered Async Pipeline</text>
+</svg>

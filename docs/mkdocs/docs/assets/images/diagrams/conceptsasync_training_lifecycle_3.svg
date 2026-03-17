@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 380" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+  </defs>
+  <rect width="800" height="380" fill="#fff"/>
+  <rect x="20" y="10" width="760" height="320" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="760" height="28" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="400" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Async Overlap</text>
+
+  <!-- Rollout Workers container (x=40, y=55, w=720, h=100) -->
+  <rect x="40" y="55" width="720" height="100" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="40" y="55" width="720" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="400" y="73" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Rollout Workers</text>
+
+  <!-- Training Workers container (x=40, y=180, w=720, h=100) -->
+  <rect x="40" y="180" width="720" height="100" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <rect x="40" y="180" width="720" height="26" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="400" y="198" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Training Workers</text>
+
+  <!-- Layer 1: All boxes -->
+  <!-- Rollout boxes (shifted down to y=97 for 16px gap below header bar bottom at 81) -->
+  <rect x="60" y="97" width="150" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="135" y="116" text-anchor="middle" fill="#424242" font-size="12">Batch 1 rollout</text>
+  <rect x="230" y="97" width="150" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="305" y="116" text-anchor="middle" fill="#424242" font-size="12">Batch 2 rollout</text>
+  <rect x="400" y="97" width="150" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="475" y="116" text-anchor="middle" fill="#424242" font-size="12">Batch 3 rollout</text>
+
+  <!-- Training boxes (shifted down to y=222 for 16px gap below header bar bottom at 206) -->
+  <rect x="150" y="222" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="215" y="241" text-anchor="middle" fill="#424242" font-size="12">Train Batch 1</text>
+  <rect x="300" y="222" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="365" y="241" text-anchor="middle" fill="#424242" font-size="12">Train Batch 2</text>
+  <rect x="450" y="222" width="130" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="515" y="241" text-anchor="middle" fill="#424242" font-size="12">Train Batch 3</text>
+
+  <!-- Layer 2: All arrows (orthogonal L-paths instead of diagonals) -->
+  <!-- Batch 1 rollout -> Train Batch 1: L-path down then right -->
+  <path d="M 135 127 L 135 165 L 215 165 L 215 222" stroke="#90A4AE" stroke-width="1.2" stroke-dasharray="6,3" fill="none" marker-end="url(#arr-dash)"/>
+
+  <!-- Batch 2 rollout -> Train Batch 2: L-path down then right -->
+  <path d="M 305 127 L 305 165 L 365 165 L 365 222" stroke="#90A4AE" stroke-width="1.2" stroke-dasharray="6,3" fill="none" marker-end="url(#arr-dash)"/>
+
+  <!-- Batch 3 rollout -> Train Batch 3: L-path down then right -->
+  <path d="M 475 127 L 475 165 L 515 165 L 515 222" stroke="#90A4AE" stroke-width="1.2" stroke-dasharray="6,3" fill="none" marker-end="url(#arr-dash)"/>
+
+  <!-- Caption -->
+  <text x="400" y="365" text-anchor="middle" fill="#555" font-size="10">Figure 3: Rollout and training can overlap in time</text>
+</svg>

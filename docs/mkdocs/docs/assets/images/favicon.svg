@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="fg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="ft" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#14b8a6"/>
+      <stop offset="100%" stop-color="#2dd4bf"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Hexagon outline -->
+  <polygon
+    points="16,2 29,9 29,23 16,30 3,23 3,9"
+    fill="url(#fg)"
+    opacity="0.9"
+  />
+
+  <!-- Center agent dot -->
+  <circle cx="16" cy="16" r="4.5" fill="#ffffff" opacity="0.95"/>
+
+  <!-- Three orbital dots -->
+  <circle cx="16" cy="7.5" r="2" fill="#ffffff" opacity="0.7"/>
+  <circle cx="23" cy="21" r="2" fill="#ffffff" opacity="0.7"/>
+  <circle cx="9" cy="21" r="2" fill="#ffffff" opacity="0.7"/>
+
+  <!-- Connecting lines -->
+  <line x1="16" y1="11.5" x2="16" y2="9.5" stroke="#ffffff" stroke-width="1" opacity="0.5"/>
+  <line x1="19.5" y1="18.5" x2="21.5" y2="19.8" stroke="#ffffff" stroke-width="1" opacity="0.5"/>
+  <line x1="12.5" y1="18.5" x2="10.5" y2="19.8" stroke="#ffffff" stroke-width="1" opacity="0.5"/>
+
+  <!-- Teal accent dot (tool) -->
+  <circle cx="26" cy="5" r="2.5" fill="url(#ft)"/>
+</svg>

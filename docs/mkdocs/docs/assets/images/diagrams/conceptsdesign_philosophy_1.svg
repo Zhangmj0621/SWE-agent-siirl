@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 390" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="800" height="390" fill="#fff"/>
+  <rect x="20" y="10" width="760" height="330" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="760" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="400" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Design Philosophy</text>
+
+  <!-- Layer 1: All container + component boxes -->
+  <!-- Core Principle container (x=250, y=55, w=300, h=90) -->
+  <rect x="250" y="55" width="300" height="90" rx="2" fill="#FFF3E0" stroke="#FFB74D" stroke-width="1.2"/>
+  <rect x="250" y="55" width="300" height="26" rx="2" fill="#FFECB3" stroke="#FFB74D" stroke-width="1.2"/>
+  <text x="400" y="73" text-anchor="middle" fill="#E65100" font-size="13" font-weight="bold">Core Principle</text>
+
+  <rect x="270" y="96" width="260" height="30" rx="1" fill="#FFFFFF" stroke="#FFB74D" stroke-width="0.8"/>
+  <text x="400" y="115" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Async-First Architecture</text>
+
+  <!-- Decoupling container (x=40, y=190, w=220, h=130) -->
+  <rect x="40" y="190" width="220" height="130" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="40" y="190" width="220" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="150" y="208" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Decoupling</text>
+
+  <rect x="60" y="232" width="180" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="150" y="251" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Separate rollout/train</text>
+
+  <!-- Scalability container (x=290, y=190, w=220, h=130) -->
+  <rect x="290" y="190" width="220" height="130" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <rect x="290" y="190" width="220" height="26" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="400" y="208" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Scalability</text>
+
+  <rect x="310" y="232" width="180" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="400" y="251" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Linear GPU scaling</text>
+
+  <!-- Flexibility container (x=540, y=190, w=220, h=130) -->
+  <rect x="540" y="190" width="220" height="130" rx="2" fill="#F3E5F5" stroke="#CE93D8" stroke-width="1.2"/>
+  <rect x="540" y="190" width="220" height="26" rx="2" fill="#E1BEE7" stroke="#CE93D8" stroke-width="1.2"/>
+  <text x="650" y="208" text-anchor="middle" fill="#7B1FA2" font-size="13" font-weight="bold">Flexibility</text>
+
+  <rect x="560" y="232" width="180" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="650" y="251" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Pluggable components</text>
+
+  <!-- Layer 2: All arrows (orthogonal routing, no diagonals) -->
+  <!-- Core Principle → Decoupling (orthogonal L-path) -->
+  <path d="M 400 126 L 400 165 L 150 165 L 150 190" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Core Principle → Scalability (vertical) -->
+  <path d="M 400 126 L 400 190" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Core Principle → Flexibility (orthogonal L-path) -->
+  <path d="M 400 126 L 400 165 L 650 165 L 650 190" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="400" y="375" text-anchor="middle" fill="#555" font-size="10">Figure 1: Core design principles of SIIRL-Agentic</text>
+</svg>

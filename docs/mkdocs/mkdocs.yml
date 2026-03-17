@@ -1,0 +1,218 @@
+site_name: siirl-agentic
+site_description: Async Multi-Turn Agentic RL Training Framework
+site_url: https://github.com/siirl-agentic
+
+repo_name: siirl-agentic
+repo_url: https://github.com/siirl-agentic
+
+copyright: Copyright &copy; 2025 siirl-agentic Contributors
+
+theme:
+  name: material
+  custom_dir: overrides
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Source Sans 3
+    code: JetBrains Mono
+  logo: assets/images/logo.svg
+  icon:
+    repo: fontawesome/brands/github
+  favicon: assets/images/favicon.svg
+  features:
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    #- navigation.indexes  # disabled: sections are pure nav groups, not index pages
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - navigation.path
+    - navigation.footer
+    - announce.dismiss
+    #- header.autohide  # disabled: keep header always visible when scrolling
+    - content.tooltips
+
+extra_css:
+  - assets/css/extra.css
+
+extra_javascript:
+  - assets/js/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+  - assets/js/extra.js
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/siirl-agentic
+  generator: false
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+plugins:
+  - search
+  - glightbox:
+      touchNavigation: true
+      loop: false
+      effect: zoom
+      slide_effect: slide
+      width: 72vw
+      gallery: false
+      height: auto
+      zoomable: true
+      draggable: true
+  - i18n:
+      docs_structure: folder
+      fallback_to_default: true
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+        - locale: zh
+          name: 中文
+          build: true
+          nav_translations:
+            Home: 首页
+            Overview: 概览
+            Installation: 安装
+            Quickstart: 快速入门
+            First Agentic Job: 第一个 Agentic 训练任务
+            Guides: 使用指南
+            Configuration System: 配置系统
+            PPO Training: PPO 训练
+            GRPO Training: GRPO 训练
+            Agentic Multi-Turn: Agentic 多轮交互
+            Tool Environment: 工具环境
+            AIO Tool Infrastructure: AIO 工具基础设施
+            Deployment Modes: 部署模式
+            Checkpoint & Resume: 检查点与恢复
+            Metrics & Monitoring: 指标与监控
+            Performance Tuning: 性能调优
+            Profiling: 性能分析
+            Debugging: 调试指南
+            Handling OOM: 内存溢出处理
+            DeepScaleR GRPO Tutorial: DeepScaleR GRPO 教程
+            SWE Agent Tutorial: SWE Agent 教程
+            Data Preparation: 数据准备
+            Custom Rewards: 自定义奖励函数
+            Custom Agent: 自定义 Agent
+            Concepts: 核心概念
+            How It Works: 工作原理
+            Architecture Overview: 架构概览
+            Async Training Lifecycle: 异步训练生命周期
+            AgentFlow Protocol: AgentFlow 协议
+            AIO Infrastructure: AIO 基础设施
+            Algorithm Theory: 算法理论
+            Reference: 参考
+            Config Reference: 配置参考
+            Module Map: 模块地图
+            Compatibility Matrix: 兼容性矩阵
+            Algorithm Baselines: 算法基线
+            FAQ: 常见问题
+            Best Practices: 最佳实践
+            Changelog: 更新日志
+            Troubleshooting: 故障排查
+            Contributing: 贡献
+            Code Structure: 代码结构
+            Adding Flows: 添加流程
+            Contributing Guide: 贡献指南
+
+nav:
+  - Home: index.md
+  - Overview: overview.md
+  - Guides:
+    - Installation: get_started/installation.md
+    - Quickstart: get_started/quickstart.md
+    - First Agentic Job: get_started/first_agentic_training_job.md
+    - DeepScaleR GRPO Tutorial: tutorials/deepscaler_grpo.md
+    - SWE Agent Tutorial: tutorials/swe_agent_training.md
+    - Configuration System: guides/configuration_system.md
+    - Data Preparation: guides/data_preparation.md
+    - Custom Rewards: guides/custom_rewards.md
+    - PPO Training: guides/ppo_training.md
+    - GRPO Training: guides/grpo_training.md
+    - Agentic Multi-Turn: guides/agentic_multiturn.md
+    - Tool Environment: guides/tool_env_and_swe.md
+    - Custom Agent: guides/custom_agent.md
+    - AIO Tool Infrastructure: guides/aio_tool_infrastructure.md
+    - Deployment Modes: guides/deployment_modes.md
+    - Checkpoint & Resume: guides/checkpoint_resume.md
+    - Metrics & Monitoring: guides/metrics_and_evaluation.md
+    - Performance Tuning: guides/performance_tuning.md
+    - Profiling: guides/profiling.md
+    - Debugging: guides/debugging.md
+    - Handling OOM: guides/handling_oom.md
+  - Concepts:
+    - How It Works: concepts/how_it_works.md
+    - Architecture Overview: concepts/architecture_overview.md
+    - Async Training Lifecycle: concepts/async_training_lifecycle.md
+    - AgentFlow Protocol: concepts/agentflow_protocol.md
+    - AIO Infrastructure: concepts/aio_infrastructure.md
+    - Algorithm Theory: concepts/algorithm_theory.md
+  - Reference:
+    - Config Reference: reference/config_reference.md
+    - Algorithm Baselines: reference/algorithm_baselines.md
+    - Module Map: reference/module_map.md
+    - Compatibility Matrix: reference/compatibility_matrix.md
+    - FAQ: reference/faq.md
+    - Best Practices: reference/best_practices.md
+    - Troubleshooting: reference/troubleshooting.md
+    - Changelog: reference/changelog.md
+  - Contributing:
+    - Code Structure: contributing/code_structure.md
+    - Adding Flows: contributing/adding_new_executor_or_flow.md
+    - Contributing Guide: contributing/contributing.md

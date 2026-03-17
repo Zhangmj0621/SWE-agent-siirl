@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 580" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+    <marker id="seq-arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="900" height="580" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="520" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="450.0" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Failure Propagation Sequence</text>
+  <rect x="70" y="223" width="720" height="87" rx="2" fill="none" stroke="#B0BEC5" stroke-width="1" stroke-dasharray="6,3"/>
+  <rect x="70" y="223" width="94.0" height="16" rx="2" fill="#ECEFF1" stroke="#B0BEC5" stroke-width="0.8"/>
+  <text x="78" y="235" fill="#546E7A" font-size="10.5" font-weight="600">Polling loop</text>
+  <rect x="70" y="341" width="720" height="87" rx="2" fill="none" stroke="#B0BEC5" stroke-width="1" stroke-dasharray="6,3"/>
+  <rect x="70" y="341" width="94.0" height="16" rx="2" fill="#ECEFF1" stroke="#B0BEC5" stroke-width="0.8"/>
+  <text x="78" y="353" fill="#546E7A" font-size="10.5" font-weight="600">Polling loop</text>
+  <rect x="120" y="106" width="110" height="28" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="128" y="120" fill="#6D4C00" font-size="10.5">CUDA OOM occurs</text>
+  <line x1="100" y1="146" x2="265" y2="146" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="182.5" y="141" text-anchor="middle" fill="#607D8B" font-size="10.5">report_failure(&quot;trainer&quot;, &quot;CUDA OOM&quot;)</text>
+  <path d="M265,182 L295,182 L295,200 L265,200" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="299" y="194" fill="#78909C" font-size="10.5">Set status = FAILED</text>
+  <line x1="430" y1="228" x2="265" y2="228" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="347.5" y="223" text-anchor="middle" fill="#607D8B" font-size="10.5">should_stop()?</text>
+  <line x1="265" y1="264" x2="430" y2="264" stroke="#78909C" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#seq-arr)"/>
+  <text x="347.5" y="259" text-anchor="middle" fill="#607D8B" font-size="10.5">True</text>
+  <rect x="450" y="296" width="130" height="38" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="458" y="310" fill="#6D4C00" font-size="10.5">Cancel pending</text>
+  <text x="458" y="324" fill="#6D4C00" font-size="10.5">rollouts</text>
+  <line x1="595" y1="346" x2="265" y2="346" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="430.0" y="341" text-anchor="middle" fill="#607D8B" font-size="10.5">should_stop()?</text>
+  <line x1="265" y1="382" x2="595" y2="382" stroke="#78909C" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#seq-arr)"/>
+  <text x="430.0" y="377" text-anchor="middle" fill="#607D8B" font-size="10.5">True</text>
+  <rect x="615" y="414" width="130" height="38" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="623" y="428" fill="#6D4C00" font-size="10.5">Stop accepting</text>
+  <text x="623" y="442" fill="#6D4C00" font-size="10.5">samples</text>
+  <line x1="760" y1="464" x2="265" y2="464" stroke="#78909C" stroke-width="1.2" marker-end="url(#seq-arr)"/>
+  <text x="512.5" y="459" text-anchor="middle" fill="#607D8B" font-size="10.5">get_summary()</text>
+  <line x1="265" y1="500" x2="760" y2="500" stroke="#78909C" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#seq-arr)"/>
+  <text x="512.5" y="495" text-anchor="middle" fill="#607D8B" font-size="10.5">{status: failed, reason: CUDA OOM}</text>
+  <rect x="780" y="532" width="130" height="38" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="788" y="546" fill="#6D4C00" font-size="10.5">Run cleanup</text>
+  <text x="788" y="560" fill="#6D4C00" font-size="10.5">procedures</text>
+  <line x1="100" y1="88" x2="100" y2="602" stroke="#CFD8DC" stroke-width="1" stroke-dasharray="4,3"/>
+  <rect x="60.0" y="60" width="80" height="28" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="100" y="78" text-anchor="middle" fill="#2E7D32" font-size="12" font-weight="600">Trainer</text>
+  <line x1="265" y1="88" x2="265" y2="602" stroke="#CFD8DC" stroke-width="1" stroke-dasharray="4,3"/>
+  <rect x="202.5" y="60" width="125" height="28" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="265" y="78" text-anchor="middle" fill="#616161" font-size="12" font-weight="600">TaskCoordinator</text>
+  <line x1="430" y1="88" x2="430" y2="602" stroke="#CFD8DC" stroke-width="1" stroke-dasharray="4,3"/>
+  <rect x="371.0" y="60" width="118" height="28" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="430" y="78" text-anchor="middle" fill="#1565C0" font-size="12" font-weight="600">RolloutManager</text>
+  <line x1="595" y1="88" x2="595" y2="602" stroke="#CFD8DC" stroke-width="1" stroke-dasharray="4,3"/>
+  <rect x="532.5" y="60" width="125" height="28" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="595" y="78" text-anchor="middle" fill="#F57F17" font-size="12" font-weight="600">DataCoordinator</text>
+  <line x1="760" y1="88" x2="760" y2="602" stroke="#CFD8DC" stroke-width="1" stroke-dasharray="4,3"/>
+  <rect x="715.0" y="60" width="90" height="28" rx="2" fill="#FFF3E0" stroke="#FFB74D" stroke-width="1.2"/>
+  <text x="760" y="78" text-anchor="middle" fill="#E65100" font-size="12" font-weight="600">MainRunner</text>
+  <text x="450.0" y="565" text-anchor="middle" fill="#555" font-size="10">Figure 2: CUDA OOM Propagation</text>
+</svg>

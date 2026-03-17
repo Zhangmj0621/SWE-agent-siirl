@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 260" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="700" height="260" fill="#fff"/>
+  <rect x="20" y="10" width="660" height="200" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="660" height="32" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="350" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">SWE Agent Workflow</text>
+
+  <!-- ====== Layer 1: All component boxes ====== -->
+  <!-- 5 boxes evenly distributed: inner x=40..660, span=620
+       w=112, gap=(620-560)/4=15, Positions: 40, 167, 294, 421, 548 -->
+  <rect x="40" y="100" width="112" height="30" rx="1" fill="#FFFFFF" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="96" y="119" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Issue</text>
+
+  <rect x="167" y="100" width="112" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="223" y="119" text-anchor="middle" fill="#424242" font-size="12">Analyze</text>
+
+  <rect x="294" y="100" width="112" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="350" y="119" text-anchor="middle" fill="#424242" font-size="12">Edit Code</text>
+
+  <rect x="421" y="100" width="112" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="477" y="119" text-anchor="middle" fill="#424242" font-size="12">Run Tests</text>
+
+  <rect x="548" y="100" width="112" height="30" rx="1" fill="#FFFFFF" stroke="#FFB74D" stroke-width="0.8"/>
+  <text x="604" y="119" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">PR</text>
+
+  <!-- ====== Layer 2: All arrows + bg rects + labels ====== -->
+
+  <!-- Issue -> Analyze -->
+  <line x1="152" y1="115" x2="167" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Analyze -> Edit Code -->
+  <line x1="279" y1="115" x2="294" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Edit Code -> Run Tests -->
+  <line x1="406" y1="115" x2="421" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Run Tests -> Edit Code (fix loop, horizontal return below) -->
+  <rect x="404" y="133" width="18" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="477" y1="130" x2="350" y2="130" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="413" y="143" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">fix</text>
+
+  <!-- Run Tests -> PR -->
+  <rect x="529" y="102" width="24" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="533" y1="115" x2="548" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="541" y="112" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">pass</text>
+
+  <!-- Caption -->
+  <text x="350" y="245" text-anchor="middle" fill="#555" font-size="10">Figure 2: Software engineering agent flow</text>
+</svg>
