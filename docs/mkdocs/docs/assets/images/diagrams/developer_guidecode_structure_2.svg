@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 540 805" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="540" height="805" fill="#fff"/>
+  <rect x="20" y="10" width="500" height="745" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="500" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="270" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Developer Guide > Code Structure (Fig. 2)</text>
+
+  <!-- Containers with header bars -->
+  <rect x="30" y="48" width="240" height="88" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="30" y="48" width="240" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="150" y="66" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">RolloutManager</text>
+
+  <rect x="30" y="155" width="240" height="88" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="30" y="155" width="240" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="150" y="173" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">AgentExecutor</text>
+
+  <rect x="30" y="260" width="460" height="480" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="30" y="260" width="460" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="260" y="278" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">NaiveFlow State Machine</text>
+
+  <!-- ====== Layer 1: All boxes ====== -->
+  <!-- RolloutManager box (header bottom=74, 74+15=89, was 90 -> OK at 90) -->
+  <rect x="50" y="90" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="150" y="109" text-anchor="middle" fill="#424242" font-size="12">RolloutManager.rollout()</text>
+
+  <!-- AgentExecutor box (header bottom=181, 181+15=196, was 195 -> shift to 196) -->
+  <rect x="50" y="196" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="150" y="215" text-anchor="middle" fill="#424242" font-size="12">AgentExecutor.execute()</text>
+
+  <!-- NaiveFlow boxes (header bottom=286, 286+15=301, was 300 -> shift to 301) -->
+  <rect x="50" y="301" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="150" y="320" text-anchor="middle" fill="#424242" font-size="12">_handle_pending_state()</text>
+
+  <rect x="50" y="371" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="150" y="390" text-anchor="middle" fill="#424242" font-size="12">_handle_generating_state()</text>
+
+  <rect x="50" y="441" width="260" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="180" y="460" text-anchor="middle" fill="#424242" font-size="12">ToolParser.extract_tool_calls()</text>
+
+  <rect x="50" y="511" width="260" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="180" y="530" text-anchor="middle" fill="#424242" font-size="12">_handle_processing_envs_state()</text>
+
+  <rect x="50" y="581" width="280" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="190" y="600" text-anchor="middle" fill="#424242" font-size="12">ToolEnv.create() + step() + release()</text>
+
+  <!-- Diamond: More turns? -->
+  <polygon points="150,641 220,686 150,731 80,686" fill="#FFFFFF" stroke="#64B5F6" stroke-width="1"/>
+  <text x="150" y="690" text-anchor="middle" fill="#424242" font-size="10.5">More turns?</text>
+
+  <rect x="330" y="671" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="400" y="690" text-anchor="middle" fill="#424242" font-size="12">Compute reward</text>
+
+  <!-- ====== Layer 2: All arrows + labels (orthogonal only) ====== -->
+
+  <!-- RolloutManager.rollout() -> AgentExecutor.execute() (vertical) -->
+  <line x1="150" y1="120" x2="150" y2="196" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="118" y="148" width="50" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="150" y="158" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">dispatch</text>
+
+  <!-- AgentExecutor.execute() -> _handle_pending_state() (vertical) -->
+  <line x1="150" y1="226" x2="150" y2="301" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="114" y="255" width="60" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="150" y="265" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">invoke flow</text>
+
+  <!-- _handle_pending_state() -> _handle_generating_state() (vertical) -->
+  <line x1="150" y1="331" x2="150" y2="371" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="104" y="343" width="80" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="150" y="353" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">tokenize prompt</text>
+
+  <!-- _handle_generating_state() -> ToolParser (vertical, aligned to 180) -->
+  <path d="M 150 401 L 150 421 L 180 421 L 180 441" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="112" y="411" width="76" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="150" y="421" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">SGLang inference</text>
+
+  <!-- ToolParser -> _handle_processing_envs (vertical) -->
+  <line x1="180" y1="471" x2="180" y2="511" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="138" y="483" width="76" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="180" y="493" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">tool calls found</text>
+
+  <!-- _handle_processing_envs -> ToolEnv (vertical, aligned to 190) -->
+  <path d="M 180 541 L 180 561 L 190 561 L 190 581" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="155" y="553" width="66" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="190" y="563" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">execute tools</text>
+
+  <!-- ToolEnv -> Diamond (L-path: down then left) -->
+  <path d="M 190 611 L 190 631 L 150 631 L 150 641" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Diamond Yes -> _handle_generating_state() (L-path: left then up) -->
+  <path d="M 80 686 L 40 686 L 40 386 L 50 386" stroke="#78909C" stroke-width="1.2" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <rect x="35" y="541" width="24" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="55" y="551" fill="#607D8B" font-size="9.5" font-style="italic">Yes</text>
+
+  <!-- Diamond No -> Compute reward (horizontal right) -->
+  <line x1="220" y1="686" x2="330" y2="686" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="240" y="674" width="80" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="280" y="684" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">No: TERMINATED</text>
+
+  <!-- Caption -->
+  <text x="270" y="790" text-anchor="middle" fill="#555" font-size="10">Figure 2: NaiveFlow State Machine</text>
+</svg>

@@ -1,0 +1,1012 @@
+/* ==========================================================================
+   SIIRL-Agentic Documentation — Custom Theme Overrides
+   Clean, restrained documentation style. Content-first, minimal decoration.
+   ========================================================================== */
+
+
+/* --------------------------------------------------------------------------
+   1. Global Variables & Base
+   -------------------------------------------------------------------------- */
+
+:root {
+  --md-text-font: "Source Sans 3", "Source Sans Pro", -apple-system, BlinkMacSystemFont, sans-serif;
+  --md-code-font: "JetBrains Mono", "Fira Code", monospace;
+  --md-primary-fg-color: #4f46e5;
+  --md-primary-fg-color--light: #6366f1;
+  --md-primary-fg-color--dark: #3730a3;
+
+  /* design tokens */
+  --doc-radius: 6px;
+  --doc-transition: 0.15s ease;
+  --doc-border: #e5e7eb;
+  --doc-bg-subtle: #f9fafb;
+
+  /* typography */
+  --doc-body-size: 0.875rem;
+  --doc-body-weight: 400;
+  --doc-heading-font: "Plus Jakarta Sans", var(--md-text-font);
+}
+
+[data-md-color-scheme="slate"] {
+  --doc-border: rgba(255, 255, 255, 0.08);
+  --doc-bg-subtle: rgba(255, 255, 255, 0.04);
+}
+
+
+/* --------------------------------------------------------------------------
+   2. Content Area
+   -------------------------------------------------------------------------- */
+
+.md-grid {
+  max-width: 1400px;
+}
+
+.md-typeset {
+  font-size: var(--doc-body-size);
+  font-weight: var(--doc-body-weight);
+  line-height: 1.625;
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.md-typeset p {
+  margin-top: 0;
+  margin-bottom: 1rem;
+  max-width: 72ch;
+}
+
+/* Headings — display font, uniform rem spacing (prevents margin-collapse issues) */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4 {
+  font-family: var(--doc-heading-font);
+}
+
+.md-typeset h1 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin-top: 0;
+  margin-bottom: 0.5rem;
+}
+
+.md-typeset h2 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  margin-top: 2rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--doc-border);
+}
+
+.md-typeset h3 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  line-height: 1.35;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.md-typeset h4 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.4;
+  margin-top: 1.25rem;
+  margin-bottom: 0.25rem;
+}
+
+/* Tighten gap when heading is directly followed by content block */
+.md-typeset h1 + p,
+.md-typeset h1 + blockquote,
+.md-typeset h2 + p,
+.md-typeset h2 + blockquote,
+.md-typeset h2 + .admonition,
+.md-typeset h2 + details,
+.md-typeset h2 + .highlight,
+.md-typeset h2 + table,
+.md-typeset h2 + ul,
+.md-typeset h2 + ol,
+.md-typeset h2 + .tabbed-set,
+.md-typeset h2 + .mermaid,
+.md-typeset h3 + p,
+.md-typeset h3 + .highlight,
+.md-typeset h3 + .admonition,
+.md-typeset h3 + details,
+.md-typeset h3 + table,
+.md-typeset h3 + ul,
+.md-typeset h3 + ol,
+.md-typeset h3 + .tabbed-set,
+.md-typeset h3 + .mermaid,
+.md-typeset h4 + p,
+.md-typeset h4 + .highlight,
+.md-typeset h4 + ul,
+.md-typeset h4 + ol,
+.md-typeset h4 + table {
+  margin-top: 0;
+}
+
+/* Consistent list margins */
+.md-typeset ul,
+.md-typeset ol {
+  margin-top: 0;
+  margin-bottom: 1rem;
+}
+
+.md-typeset li {
+  margin-bottom: 0.25rem;
+}
+
+.md-typeset li > p {
+  margin-bottom: 0.5rem;
+}
+
+
+/* --------------------------------------------------------------------------
+   3. Navigation — Clean hierarchy, no tree lines
+   -------------------------------------------------------------------------- */
+
+.md-nav__item .md-nav__link {
+  font-size: 0.82rem;
+  border-radius: 4px;
+  padding: 0.35em 0.6em;
+  transition: background var(--doc-transition), color var(--doc-transition);
+}
+
+.md-nav--primary .md-nav__title {
+  font-weight: 700;
+}
+
+/* Level 1: Top-level groups */
+.md-nav--primary > .md-nav__list > .md-nav__item > .md-nav__link,
+.md-nav--primary > .md-nav__list > .md-nav__item > label .md-nav__link {
+  font-size: 0.84rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--md-default-fg-color);
+}
+
+/* Level 2: Sub-sections */
+.md-nav--primary .md-nav__item--nested .md-nav__item > .md-nav__link,
+.md-nav--primary .md-nav__item--nested .md-nav__item > label .md-nav__link {
+  font-size: 0.80rem;
+  font-weight: 500;
+  color: var(--md-default-fg-color--light);
+}
+
+/* Level 3: Leaf pages */
+.md-nav--primary .md-nav__item--nested .md-nav__item--nested .md-nav__item > .md-nav__link {
+  font-size: 0.76rem;
+  font-weight: 400;
+  color: var(--md-default-fg-color--light);
+}
+
+/* Hover */
+.md-nav__item .md-nav__link:hover {
+  background: var(--md-accent-fg-color--transparent);
+}
+
+/* Active link — bold + color + left border + background */
+.md-nav__item .md-nav__link--active,
+.md-nav__item .md-nav__link--active:hover {
+  font-weight: 600;
+  color: var(--md-primary-fg-color);
+  background: rgba(79, 70, 229, 0.08);
+  border-left: 3px solid var(--md-primary-fg-color);
+  padding-left: calc(0.6em - 3px);
+  border-radius: 0 4px 4px 0;
+}
+
+[data-md-color-scheme="slate"] .md-nav__item .md-nav__link--active,
+[data-md-color-scheme="slate"] .md-nav__item .md-nav__link--active:hover {
+  background: rgba(99, 102, 241, 0.12);
+}
+
+
+/* --------------------------------------------------------------------------
+   4. Header — Clean white, no frosted glass
+   -------------------------------------------------------------------------- */
+
+.md-header {
+  background: #fff;
+  color: var(--md-default-fg-color);
+  box-shadow: 0 1px 0 var(--doc-border);
+}
+
+.md-header[data-md-state="shadow"] {
+  box-shadow: 0 1px 0 var(--doc-border);
+}
+
+.md-header .md-header__title {
+  color: var(--md-default-fg-color);
+}
+
+.md-header .md-header__button {
+  color: var(--md-default-fg-color--light);
+}
+
+.md-header .md-search__input {
+  background: var(--doc-bg-subtle);
+  color: var(--md-default-fg-color);
+}
+
+[data-md-color-scheme="slate"] .md-header {
+  background: #1a1a2e;
+  color: #e0e0e0;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* Tabs row */
+.md-tabs {
+  background: var(--doc-bg-subtle);
+  border-bottom: 1px solid var(--doc-border);
+}
+
+.md-tabs__link {
+  font-weight: 600;
+  font-size: 0.84rem;
+  color: var(--md-default-fg-color--light);
+  opacity: 1;
+  transition: color var(--doc-transition);
+}
+
+.md-tabs__link:hover {
+  color: var(--md-default-fg-color);
+}
+
+.md-tabs__link--active {
+  color: var(--md-primary-fg-color);
+  border-bottom: 2px solid var(--md-primary-fg-color);
+}
+
+[data-md-color-scheme="slate"] .md-tabs {
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+[data-md-color-scheme="slate"] .md-tabs__link {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+[data-md-color-scheme="slate"] .md-tabs__link:hover {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+[data-md-color-scheme="slate"] .md-tabs__link--active {
+  color: #fff;
+  border-bottom-color: var(--md-primary-fg-color--light);
+}
+
+.md-header__option .md-select__link {
+  font-weight: 600;
+}
+
+
+/* --------------------------------------------------------------------------
+   5. Code Blocks — Simple border, no shadows
+   -------------------------------------------------------------------------- */
+
+.md-typeset code {
+  border-radius: 4px;
+  padding: 0.15em 0.35em;
+  font-size: 0.8125rem;
+  font-weight: 450;
+  letter-spacing: -0.01em;
+}
+
+.md-typeset pre > code {
+  border-radius: var(--doc-radius);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  letter-spacing: 0;
+}
+
+.md-typeset .highlight {
+  border-radius: var(--doc-radius);
+  overflow: hidden;
+  border: 1px solid var(--doc-border);
+  margin: 0 0 1rem;
+}
+
+/* Filename bar — neutral gray, not primary color */
+.md-typeset .highlight .filename,
+.md-typeset .highlighttable .filename {
+  background: var(--doc-bg-subtle);
+  color: var(--md-default-fg-color--light);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 0.5em 1em;
+  border-radius: var(--doc-radius) var(--doc-radius) 0 0;
+  border-bottom: 1px solid var(--doc-border);
+}
+
+.md-typeset .highlight .md-clipboard {
+  border-radius: 4px;
+  transition: background var(--doc-transition), color var(--doc-transition);
+}
+
+.md-typeset .highlight .md-clipboard:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--md-primary-fg-color);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .highlight {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .highlight,
+[data-md-color-scheme="slate"] .md-typeset pre > code {
+  background: #1e1e2e;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .highlight .filename {
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.6);
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+
+/* --------------------------------------------------------------------------
+   6. Tables — Light header, no bold colors
+   -------------------------------------------------------------------------- */
+
+.md-typeset table {
+  font-size: 0.85rem;
+  line-height: 1.55;
+  border-radius: var(--doc-radius);
+  overflow: hidden;
+  border: 1px solid var(--doc-border);
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  margin: 0 0 1rem;
+}
+
+.md-typeset table th {
+  background: var(--doc-bg-subtle);
+  color: var(--md-default-fg-color);
+  font-weight: 600;
+  font-size: 0.84rem;
+  padding: 0.75em 1.25em;
+  border-bottom: 1px solid var(--doc-border);
+}
+
+.md-typeset table td {
+  padding: 0.7em 1.25em;
+  border-bottom: 1px solid var(--doc-border);
+}
+
+.md-typeset table tr:last-child td {
+  border-bottom: none;
+}
+
+.md-typeset table tr:nth-child(even) {
+  background: var(--doc-bg-subtle);
+}
+
+[data-md-color-scheme="slate"] .md-typeset table th {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+
+/* --------------------------------------------------------------------------
+   7. Admonitions — Simple left border, no shadows or hover
+   -------------------------------------------------------------------------- */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: var(--doc-radius);
+  border-width: 0 0 0 3px;
+  overflow: hidden;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  margin: 0 0 1rem;
+  box-shadow: none;
+}
+
+.md-typeset .admonition-title,
+.md-typeset details summary {
+  font-family: var(--doc-heading-font);
+  font-weight: 600;
+  font-size: 0.88rem;
+  letter-spacing: -0.005em;
+}
+
+
+/* --------------------------------------------------------------------------
+   8. Card Grid — Minimal hover
+   -------------------------------------------------------------------------- */
+
+.md-typeset .grid.cards > ul > li {
+  border: 1px solid var(--doc-border);
+  border-radius: var(--doc-radius);
+  padding: 1rem 1.2rem;
+  transition: border-color var(--doc-transition);
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-default-fg-color--lighter);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+
+/* --------------------------------------------------------------------------
+   9. Blockquote
+   -------------------------------------------------------------------------- */
+
+.md-typeset blockquote {
+  border-left: 3px solid var(--doc-border);
+  background: var(--doc-bg-subtle);
+  padding: 0.75rem 1rem;
+  border-radius: 0 var(--doc-radius) var(--doc-radius) 0;
+  margin: 0 0 1rem;
+  font-style: normal;
+  color: var(--md-default-fg-color--light);
+}
+
+.md-typeset blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+[data-md-color-scheme="slate"] .md-typeset blockquote {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+
+/* --------------------------------------------------------------------------
+   10. Scrollbar
+   -------------------------------------------------------------------------- */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--md-default-fg-color--lighter);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--md-default-fg-color--light);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--md-default-fg-color--lighter) transparent;
+}
+
+
+/* --------------------------------------------------------------------------
+   11. Footer
+   -------------------------------------------------------------------------- */
+
+.md-footer {
+  border-top: 1px solid var(--doc-border);
+}
+
+.md-footer-meta {
+  background: var(--md-default-fg-color);
+}
+
+[data-md-color-scheme="slate"] .md-footer {
+  border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+[data-md-color-scheme="slate"] .md-footer-meta {
+  background: #11111b;
+}
+
+
+/* --------------------------------------------------------------------------
+   12. Responsive
+   -------------------------------------------------------------------------- */
+
+@media screen and (max-width: 76.25em) {
+  .md-grid {
+    max-width: 100%;
+  }
+
+  .md-typeset h1 {
+    font-size: 1.35rem;
+  }
+
+  .md-typeset h2 {
+    font-size: 1.05rem;
+  }
+}
+
+@media screen and (max-width: 60em) {
+  .md-typeset table {
+    font-size: 0.78rem;
+  }
+
+  .md-typeset table th,
+  .md-typeset table td {
+    padding: 0.5em 0.65em;
+  }
+
+  .md-typeset .grid.cards > ul > li {
+    padding: 0.8rem 1rem;
+  }
+}
+
+
+/* --------------------------------------------------------------------------
+   13. Status & Version Badges
+   -------------------------------------------------------------------------- */
+
+.status-badge {
+  display: inline-block;
+  padding: 0.15em 0.65em;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: 999px;
+  line-height: 1.6;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.status-badge--stable {
+  background: #ecfdf5;
+  color: #065f46;
+}
+
+.status-badge--beta {
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.status-badge--experimental {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.status-badge--deprecated {
+  background: #f5f5f4;
+  color: #57534e;
+}
+
+[data-md-color-scheme="slate"] .status-badge--stable {
+  background: rgba(6, 95, 70, 0.15);
+  color: #6ee7b7;
+}
+
+[data-md-color-scheme="slate"] .status-badge--beta {
+  background: rgba(146, 64, 14, 0.15);
+  color: #fcd34d;
+}
+
+[data-md-color-scheme="slate"] .status-badge--experimental {
+  background: rgba(153, 27, 27, 0.15);
+  color: #fca5a5;
+}
+
+[data-md-color-scheme="slate"] .status-badge--deprecated {
+  background: rgba(87, 83, 78, 0.15);
+  color: #a8a29e;
+}
+
+.version-badge {
+  display: inline-block;
+  padding: 0.1em 0.55em;
+  font-family: var(--md-code-font);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.6;
+  border-radius: 999px;
+  background: var(--md-primary-fg-color);
+  color: #fff;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.version-badge--outline {
+  background: transparent;
+  color: var(--md-primary-fg-color);
+  border: 1.5px solid var(--md-primary-fg-color);
+}
+
+
+/* --------------------------------------------------------------------------
+   14. Smooth Scrolling & Reduced Motion
+   -------------------------------------------------------------------------- */
+
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+
+/* --------------------------------------------------------------------------
+   15. Dark Mode
+   -------------------------------------------------------------------------- */
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: #1a1a2e;
+  --md-default-bg-color--light: #1f1f35;
+
+  /* Mermaid variables (Shadow DOM boundary — only variables work) */
+  --md-mermaid-font-family: "Source Sans 3", var(--md-text-font-family), sans-serif;
+  --md-mermaid-node-bg-color: rgba(129, 140, 248, 0.15);
+  --md-mermaid-node-fg-color: #a5b4fc;
+  --md-mermaid-label-fg-color: #e2e8f0;
+  --md-mermaid-edge-color: rgba(255, 255, 255, 0.4);
+  --md-mermaid-label-bg-color: rgba(30, 30, 53, 0.95);
+  --md-mermaid-sequence-actor-bg-color: rgba(129, 140, 248, 0.15);
+  --md-mermaid-sequence-actor-fg-color: #e2e8f0;
+  --md-mermaid-sequence-actor-border-color: #a5b4fc;
+  --md-mermaid-sequence-actor-line-color: #a5b4fc;
+  --md-mermaid-sequence-actorman-bg-color: rgba(129, 140, 248, 0.15);
+  --md-mermaid-sequence-actorman-line-color: #a5b4fc;
+  --md-mermaid-sequence-box-bg-color: rgba(129, 140, 248, 0.08);
+  --md-mermaid-sequence-box-fg-color: #e0e0e0;
+  --md-mermaid-sequence-label-bg-color: rgba(129, 140, 248, 0.08);
+  --md-mermaid-sequence-label-fg-color: #a5b4fc;
+  --md-mermaid-sequence-loop-bg-color: rgba(129, 140, 248, 0.08);
+  --md-mermaid-sequence-loop-fg-color: #e0e0e0;
+  --md-mermaid-sequence-loop-border-color: #a5b4fc;
+  --md-mermaid-sequence-message-fg-color: #e0e0e0;
+  --md-mermaid-sequence-message-line-color: #e0e0e0;
+  --md-mermaid-sequence-note-bg-color: rgba(255, 248, 225, 0.15);
+  --md-mermaid-sequence-note-fg-color: #d7ccc8;
+  --md-mermaid-sequence-note-border-color: #ffd54f;
+  --md-mermaid-sequence-number-bg-color: #818cf8;
+  --md-mermaid-sequence-number-fg-color: #ffffff;
+}
+
+[data-md-color-scheme="slate"] .md-typeset code {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a {
+  color: var(--md-primary-fg-color--light);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  color: #8c9eff;
+}
+
+[data-md-color-scheme="slate"] .md-search__input {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+
+/* --------------------------------------------------------------------------
+   16. Mermaid Diagrams
+   -------------------------------------------------------------------------- */
+
+.mermaid {
+  text-align: center;
+  margin: 0 auto 1rem;
+  padding: 1.5rem 1rem;
+  background: var(--doc-bg-subtle);
+  border: 1px solid var(--doc-border);
+  border-radius: var(--doc-radius);
+  overflow-x: auto;
+  max-width: none;
+}
+
+[data-md-color-scheme="slate"] .mermaid {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.mermaid svg {
+  width: 100%;
+  max-width: none;
+  height: auto;
+  min-height: 200px;
+}
+
+/* Hero diagram — full-width */
+.diagram-hero {
+  margin: 2.5rem -1.5rem;
+  padding: 0;
+}
+
+.diagram-hero .mermaid {
+  margin: 0;
+  padding: 2.5rem 2rem;
+  background: var(--doc-bg-subtle);
+  border: 1px solid var(--doc-border);
+  border-radius: 8px;
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.diagram-hero .mermaid svg {
+  width: 100% !important;
+  max-width: none !important;
+  height: auto !important;
+  min-height: 280px;
+}
+
+[data-md-color-scheme="slate"] .diagram-hero .mermaid {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.diagram-hero .diagram-caption,
+p.diagram-caption {
+  text-align: center;
+  margin: 0.75rem 1.5rem 0;
+  padding: 0;
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--md-default-fg-color--light);
+}
+
+@media screen and (max-width: 60em) {
+  .diagram-hero {
+    margin-left: 0;
+    margin-right: 0;
+  }
+  .diagram-hero .mermaid {
+    padding: 1.5rem 1rem;
+    min-height: 240px;
+  }
+}
+
+/* Mermaid caption */
+.md-typeset .mermaid + em,
+.md-typeset .mermaid + p > em:only-child {
+  display: block;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--md-default-fg-color--light);
+  margin-top: -0.25rem;
+  margin-bottom: 1.5rem;
+  font-style: italic;
+}
+
+/* NOTE: Material renders Mermaid inside a CLOSED Shadow DOM.
+   CSS selectors cannot pierce it. Only --md-mermaid-* variables work. */
+
+
+/* --------------------------------------------------------------------------
+   17. Sidebar Sections
+   -------------------------------------------------------------------------- */
+
+/* Divider between top-level sidebar sections */
+.md-nav--primary > .md-nav__list > .md-nav__item + .md-nav__item {
+  border-top: 1px solid var(--doc-border);
+  margin-top: 0.5em;
+  padding-top: 0.5em;
+}
+
+[data-md-color-scheme="slate"] .md-nav--primary > .md-nav__list > .md-nav__item + .md-nav__item {
+  border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+/* Hover on collapsible group */
+.md-nav__item--nested > label:hover .md-nav__link {
+  color: var(--md-primary-fg-color);
+}
+
+/* Sidebar width — narrower to give more space to content */
+@media screen and (min-width: 76.25em) {
+  .md-sidebar--primary {
+    width: 11rem;
+  }
+  .md-sidebar--secondary {
+    width: 11rem;
+  }
+}
+
+
+/* --------------------------------------------------------------------------
+   18. Right-side Table of Contents
+   -------------------------------------------------------------------------- */
+
+.md-nav--secondary > .md-nav__title {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--md-default-fg-color--light);
+  padding: 0 0.6em 0.4em;
+  margin-bottom: 0.4em;
+  border-bottom: 1px solid var(--doc-border);
+}
+
+.md-nav--secondary .md-nav__link {
+  font-size: 0.76rem;
+  padding: 0.3em 0.6em;
+  border-radius: 3px;
+  color: var(--md-default-fg-color--light);
+  transition: color var(--doc-transition), background var(--doc-transition);
+}
+
+.md-nav--secondary .md-nav__link:hover {
+  color: #1e293b;
+  background: rgba(0, 0, 0, 0.04);
+}
+
+[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link:hover {
+  color: #e0e0e0;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.md-nav--secondary .md-nav__link--active,
+.md-nav--secondary .md-nav__link--active:hover {
+  color: #1e293b !important;
+  font-weight: 600;
+  background: rgba(79, 70, 229, 0.1);
+  border-left: 2px solid var(--md-primary-fg-color);
+  padding-left: calc(0.6em - 2px);
+  border-radius: 0 3px 3px 0;
+}
+
+[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link--active,
+[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link--active:hover {
+  color: #e0e0ff !important;
+  background: rgba(99, 102, 241, 0.15);
+}
+
+.md-nav--secondary .md-nav .md-nav__link {
+  padding-left: 1.2em;
+  font-size: 0.74rem;
+}
+
+
+/* --------------------------------------------------------------------------
+   19. Breadcrumb
+   -------------------------------------------------------------------------- */
+
+.md-path {
+  font-size: 0.78rem;
+  padding: 0.5em 0;
+  margin-bottom: 0.5em;
+  opacity: 0.85;
+}
+
+.md-path__link {
+  font-weight: 500;
+  transition: color var(--doc-transition);
+}
+
+.md-path__link:hover {
+  color: var(--md-primary-fg-color);
+}
+
+.md-path__separator::before {
+  content: '›';
+  margin: 0 0.3em;
+  opacity: 0.5;
+}
+
+
+/* --------------------------------------------------------------------------
+   20. Content Layout
+   -------------------------------------------------------------------------- */
+
+.md-content {
+  padding-top: 0.5rem;
+}
+
+@media screen and (min-width: 76.25em) {
+  .md-content__inner {
+    max-width: none;
+    margin: 0;
+  }
+}
+
+
+/* --------------------------------------------------------------------------
+   21. SVG Diagrams & Lightbox
+   -------------------------------------------------------------------------- */
+
+/* Force ALL figures to take full content width, match Mermaid container style */
+.md-typeset figure {
+  width: 100% !important;
+  max-width: 100% !important;
+  margin: 0 0 1rem;
+  padding: 1rem;
+  background: var(--doc-bg-subtle);
+  border: 1px solid var(--doc-border);
+  border-radius: var(--doc-radius);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.md-typeset figure img[src*="diagrams/"],
+.md-typeset figure img[src$=".svg"],
+.md-typeset figure img[src$=".jpg"],
+.md-typeset img[src*="diagrams/"] {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  border-radius: 4px;
+  border: none;
+  transition: box-shadow 0.2s ease;
+}
+
+.md-typeset figure img[src*="diagrams/"]:hover {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  cursor: zoom-in;
+}
+
+[data-md-color-scheme="slate"] .md-typeset figure img[src*="diagrams/"],
+[data-md-color-scheme="slate"] .md-typeset img[src*="diagrams/"] {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+[data-md-color-scheme="slate"] .md-typeset figure img[src*="diagrams/"]:hover {
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.3);
+}
+
+.md-typeset figure:has(img[src*="diagrams/"]) figcaption {
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--md-default-fg-color--light);
+  margin-top: 0.5rem;
+  font-style: italic;
+}
+
+/* Glightbox popup */
+.glightbox-container .gslide-image,
+.glightbox-container .gslide-media {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.glightbox-container .gslide-media img[src$=".svg"],
+.glightbox-container .gslide-image img[src$=".svg"],
+.glightbox-container .ginner-container img[src$=".svg"],
+.glightbox-container .gslide-media img[src*="diagrams/"],
+.glightbox-container .gslide-image img[src*="diagrams/"],
+.glightbox-container .ginner-container img[src*="diagrams/"] {
+  width: 92vw !important;
+  max-width: 92vw !important;
+  max-height: 90vh !important;
+  height: auto !important;
+  object-fit: contain !important;
+  background: #ffffff;
+  border-radius: 6px;
+  padding: 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+/* Glightbox overlay — darker backdrop */
+.glightbox-container .goverlay {
+  background: rgba(0, 0, 0, 0.85) !important;
+}

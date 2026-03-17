@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 260" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="700" height="260" fill="#fff"/>
+  <rect x="20" y="10" width="660" height="200" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="660" height="32" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="350" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">PPO Loss Components</text>
+
+  <!-- ====== Layer 1: All component boxes ====== -->
+  <!-- 4 boxes evenly distributed across inner width (x=40..660, span=620)
+       w=140, gap=(620-560)/3=20, Positions: 40, 200, 360, 520 -->
+  <rect x="40" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="110" y="119" text-anchor="middle" fill="#424242" font-size="12">Ratio p/p_old</text>
+
+  <rect x="200" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="270" y="119" text-anchor="middle" fill="#424242" font-size="12">Advantage</text>
+
+  <rect x="360" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="430" y="119" text-anchor="middle" fill="#424242" font-size="12">Clip(ratio, e)</text>
+
+  <rect x="520" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#81C784" stroke-width="0.8"/>
+  <text x="590" y="119" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">min(r*A, clip*A)</text>
+
+  <!-- ====== Layer 2: All arrows ====== -->
+  <!-- Ratio -> Clip -->
+  <line x1="180" y1="115" x2="360" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Advantage -> min result -->
+  <line x1="340" y1="115" x2="520" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Clip -> min result -->
+  <line x1="500" y1="115" x2="520" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="350" y="245" text-anchor="middle" fill="#555" font-size="10">Figure 2: Actor and Critic loss calculation</text>
+</svg>

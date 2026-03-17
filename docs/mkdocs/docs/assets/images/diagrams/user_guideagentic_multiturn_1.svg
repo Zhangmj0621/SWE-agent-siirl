@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 360" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="500" height="360" fill="#fff"/>
+  <rect x="20" y="10" width="460" height="300" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="460" height="32" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="250" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Multi-turn Conversation States</text>
+
+  <!-- ====== Layer 1: All state boxes ====== -->
+
+  <!-- Initial state (filled circle) -->
+  <circle cx="250" cy="70" r="6" fill="#424242"/>
+
+  <!-- Generating state -->
+  <rect x="150" y="110" width="200" height="36" rx="18" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="250" y="132" text-anchor="middle" fill="#1565C0" font-size="12" font-weight="600">Generating</text>
+
+  <!-- Tool Execution state -->
+  <rect x="150" y="180" width="200" height="36" rx="18" fill="#F3E5F5" stroke="#CE93D8" stroke-width="1.2"/>
+  <text x="250" y="202" text-anchor="middle" fill="#7B1FA2" font-size="12" font-weight="600">Tool Execution</text>
+
+  <!-- Completed state -->
+  <rect x="150" y="250" width="200" height="36" rx="18" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="250" y="272" text-anchor="middle" fill="#2E7D32" font-size="12" font-weight="600">Completed</text>
+
+  <!-- Final state (double circle) -->
+  <circle cx="250" cy="320" r="8" fill="none" stroke="#424242" stroke-width="1.5"/>
+  <circle cx="250" cy="320" r="5" fill="#424242"/>
+
+  <!-- ====== Layer 2: All arrows + labels ====== -->
+
+  <!-- Initial -> Generating (vertical) -->
+  <line x1="250" y1="76" x2="250" y2="110" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Generating -> Tool Execution (vertical) -->
+  <rect x="255" y="148" width="50" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="250" y1="146" x2="250" y2="180" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="280" y="158" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">tool_call</text>
+
+  <!-- Tool Execution -> Generating: "response" (left side loop, orthogonal) -->
+  <rect x="62" y="149" width="50" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 150 198 L 100 198 L 100 128 L 150 128" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="87" y="159" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">response</text>
+
+  <!-- Generating -> Completed: "EOS" (right side path, orthogonal) -->
+  <rect x="385" y="189" width="24" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 350 128 L 397 128 L 397 268 L 350 268" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="397" y="199" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">EOS</text>
+
+  <!-- Completed -> Final (vertical) -->
+  <line x1="250" y1="286" x2="250" y2="312" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="250" y="345" text-anchor="middle" fill="#555" font-size="10">Figure 1: Multi-Turn State Machine</text>
+</svg>

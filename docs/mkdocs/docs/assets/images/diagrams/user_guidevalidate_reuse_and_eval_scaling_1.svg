@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="800" height="340" fill="#fff"/>
+  <rect x="20" y="10" width="760" height="280" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="760" height="32" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="400" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Validation Pipeline</text>
+
+  <!-- ====== Layer 1: All containers and boxes ====== -->
+
+  <!-- Training Loop container -->
+  <rect x="30" y="55" width="350" height="140" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <rect x="30" y="55" width="350" height="26" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="205" y="73" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Training Loop</text>
+
+  <!-- Validation container -->
+  <rect x="420" y="55" width="350" height="140" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="420" y="55" width="350" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="595" y="73" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Validation</text>
+
+  <!-- Training Loop sub-components: 2 boxes w=140, gap=30
+       Positions: 50, 220 -->
+  <rect x="50" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="120" y="119" text-anchor="middle" fill="#424242" font-size="12">Training Step</text>
+
+  <rect x="220" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="290" y="119" text-anchor="middle" fill="#424242" font-size="12">Check Interval</text>
+
+  <!-- Validation sub-components: 2 boxes w=140, gap=30
+       Positions: 440, 610 -->
+  <rect x="440" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="510" y="119" text-anchor="middle" fill="#424242" font-size="12">Run Eval Set</text>
+
+  <rect x="610" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="680" y="119" text-anchor="middle" fill="#424242" font-size="12">Compute Metrics</text>
+
+  <!-- ====== Layer 2: All arrows + bg rects + labels ====== -->
+
+  <!-- Training Step -> Check Interval -->
+  <line x1="190" y1="115" x2="220" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Check Interval -> Run Eval Set -->
+  <rect x="373" y="102" width="48" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="360" y1="115" x2="440" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="397" y="112" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">if interval</text>
+
+  <!-- Run Eval Set -> Compute Metrics -->
+  <line x1="580" y1="115" x2="610" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Check Interval -> Training Step (return loop below) -->
+  <rect x="183" y="133" width="44" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="290" y1="130" x2="120" y2="130" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="205" y="143" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">continue</text>
+
+  <!-- Caption -->
+  <text x="400" y="325" text-anchor="middle" fill="#555" font-size="10">Figure 1: How validation runs during training</text>
+</svg>

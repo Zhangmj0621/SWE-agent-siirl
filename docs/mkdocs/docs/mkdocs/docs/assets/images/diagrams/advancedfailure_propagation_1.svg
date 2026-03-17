@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 440" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+    <marker id="seq-arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="820" height="440" fill="#fff"/>
+  <rect x="20" y="10" width="780" height="380" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="780" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="410.0" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">System Lifecycle State Diagram</text>
+  <circle cx="100" cy="180" r="6" fill="#424242"/>
+  <rect x="180" y="164" width="150" height="32" rx="16.0" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="255.0" y="184.0" text-anchor="middle" fill="#2E7D32" font-size="12" font-weight="600">RUNNING</text>
+  <rect x="460" y="80" width="160" height="32" rx="16.0" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="540.0" y="100.0" text-anchor="middle" fill="#1565C0" font-size="12" font-weight="600">COMPLETED</text>
+  <rect x="460" y="180" width="160" height="32" rx="16.0" fill="#FFEBEE" stroke="#EF9A9A" stroke-width="1.2"/>
+  <text x="540.0" y="200.0" text-anchor="middle" fill="#C62828" font-size="12" font-weight="600">FAILED</text>
+  <rect x="460" y="280" width="160" height="32" rx="16.0" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="540.0" y="300.0" text-anchor="middle" fill="#F57F17" font-size="12" font-weight="600">SHUTDOWN</text>
+  <circle cx="720" cy="80" r="8" fill="none" stroke="#424242" stroke-width="1.5"/>
+  <circle cx="720" cy="80" r="5" fill="#424242"/>
+  <circle cx="720" cy="180" r="8" fill="none" stroke="#424242" stroke-width="1.5"/>
+  <circle cx="720" cy="180" r="5" fill="#424242"/>
+  <circle cx="720" cy="280" r="8" fill="none" stroke="#424242" stroke-width="1.5"/>
+  <circle cx="720" cy="280" r="5" fill="#424242"/>
+  <line x1="106" y1="180.0" x2="180" y2="180.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="143.0" y="174.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">System initialized</text>
+  <path d="M330,180.0 L400,96 L460,96.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="400" y="90" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">All epochs finished</text>
+  <line x1="330" y1="180.0" x2="460" y2="196.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="395.0" y="182.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Error in any component</text>
+  <path d="M330,180.0 L400,296 L460,296.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="400" y="290" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Graceful shutdown</text>
+  <line x1="620" y1="96.0" x2="712" y2="80.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="620" y1="196.0" x2="712" y2="180.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="620" y1="296.0" x2="712" y2="280.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="255" y="220" text-anchor="middle" fill="#607D8B" font-size="10" font-weight="normal" font-style="italic">should_stop() → False</text>
+  <text x="540" y="230" text-anchor="middle" fill="#C62828" font-size="10" font-weight="normal" font-style="italic">should_stop() → True</text>
+  <text x="540" y="248" text-anchor="middle" fill="#C62828" font-size="10" font-weight="normal" font-style="italic">failure_reason logged</text>
+  <text x="410.0" y="425" text-anchor="middle" fill="#555" font-size="10">Figure 1: System State Machine</text>
+</svg>

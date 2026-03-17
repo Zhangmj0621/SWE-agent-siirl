@@ -166,7 +166,7 @@ exclude_lines = ["pragma: no cover", "raise NotImplementedError", "if TYPE_CHECK
 
 [tool.codespell]
 skip = "*.git,*.egg-info,build,dist,__pycache__,*.log"
-ignore-words-list = "cann,tensor,TE,hsi,nd,thre"
+ignore-words-list = "cann,tensor,TE,hsi,nd,thre,composit"
 
 [tool.setuptools]
 include-package-data = true

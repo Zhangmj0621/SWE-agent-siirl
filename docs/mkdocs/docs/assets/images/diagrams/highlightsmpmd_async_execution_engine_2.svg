@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 580" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-g" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#66BB6A"/>
+    </marker>
+    <marker id="arr-a" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#FFB300"/>
+    </marker>
+    <marker id="arr-p" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#AB47BC"/>
+    </marker>
+  </defs>
+  <rect width="900" height="580" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="520" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="450" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">MPMD Execution Sequence</text>
+
+  <!-- Swim lane headers -->
+  <rect x="35" y="50" width="120" height="26" rx="1" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="0.8"/>
+  <text x="95" y="67" text-anchor="middle" fill="#616161" font-size="11" font-weight="600">RolloutMgr</text>
+  <rect x="200" y="50" width="120" height="26" rx="1" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="260" y="67" text-anchor="middle" fill="#1565C0" font-size="11" font-weight="600">SGLang</text>
+  <rect x="365" y="50" width="120" height="26" rx="1" fill="#F3E5F5" stroke="#CE93D8" stroke-width="0.8"/>
+  <text x="425" y="67" text-anchor="middle" fill="#7B1FA2" font-size="11" font-weight="600">ToolEnv</text>
+  <rect x="530" y="50" width="120" height="26" rx="1" fill="#FFF8E1" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="590" y="67" text-anchor="middle" fill="#F57F17" font-size="11" font-weight="600">DataCoord</text>
+  <rect x="695" y="50" width="120" height="26" rx="1" fill="#E8F5E9" stroke="#81C784" stroke-width="0.8"/>
+  <text x="755" y="67" text-anchor="middle" fill="#2E7D32" font-size="11" font-weight="600">TrainerGroup</text>
+
+  <!-- Vertical lifelines -->
+  <line x1="95" y1="76" x2="95" y2="500" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="260" y1="76" x2="260" y2="500" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="425" y1="76" x2="425" y2="500" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="590" y1="76" x2="590" y2="500" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="755" y1="76" x2="755" y2="500" stroke="#E0E0E0" stroke-width="0.8" stroke-dasharray="4,4"/>
+
+  <!-- All arrows + labels (strictly horizontal) -->
+  <!-- 1. dispatch_prompts: RolloutMgr → SGLang -->
+  <rect x="126" y="97" width="82" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="95" y1="115" x2="260" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="167" y="107" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">dispatch_prompts()</text>
+
+  <!-- 2. generate: SGLang → ToolEnv -->
+  <rect x="296" y="140" width="74" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="260" y1="158" x2="425" y2="158" stroke="#AB47BC" stroke-width="1.2" marker-end="url(#arr-p)"/>
+  <text x="333" y="150" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">execute_tool()</text>
+
+  <!-- 3. tool_response: ToolEnv → SGLang -->
+  <rect x="296" y="183" width="74" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="425" y1="201" x2="260" y2="201" stroke="#AB47BC" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arr-p)"/>
+  <text x="333" y="193" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">tool_response</text>
+
+  <!-- 4. completions: SGLang → RolloutMgr -->
+  <rect x="131" y="226" width="64" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="260" y1="244" x2="95" y2="244" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="163" y="236" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">completions</text>
+
+  <!-- Compute rewards box -->
+  <rect x="60" y="270" width="120" height="28" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="120" y="288" text-anchor="middle" fill="#6D4C00" font-size="10.5">Compute rewards</text>
+
+  <!-- 5. submit_batch: RolloutMgr → TrainerGroup -->
+  <rect x="380" y="310" width="68" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="95" y1="328" x2="755" y2="328" stroke="#FFB300" stroke-width="1.3" marker-end="url(#arr-a)"/>
+  <text x="414" y="320" text-anchor="middle" fill="#F57F17" font-size="9" font-style="italic">submit_batch()</text>
+
+  <!-- 6. forward + backward (self-loop on TrainerGroup) -->
+  <path d="M 755 360 L 820 360 L 820 385 L 755 385" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="824" y="376" fill="#78909C" font-size="9">forward + backward</text>
+
+  <!-- 7. sync_weights: TrainerGroup → RolloutMgr -->
+  <rect x="380" y="400" width="68" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="755" y1="418" x2="95" y2="418" stroke="#66BB6A" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arr-g)"/>
+  <text x="414" y="410" text-anchor="middle" fill="#2E7D32" font-size="9" font-style="italic">sync_weights()</text>
+
+  <!-- Caption -->
+  <text x="450" y="565" text-anchor="middle" fill="#555" font-size="10">Figure 2: Async execution flow between components</text>
+</svg>

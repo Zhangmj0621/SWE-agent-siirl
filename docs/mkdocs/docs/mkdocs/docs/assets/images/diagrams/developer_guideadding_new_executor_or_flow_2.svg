@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+    <marker id="seq-arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="900" height="520" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="460" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="450.0" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Three-Stage AgentFlow Protocol</text>
+  <rect x="30" y="52" width="200" height="200" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="130.0" y="68" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Stage 1: Preprocess</text>
+  <rect x="260" y="52" width="320" height="320" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="420.0" y="68" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Stage 2: Generate</text>
+  <rect x="620" y="52" width="250" height="200" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="745.0" y="68" text-anchor="middle" fill="#F57F17" font-size="13" font-weight="bold">Stage 3: Reward</text>
+  <rect x="46" y="94" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="130.0" y="113.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Raw dict from dataset</text>
+  <rect x="46" y="134" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="130.0" y="153.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Create Sample + metadata</text>
+  <rect x="46" y="174" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="130.0" y="193.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Build initial conversation</text>
+  <rect x="280" y="100" width="280" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="420.0" y="119.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Tokenize conversation</text>
+  <rect x="280" y="150" width="280" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="420.0" y="169.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">model.query() — LLM inference</text>
+  <polygon points="404.0,200 428,224.0 404.0,248 380,224.0" fill="#FFFFFF" stroke="#FFB74D" stroke-width="1"/>
+  <text x="404.0" y="228.0" text-anchor="middle" fill="#424242" font-size="10.5">Tool?</text>
+  <rect x="280" y="270" width="280" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="420.0" y="289.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Execute tool via environment</text>
+  <rect x="280" y="316" width="280" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="420.0" y="335.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Append tool response</text>
+  <rect x="280" y="200" width="80" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="320.0" y="219.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Record</text>
+  <rect x="636" y="94" width="218" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="745.0" y="113.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Evaluate trajectory</text>
+  <rect x="636" y="134" width="218" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="745.0" y="153.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Assign scalar reward</text>
+  <rect x="636" y="174" width="218" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="745.0" y="193.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Set status = COMPLETED</text>
+  <line x1="130.0" y1="124" x2="130.0" y2="134" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="130.0" y1="164" x2="130.0" y2="174" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="214" y1="189.0" x2="280" y2="115.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="247.0" y="146.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Sample (PENDING)</text>
+  <line x1="420.0" y1="130" x2="420.0" y2="150" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="420.0" y1="180" x2="404.0" y2="200" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="404.0" y1="248" x2="420.0" y2="270" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="412.0" y="253.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Yes</text>
+  <line x1="420.0" y1="300" x2="420.0" y2="316" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M280,331.0 L265,331 L265,165 L280,165.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M380,224.0 L320,224 L320.0,230" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="320" y="218" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">No</text>
+  <path d="M320.0,200 L320,108 L636,109.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="320" y="102" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Sample (ROLLEDOUT)</text>
+  <line x1="745.0" y1="124" x2="745.0" y2="134" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="745.0" y1="164" x2="745.0" y2="174" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="450.0" y="505" text-anchor="middle" fill="#555" font-size="10">Figure 2: AgentFlow Three-Stage Pipeline</text>
+</svg>

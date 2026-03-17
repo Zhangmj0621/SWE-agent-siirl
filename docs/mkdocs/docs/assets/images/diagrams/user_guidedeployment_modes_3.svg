@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 300" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="600" height="300" fill="#fff"/>
+  <rect x="20" y="10" width="560" height="240" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="560" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="300" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Colocated Deployment</text>
+
+  <!-- Layer 1: All boxes -->
+  <!-- Container -->
+  <rect x="50" y="50" width="500" height="165" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <rect x="50" y="50" width="500" height="26" rx="2" fill="#FFECB3" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="300" y="68" text-anchor="middle" fill="#F57F17" font-size="13" font-weight="bold">Colocated Node (Shared GPUs)</text>
+
+  <!-- Sub-components: 2 boxes on top row, evenly distributed -->
+  <!-- Inner span: x=70..530 = 460; 2 boxes w=190, gap=(460-380)/1=80 -->
+  <!-- x: 70, 340 -->
+  <rect x="70" y="95" width="190" height="30" rx="1" fill="#FFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="165" y="114" text-anchor="middle" fill="#424242" font-size="11" font-weight="600">Training + Rollout</text>
+  <rect x="340" y="95" width="190" height="30" rx="1" fill="#FFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="435" y="114" text-anchor="middle" fill="#424242" font-size="11">DataCoordinator</text>
+
+  <!-- ToolEnv below Training+Rollout -->
+  <rect x="70" y="160" width="130" height="30" rx="1" fill="#FFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="135" y="179" text-anchor="middle" fill="#424242" font-size="11">ToolEnv</text>
+
+  <!-- Layer 2: Arrows (orthogonal only) -->
+  <!-- Training+Rollout -> DataCoordinator: horizontal -->
+  <line x1="260" y1="110" x2="340" y2="110" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Training+Rollout -> ToolEnv: vertical L-path (down then no horizontal needed, just go down from center-left) -->
+  <path d="M 135 125 L 135 160" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="300" y="285" text-anchor="middle" fill="#555" font-size="10">Figure 3: Training and rollout share GPUs</text>
+</svg>

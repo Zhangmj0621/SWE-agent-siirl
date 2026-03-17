@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 360" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+    <marker id="seq-arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="880" height="360" fill="#fff"/>
+  <rect x="20" y="10" width="840" height="300" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="840" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="440.0" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Error Propagation Pipeline</text>
+  <rect x="30" y="60" width="220" height="80" rx="2" fill="#FFEBEE" stroke="#EF9A9A" stroke-width="1.2"/>
+  <text x="140.0" y="76" text-anchor="middle" fill="#C62828" font-size="13" font-weight="bold">Error Origin</text>
+  <rect x="290" y="60" width="250" height="120" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="415.0" y="76" text-anchor="middle" fill="#F57F17" font-size="13" font-weight="bold">Failure Propagation</text>
+  <rect x="580" y="60" width="270" height="160" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="715.0" y="76" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Graceful Shutdown</text>
+  <rect x="46" y="102" width="188" height="30" rx="1" fill="#FFFFFF" stroke="#EF9A9A" stroke-width="0.8"/>
+  <text x="140.0" y="121.0" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Trainer: CUDA OOM</text>
+  <rect x="306" y="102" width="218" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="415.0" y="121.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">report_failure to Coordinator</text>
+  <rect x="306" y="142" width="218" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="415.0" y="161.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Coordinator status = FAILED</text>
+  <rect x="596" y="102" width="238" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="715.0" y="121.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">RolloutManager: cancel rollouts</text>
+  <rect x="596" y="142" width="238" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="715.0" y="161.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">DataCoordinator: flush buffer</text>
+  <rect x="596" y="182" width="238" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="715.0" y="201.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">MainRunner: cleanup &amp; exit</text>
+  <line x1="234" y1="117.0" x2="306" y2="117.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="270.0" y="111.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">error caught</text>
+  <line x1="415.0" y1="132" x2="415.0" y2="142" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="415.0" y="131.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">set status</text>
+  <line x1="524" y1="157.0" x2="596" y2="117.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="560.0" y="131.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">should_stop = True</text>
+  <path d="M524,157.0 L565,148 L596,157.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="565" y="142" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">should_stop = True</text>
+  <line x1="715.0" y1="132" x2="715.0" y2="182" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="715.0" y1="172" x2="715.0" y2="182" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="440.0" y="345" text-anchor="middle" fill="#555" font-size="10">Figure 3: Error Propagation Flow</text>
+</svg>

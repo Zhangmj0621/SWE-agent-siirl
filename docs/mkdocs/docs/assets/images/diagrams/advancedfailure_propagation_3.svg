@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 862 420" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="862" height="420" fill="#fff"/>
+  <rect x="20" y="10" width="822" height="360" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="822" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="431" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Advanced &gt; Failure Propagation (Fig. 3)</text>
+
+  <!-- Layer 1: All container boxes -->
+  <rect x="24" y="48" width="195" height="88" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="24" y="48" width="195" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="121" y="66" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Error Origin</text>
+
+  <rect x="232" y="48" width="566" height="88" rx="2" fill="#FFEBEE" stroke="#EF9A9A" stroke-width="1.2"/>
+  <rect x="232" y="48" width="566" height="26" rx="2" fill="#FFCDD2" stroke="#EF9A9A" stroke-width="1.2"/>
+  <text x="515" y="66" text-anchor="middle" fill="#C62828" font-size="13" font-weight="bold">Failure Propagation</text>
+
+  <rect x="24" y="163" width="573" height="178" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2"/>
+  <rect x="24" y="163" width="573" height="26" rx="2" fill="#EEEEEE" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="310" y="181" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Graceful Shutdown</text>
+
+  <!-- Layer 1: All sub-component boxes -->
+  <rect x="40" y="90" width="163" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="121" y="109" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Trainer: CUDA OOM</text>
+
+  <rect x="248" y="90" width="252" height="30" rx="1" fill="#FFFFFF" stroke="#EF9A9A" stroke-width="0.8"/>
+  <text x="374" y="109" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">report_failure to Coordinator</text>
+
+  <rect x="544" y="90" width="237" height="30" rx="1" fill="#FFFFFF" stroke="#EF9A9A" stroke-width="0.8"/>
+  <text x="663" y="109" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Coordinator status = FAILED</text>
+
+  <rect x="40" y="205" width="267" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="173" y="224" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">RolloutManager: cancel rollouts</text>
+
+  <rect x="40" y="285" width="252" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="166" y="304" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">DataCoordinator: flush buffer</text>
+
+  <rect x="362" y="245" width="230" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="477" y="264" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">MainRunner: cleanup &amp; exit</text>
+
+  <!-- Layer 2: All arrows + bg rects + labels -->
+  <!-- Trainer → report_failure: error caught -->
+  <rect x="205" y="96" width="40" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="203" y1="105" x2="248" y2="105" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="225" y="106" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">error caught</text>
+
+  <!-- report_failure → Coordinator status: set status -->
+  <rect x="503" y="96" width="38" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="500" y1="105" x2="544" y2="105" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="522" y="106" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">set status</text>
+
+  <!-- Coordinator status → RolloutManager: should_stop = True (orthogonal L-path) -->
+  <rect x="608" y="148" width="110" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 663 120 L 663 220 L 307 220" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="663" y="158" fill="#607D8B" font-size="10.5" font-style="italic">should_stop = True</text>
+
+  <!-- Coordinator status → DataCoordinator: should_stop = True (orthogonal L-path) -->
+  <rect x="608" y="168" width="110" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 663 120 L 663 300 L 292 300" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="663" y="178" fill="#607D8B" font-size="10.5" font-style="italic">should_stop = True</text>
+
+  <!-- RolloutManager → MainRunner: done (horizontal) -->
+  <line x1="307" y1="220" x2="362" y2="220" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- DataCoordinator → MainRunner: done (orthogonal L-path) -->
+  <path d="M 292 300 L 330 300 L 330 260 L 362 260" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="431" y="405" text-anchor="middle" fill="#555" font-size="10">Figure 3: Error Propagation Flow</text>
+</svg>

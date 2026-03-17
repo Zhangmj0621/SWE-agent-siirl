@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 820" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+    <marker id="seq-arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="900" height="820" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="760" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="450.0" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Troubleshooting Decision Tree</text>
+  <rect x="20" y="140" width="200" height="200" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="120.0" y="156" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Initialization</text>
+  <rect x="240" y="140" width="200" height="200" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="340.0" y="156" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Training Loop</text>
+  <rect x="460" y="140" width="220" height="240" rx="2" fill="#F3E5F5" stroke="#CE93D8" stroke-width="1.2"/>
+  <text x="570.0" y="156" text-anchor="middle" fill="#7B1FA2" font-size="13" font-weight="bold">Multi-Turn / Agentic</text>
+  <rect x="700" y="140" width="180" height="160" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="790.0" y="156" text-anchor="middle" fill="#F57F17" font-size="13" font-weight="bold">Checkpoint</text>
+  <polygon points="418.0,56 446,84.0 418.0,112 390,84.0" fill="#FFFFFF" stroke="#FFB74D" stroke-width="1"/>
+  <text x="418.0" y="88.0" text-anchor="middle" fill="#424242" font-size="10.5">Stage?</text>
+  <rect x="36" y="182" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="120.0" y="201.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Ray connection?</text>
+  <rect x="36" y="222" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="120.0" y="241.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">GPU allocation?</text>
+  <rect x="36" y="262" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="120.0" y="281.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">SGLang startup?</text>
+  <rect x="20" y="360" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="120.0" y="379.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">ray stop &amp;&amp; ray start</text>
+  <rect x="20" y="400" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="120.0" y="419.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Reduce actor/rollout GPUs</text>
+  <rect x="20" y="440" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="120.0" y="459.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Reduce gpu_mem_utilization</text>
+  <rect x="256" y="182" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="340.0" y="201.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">OOM error?</text>
+  <rect x="256" y="222" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="340.0" y="241.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">No progress?</text>
+  <rect x="256" y="262" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="340.0" y="281.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Reward = 0?</text>
+  <rect x="240" y="360" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="340.0" y="379.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Reduce micro_batch_size</text>
+  <rect x="240" y="400" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="340.0" y="419.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Check DataCoordinator logs</text>
+  <rect x="240" y="440" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="340.0" y="459.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Verify reward_fn &amp; data</text>
+  <rect x="476" y="182" width="188" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="570.0" y="201.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Tool calls not detected?</text>
+  <rect x="476" y="222" width="188" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="570.0" y="241.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">AIO connection failed?</text>
+  <rect x="476" y="262" width="188" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="570.0" y="281.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Tool timeout?</text>
+  <rect x="476" y="302" width="188" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="570.0" y="321.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Trajectories too short?</text>
+  <rect x="460" y="400" width="220" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="570.0" y="419.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Set tool_format: hermes</text>
+  <rect x="460" y="440" width="220" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="570.0" y="459.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Check AIO Proxy health</text>
+  <rect x="460" y="480" width="220" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="570.0" y="499.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Scale AIO instances</text>
+  <rect x="460" y="520" width="220" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="570.0" y="539.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Increase max_env_turns</text>
+  <rect x="716" y="182" width="148" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="790.0" y="201.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Resume fails?</text>
+  <rect x="716" y="222" width="148" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="790.0" y="241.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Disk full?</text>
+  <rect x="700" y="360" width="180" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="790.0" y="379.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Check resume_mode &amp; path</text>
+  <rect x="700" y="400" width="180" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="790.0" y="419.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">max_actor_ckpt_to_keep: 5</text>
+  <path d="M390,84.0 L120,84 L120.0,182" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="120" y="78" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Startup fails</text>
+  <path d="M418.0,112 L418,130 L340,130 L340.0,182" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="340" y="124" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Training error</text>
+  <path d="M446,84.0 L570,84 L570.0,182" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="570" y="78" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Tool issues</text>
+  <path d="M446,84.0 L790,84 L790.0,182" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="790" y="78" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Checkpoint</text>
+  <path d="M120.0,212 L120,350 L120.0,360" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M120.0,252 L120,390 L120.0,400" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M120.0,292 L120,435 L120.0,440" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M340.0,212 L340,350 L340.0,360" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M340.0,252 L340,390 L340.0,400" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M340.0,292 L340,435 L340.0,440" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M570.0,212 L570,390 L570.0,400" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M570.0,252 L570,435 L570.0,440" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M570.0,292 L570,475 L570.0,480" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M570.0,332 L570,515 L570.0,520" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M790.0,212 L790,350 L790.0,360" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M790.0,252 L790,390 L790.0,400" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="450.0" y="805" text-anchor="middle" fill="#555" font-size="10">Figure 1: Troubleshooting Decision Tree</text>
+</svg>

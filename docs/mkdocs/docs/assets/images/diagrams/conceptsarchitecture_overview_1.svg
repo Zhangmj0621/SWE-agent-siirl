@@ -1,0 +1,180 @@
+<svg width="100%" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 890 740" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/></marker>
+    <marker id="arr-g" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0.8, 7 3, 0 5.2" fill="#66BB6A"/></marker>
+    <marker id="arr-b" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0.8, 7 3, 0 5.2" fill="#42A5F5"/></marker>
+    <marker id="arr-a" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0.8, 7 3, 0 5.2" fill="#FFB300"/></marker>
+    <marker id="arr-p" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0.8, 7 3, 0 5.2" fill="#AB47BC"/></marker>
+  </defs>
+  <rect width="860" height="730" fill="#fff"/>
+
+  <!-- ====== LAYER 1: Driver Process (x=30, y=20, w=800, h=95) — full width ====== -->
+  <rect x="30" y="20" width="800" height="95" rx="3" fill="#FAFAFA" stroke="#BDBDBD" stroke-width="1.3"/>
+  <rect x="30" y="20" width="800" height="26" rx="3" fill="#F0F0F0" stroke="#BDBDBD" stroke-width="1.3"/>
+  <text x="430" y="38" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold" letter-spacing="0.3">Driver Process</text>
+  <!-- 5 boxes: w=136, gap=20, start x=50 -->
+  <rect x="50" y="58" width="136" height="30" rx="1" fill="#FFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="118" y="77" text-anchor="middle" fill="#424242" font-size="11" font-weight="600">main()</text>
+  <rect x="206" y="58" width="136" height="30" rx="1" fill="#FFF" stroke="#BDBDBD" stroke-width="1.0"/>
+  <text x="274" y="77" text-anchor="middle" fill="#424242" font-size="11" font-weight="600">MainRunner</text>
+  <rect x="362" y="58" width="136" height="30" rx="1" fill="#FFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="430" y="77" text-anchor="middle" fill="#424242" font-size="11">TaskCoordinator</text>
+  <rect x="518" y="58" width="136" height="30" rx="1" fill="#FFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="586" y="77" text-anchor="middle" fill="#424242" font-size="10.5">allocate_resources()</text>
+  <rect x="674" y="58" width="136" height="30" rx="1" fill="#FFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="742" y="77" text-anchor="middle" fill="#424242" font-size="11">MetricWorker</text>
+  <!-- Driver internal arrows -->
+  <line x1="186" y1="73" x2="206" y2="73" stroke="#BDBDBD" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="342" y1="73" x2="362" y2="73" stroke="#BDBDBD" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="498" y1="73" x2="518" y2="73" stroke="#BDBDBD" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="654" y1="73" x2="674" y2="73" stroke="#BDBDBD" stroke-width="1" marker-end="url(#arr)"/>
+
+  <!-- ====== SIDEBAR: Monitoring (x=710, y=135, w=120, h=505) — spans all content rows ====== -->
+  <rect x="710" y="135" width="120" height="505" rx="3" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2" stroke-dasharray="6,3"/>
+  <rect x="710" y="135" width="120" height="26" rx="3" fill="#EEEEEE" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="770" y="153" text-anchor="middle" fill="#616161" font-size="11" font-weight="bold" letter-spacing="0.3">Monitoring</text>
+  <rect x="720" y="178" width="100" height="30" rx="1" fill="#FFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="770" y="197" text-anchor="middle" fill="#424242" font-size="9.5">ValidateMonitor</text>
+  <rect x="720" y="220" width="100" height="30" rx="1" fill="#FFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="770" y="239" text-anchor="middle" fill="#424242" font-size="9.5">WandB / Console</text>
+  <text x="770" y="290" text-anchor="middle" fill="#9E9E9E" font-size="8.5" font-style="italic">observes all layers</text>
+
+  <!-- ====== LAYER 2: Training Cluster (x=30, y=135, w=660, h=180) ====== -->
+  <rect x="30" y="135" width="660" height="180" rx="3" fill="#E8F5E9" stroke="#81C784" stroke-width="1.3"/>
+  <rect x="30" y="135" width="660" height="26" rx="3" fill="#C8E6C9" stroke="#81C784" stroke-width="1.3"/>
+  <text x="360" y="153" text-anchor="middle" fill="#2E7D32" font-size="12" font-weight="bold" letter-spacing="0.3">Training Cluster</text>
+  <!-- Inner: 3 cols w=170, gap=55, evenly distributed across w=620 (x=50..670) -->
+  <rect x="50" y="173" width="620" height="28" rx="1" fill="#FFF" stroke="#81C784" stroke-width="1.0"/>
+  <text x="360" y="191" text-anchor="middle" fill="#424242" font-size="11" font-weight="600">TrainerGroup</text>
+  <rect x="50" y="213" width="170" height="26" rx="1" fill="#FFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="135" y="230" text-anchor="middle" fill="#424242" font-size="10">Trainer 0</text>
+  <rect x="275" y="213" width="170" height="26" rx="1" fill="#FFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="360" y="230" text-anchor="middle" fill="#424242" font-size="10">Trainer 1</text>
+  <rect x="500" y="213" width="170" height="26" rx="1" fill="#FFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="585" y="230" text-anchor="middle" fill="#424242" font-size="10">Trainer N</text>
+  <rect x="50" y="253" width="170" height="24" rx="1" fill="#FFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="135" y="269" text-anchor="middle" fill="#2E7D32" font-size="10">Actor Model</text>
+  <rect x="275" y="253" width="170" height="24" rx="1" fill="#FFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="360" y="269" text-anchor="middle" fill="#2E7D32" font-size="10">Ref Model</text>
+  <rect x="500" y="253" width="170" height="24" rx="1" fill="#FFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="585" y="269" text-anchor="middle" fill="#2E7D32" font-size="10">Critic Model</text>
+  <rect x="50" y="289" width="170" height="20" rx="1" fill="#C8E6C9" stroke="#81C784" stroke-width="0.6"/>
+  <text x="135" y="303" text-anchor="middle" fill="#2E7D32" font-size="9" font-style="italic">param_sync/</text>
+
+  <!-- ====== LAYER 3 LEFT: Rollout Cluster (x=30, y=340, w=420, h=190) ====== -->
+  <rect x="30" y="340" width="420" height="190" rx="3" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.3"/>
+  <rect x="30" y="340" width="420" height="26" rx="3" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.3"/>
+  <text x="240" y="358" text-anchor="middle" fill="#1565C0" font-size="12" font-weight="bold" letter-spacing="0.3">Rollout Cluster</text>
+  <!-- Inner: 3 cols w=110, gap=25. RolloutManager: x=50, w=380 -->
+  <rect x="50" y="378" width="380" height="28" rx="1" fill="#FFF" stroke="#64B5F6" stroke-width="1.0"/>
+  <text x="240" y="396" text-anchor="middle" fill="#424242" font-size="11" font-weight="600">RolloutManager</text>
+  <rect x="50" y="418" width="110" height="26" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="105" y="435" text-anchor="middle" fill="#424242" font-size="10">RolloutWorker 0</text>
+  <rect x="185" y="418" width="110" height="26" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="240" y="435" text-anchor="middle" fill="#424242" font-size="10">RolloutWorker 1</text>
+  <rect x="320" y="418" width="110" height="26" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="375" y="435" text-anchor="middle" fill="#424242" font-size="10">RolloutWorker N</text>
+  <rect x="50" y="456" width="110" height="24" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="105" y="472" text-anchor="middle" fill="#1565C0" font-size="10">SGLang Engine</text>
+  <rect x="185" y="456" width="110" height="24" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="240" y="472" text-anchor="middle" fill="#1565C0" font-size="10">SGLang Engine</text>
+  <rect x="320" y="456" width="110" height="24" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="375" y="472" text-anchor="middle" fill="#1565C0" font-size="10">SGLang Engine</text>
+  <rect x="50" y="492" width="110" height="24" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="105" y="508" text-anchor="middle" fill="#1565C0" font-size="10">NaiveFlow</text>
+  <rect x="185" y="492" width="110" height="24" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="240" y="508" text-anchor="middle" fill="#1565C0" font-size="10">NaiveFlow</text>
+  <rect x="320" y="492" width="110" height="24" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="375" y="508" text-anchor="middle" fill="#1565C0" font-size="10">NaiveFlow</text>
+
+  <!-- ====== LAYER 3 RIGHT: Data Layer (x=470, y=340, w=220, h=190) ====== -->
+  <rect x="470" y="340" width="220" height="190" rx="3" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.3"/>
+  <rect x="470" y="340" width="220" height="26" rx="3" fill="#FFECB3" stroke="#FFD54F" stroke-width="1.3"/>
+  <text x="580" y="358" text-anchor="middle" fill="#F57F17" font-size="12" font-weight="bold" letter-spacing="0.3">Data Layer</text>
+  <rect x="490" y="378" width="180" height="28" rx="1" fill="#FFF" stroke="#FFD54F" stroke-width="1.0"/>
+  <text x="580" y="396" text-anchor="middle" fill="#424242" font-size="11" font-weight="600">DataCoordinator</text>
+  <rect x="505" y="420" width="150" height="26" rx="1" fill="#FFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="580" y="437" text-anchor="middle" fill="#424242" font-size="10">Dataloader</text>
+  <rect x="505" y="460" width="150" height="26" rx="1" fill="#FFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="580" y="477" text-anchor="middle" fill="#424242" font-size="10">SampleBuffer</text>
+  <rect x="505" y="500" width="150" height="20" rx="1" fill="#FFECB3" stroke="#FFD54F" stroke-width="0.6"/>
+  <text x="580" y="514" text-anchor="middle" fill="#F57F17" font-size="9" font-style="italic">Parquet files</text>
+
+  <!-- ====== LAYER 4: Tool Layer (x=30, y=555, w=660, h=85) — matches Training width ====== -->
+  <rect x="30" y="555" width="660" height="85" rx="3" fill="#F3E5F5" stroke="#CE93D8" stroke-width="1.3"/>
+  <rect x="30" y="555" width="660" height="26" rx="3" fill="#E1BEE7" stroke="#CE93D8" stroke-width="1.3"/>
+  <text x="360" y="573" text-anchor="middle" fill="#7B1FA2" font-size="12" font-weight="bold" letter-spacing="0.3">Tool Layer</text>
+  <!-- Inner: 3 boxes w=120, gap=130, evenly distributed across w=620 (x=50..670) -->
+  <rect x="50" y="593" width="120" height="28" rx="1" fill="#FFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="110" y="611" text-anchor="middle" fill="#424242" font-size="10.5">ToolEnv</text>
+  <rect x="300" y="593" width="120" height="28" rx="1" fill="#FFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="360" y="611" text-anchor="middle" fill="#424242" font-size="10.5">AIO Proxy</text>
+  <rect x="550" y="593" width="120" height="28" rx="1" fill="#FFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="610" y="611" text-anchor="middle" fill="#424242" font-size="10.5">Tool Registry</text>
+
+  <!-- ====== LEGEND (x=30, y=660, w=800, h=40) — compact full-width strip ====== -->
+  <rect x="30" y="660" width="800" height="40" rx="3" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="0.8"/>
+  <!-- Color swatches (evenly distributed, gap≈30px between items) -->
+  <rect x="120" y="674" width="10" height="10" rx="1" fill="#E8F5E9" stroke="#81C784" stroke-width="0.8"/>
+  <text x="136" y="684" fill="#424242" font-size="9">Training</text>
+  <rect x="210" y="674" width="10" height="10" rx="1" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="226" y="684" fill="#424242" font-size="9">Rollout</text>
+  <rect x="294" y="674" width="10" height="10" rx="1" fill="#FFF8E1" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="310" y="684" fill="#424242" font-size="9">Data</text>
+  <rect x="362" y="674" width="10" height="10" rx="1" fill="#F3E5F5" stroke="#CE93D8" stroke-width="0.8"/>
+  <text x="378" y="684" fill="#424242" font-size="9">Tool</text>
+  <rect x="430" y="674" width="10" height="10" rx="1" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="0.8"/>
+  <text x="446" y="684" fill="#424242" font-size="9">Driver</text>
+  <!-- Separator -->
+  <line x1="508" y1="668" x2="508" y2="692" stroke="#E0E0E0" stroke-width="0.6"/>
+  <!-- Line types -->
+  <line x1="538" y1="679" x2="566" y2="679" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="575" y="684" fill="#424242" font-size="9">Data flow</text>
+  <line x1="660" y1="679" x2="688" y2="679" stroke="#78909C" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <text x="697" y="684" fill="#424242" font-size="9">Return</text>
+
+  <!-- ====== ALL INTER-LAYER ARROWS (strictly H/V only) ====== -->
+
+  <!-- A1: MainRunner→Training: spawn. Vertical x=274 (MainRunner center) -->
+  <line x1="274" y1="88" x2="274" y2="135" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="287" y="116" fill="#607D8B" font-size="9.5" font-style="italic">spawn</text>
+
+  <!-- A2: MainRunner→Monitoring: spawn. Vertical x=742 (MetricWorker center) -->
+  <line x1="742" y1="88" x2="742" y2="135" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="755" y="116" fill="#607D8B" font-size="9.5" font-style="italic">spawn</text>
+
+  <!-- A3: MainRunner→Rollout: spawn. Straight down x=240 through Training col1-col2 gap (x=220..275) -->
+  <line x1="240" y1="88" x2="240" y2="340" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="253" y="250" fill="#607D8B" font-size="9.5" font-style="italic">spawn</text>
+
+  <!-- A3b: TaskCoordinator→layers: coordinate (lifecycle signals). Dashed at x=430 -->
+  <line x1="430" y1="88" x2="430" y2="135" stroke="#78909C" stroke-width="1.0" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <text x="443" y="116" fill="#607D8B" font-size="8.5" font-style="italic">coordinate</text>
+
+  <!-- A4: Training→Rollout: weights. Vertical x=135 -->
+  <line x1="135" y1="309" x2="135" y2="378" stroke="#66BB6A" stroke-width="1.5" marker-end="url(#arr-g)"/>
+  <text x="148" y="348" fill="#2E7D32" font-size="9" font-style="italic">weights</text>
+
+  <!-- A5: DataCoordinator→Rollout: prompts. Horizontal y=392 -->
+  <line x1="490" y1="392" x2="430" y2="392" stroke="#FFB300" stroke-width="1.3" marker-end="url(#arr-a)"/>
+  <text x="460" y="385" text-anchor="middle" fill="#F57F17" font-size="9" font-style="italic">prompts</text>
+
+  <!-- A6: Rollout→DataCoordinator: samples. Orthogonal L-path through gap -->
+  <path d="M 430 504 L 455 504 L 455 473 L 505 473" stroke="#42A5F5" stroke-width="1.3" fill="none" marker-end="url(#arr-b)"/>
+  <text x="448" y="497" fill="#1565C0" font-size="9" font-style="italic" text-anchor="end">samples</text>
+
+  <!-- A7: DataCoordinator→Training: batch. Exit Data right, route through gap x=697 -->
+  <path d="M 670 392 L 697 392 L 697 187 L 510 187" stroke="#FFB300" stroke-width="1.3" fill="none" marker-end="url(#arr-a)"/>
+  <text x="700" y="290" fill="#F57F17" font-size="9" font-style="italic">batch</text>
+
+  <!-- A8: Rollout→Tool: tool call. Vertical x=105 (NaiveFlow col1 center → ToolEnv) -->
+  <line x1="105" y1="516" x2="105" y2="593" stroke="#AB47BC" stroke-width="1.2" marker-end="url(#arr-p)"/>
+  <text x="118" y="558" fill="#7B1FA2" font-size="9" font-style="italic">tool call</text>
+
+  <!-- A9: Tool→Rollout: result. L-path from AIO Proxy(cx=360) to NaiveFlow col2(cx=240) -->
+  <path d="M 360 593 L 360 538 L 240 538 L 240 516" stroke="#AB47BC" stroke-width="1.2" fill="none" stroke-dasharray="4,3" marker-end="url(#arr-p)"/>
+  <text x="300" y="533" text-anchor="middle" fill="#7B1FA2" font-size="9" font-style="italic">result</text>
+
+  <!-- Caption -->
+  <text x="430" y="720" text-anchor="middle" fill="#555" font-size="10">Figure 1: MPMD Architecture</text>
+</svg>

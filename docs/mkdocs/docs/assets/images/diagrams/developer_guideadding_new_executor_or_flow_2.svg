@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 580" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="880" height="580" fill="#fff"/>
+  <rect x="20" y="10" width="840" height="520" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="840" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="440" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Developer Guide > Adding New Executor Or Flow (Fig. 2)</text>
+
+  <!-- Stage containers with header bars -->
+  <rect x="30" y="48" width="820" height="92" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="30" y="48" width="820" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="440" y="66" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Stage 1: Preprocess</text>
+  <rect x="30" y="155" width="820" height="215" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="30" y="155" width="820" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="440" y="173" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Stage 2: Generate</text>
+  <rect x="30" y="390" width="820" height="135" rx="2" fill="#FFF3E0" stroke="#FFB74D" stroke-width="1.2"/>
+  <rect x="30" y="390" width="820" height="26" rx="2" fill="#FFECB3" stroke="#FFB74D" stroke-width="1.2"/>
+  <text x="440" y="408" text-anchor="middle" fill="#E65100" font-size="13" font-weight="bold">Stage 3: Reward</text>
+
+  <!-- ====== Layer 1: All boxes ====== -->
+
+  <!-- Stage 1 boxes (shifted down 4px for 15px gap below header: 48+26=74, 74+15=89) -->
+  <rect x="50" y="89" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="150" y="108" text-anchor="middle" fill="#424242" font-size="12">Raw dict from dataset</text>
+  <rect x="310" y="89" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="410" y="108" text-anchor="middle" fill="#424242" font-size="12">Create Sample with metadata</text>
+  <rect x="580" y="89" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="680" y="108" text-anchor="middle" fill="#424242" font-size="12">Build initial conversation</text>
+
+  <!-- Stage 2 boxes (widths normalized to 200, evenly spaced with gap=60; shifted 1px: 155+26=181, 181+15=196) -->
+  <rect x="50" y="196" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="150" y="215" text-anchor="middle" fill="#424242" font-size="12">Tokenize conversation</text>
+  <rect x="310" y="196" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="410" y="215" text-anchor="middle" fill="#424242" font-size="12">model.query() — LLM inference</text>
+
+  <!-- Diamond -->
+  <polygon points="410,251 500,301 410,351 320,301" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="1"/>
+  <text x="410" y="305" text-anchor="middle" fill="#424242" font-size="10.5">Tool calls in response?</text>
+
+  <!-- Yes-branch boxes -->
+  <rect x="570" y="196" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="670" y="215" text-anchor="middle" fill="#424242" font-size="12">Execute tool via environment</text>
+  <rect x="50" y="331" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="150" y="350" text-anchor="middle" fill="#424242" font-size="12">Append tool response</text>
+
+  <!-- No-branch box -->
+  <rect x="570" y="286" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="670" y="305" text-anchor="middle" fill="#424242" font-size="12">Record output tokens + log_probs</text>
+
+  <!-- Stage 3 boxes (shifted down 6px for 15px gap below header: 390+26=416, 416+15=431) -->
+  <rect x="50" y="431" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="150" y="450" text-anchor="middle" fill="#424242" font-size="12">Evaluate trajectory</text>
+  <rect x="310" y="431" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="410" y="450" text-anchor="middle" fill="#424242" font-size="12">Assign scalar reward</text>
+  <rect x="570" y="431" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="670" y="450" text-anchor="middle" fill="#424242" font-size="12">Set status = COMPLETED</text>
+
+  <!-- ====== Layer 2: All arrows + labels ====== -->
+
+  <!-- Stage 1: Raw dict -> Create Sample -->
+  <rect x="257" y="90" width="30" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="250" y1="104" x2="310" y2="104" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="272" y="100" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">input</text>
+
+  <!-- Stage 1: Create Sample -> Build conversation -->
+  <rect x="517" y="90" width="30" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="510" y1="104" x2="580" y2="104" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="532" y="100" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">input</text>
+
+  <!-- Stage 1 -> Stage 2: Build conversation -> Tokenize (L-path down then left) -->
+  <path d="M 680 119 L 680 145 L 150 145 L 150 196" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="376" y="136" width="88" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="420" y="146" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">Sample (PENDING)</text>
+
+  <!-- Tokenize -> model.query() -->
+  <line x1="250" y1="211" x2="310" y2="211" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- model.query() -> Diamond (vertical down) -->
+  <line x1="410" y1="226" x2="410" y2="251" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Diamond -> Execute tool (Yes: right from diamond) -->
+  <line x1="500" y1="301" x2="540" y2="301" stroke="#78909C" stroke-width="1.2"/>
+  <path d="M 540 301 L 540 211 L 570 211" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="505" y="277" width="24" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="517" y="287" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">Yes</text>
+
+  <!-- Execute tool -> Append tool response (L-path: right then down then left) -->
+  <path d="M 670 226 L 670 251 L 150 251 L 150 331" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Append tool response -> model.query() loop (L-path: right then up) -->
+  <path d="M 250 346 L 280 346 L 280 211 L 310 211" stroke="#78909C" stroke-width="1.2" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+
+  <!-- Diamond -> Record tokens (No: down from diamond then right) -->
+  <path d="M 410 351 L 410 366 L 670 366 L 670 316" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="510" y="357" width="20" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="520" y="367" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">No</text>
+
+  <!-- Record tokens -> Evaluate trajectory (L-path: down then left) -->
+  <path d="M 670 316 L 670 380 L 150 380 L 150 431" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="370" y="371" width="100" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="420" y="381" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">Sample (ROLLEDOUT)</text>
+
+  <!-- Evaluate -> Assign reward -->
+  <line x1="250" y1="446" x2="310" y2="446" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Assign reward -> Set status -->
+  <line x1="510" y1="446" x2="570" y2="446" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="440" y="565" text-anchor="middle" fill="#555" font-size="10">Figure 2: AgentFlow Three-Stage Pipeline</text>
+</svg>

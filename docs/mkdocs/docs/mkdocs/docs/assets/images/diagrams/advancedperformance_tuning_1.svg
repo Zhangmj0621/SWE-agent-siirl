@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 580" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+    <marker id="seq-arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="900" height="580" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="520" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="450.0" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Bottleneck Diagnosis Decision Tree</text>
+  <rect x="300" y="52" width="300" height="110" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="450.0" y="68" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Bottleneck Diagnosis</text>
+  <rect x="20" y="270" width="240" height="160" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="140.0" y="286" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Rollout is Bottleneck</text>
+  <rect x="330" y="270" width="240" height="160" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="450.0" y="286" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Training is Bottleneck</text>
+  <rect x="640" y="270" width="240" height="120" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="760.0" y="286" text-anchor="middle" fill="#F57F17" font-size="13" font-weight="bold">Pipeline Balanced</text>
+  <rect x="316" y="94" width="268" height="30" rx="1" fill="#FFFFFF" stroke="#BDBDBD" stroke-width="0.8"/>
+  <text x="450.0" y="113.0" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Check GPU Utilization</text>
+  <rect x="40" y="200" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="140.0" y="219.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Training GPUs idle?</text>
+  <rect x="350" y="200" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="450.0" y="219.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Rollout GPUs idle?</text>
+  <rect x="660" y="200" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="760.0" y="219.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Both GPUs busy?</text>
+  <rect x="36" y="312" width="208" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="140.0" y="331.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Increase rollout concurrency</text>
+  <rect x="36" y="352" width="208" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="140.0" y="371.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Add more rollout GPUs</text>
+  <rect x="36" y="392" width="208" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="140.0" y="411.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Speed up tool environments</text>
+  <rect x="346" y="312" width="208" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="450.0" y="331.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Reduce micro-batch size</text>
+  <rect x="346" y="352" width="208" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="450.0" y="371.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Enable param offloading</text>
+  <rect x="346" y="392" width="208" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="450.0" y="411.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Add more training GPUs</text>
+  <rect x="656" y="312" width="208" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="760.0" y="331.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Fine-tune async_factor</text>
+  <rect x="656" y="352" width="208" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="760.0" y="371.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Monitor for regression</text>
+  <path d="M450.0,124 L450,180 L140,180 L140.0,200" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="140" y="174" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">gen_duration &gt;&gt; step_time</text>
+  <line x1="450.0" y1="124" x2="450.0" y2="200" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="450.0" y="156.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">step_time &gt;&gt; gen_duration</text>
+  <path d="M450.0,124 L450,180 L760,180 L760.0,200" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="760" y="174" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Both similar</text>
+  <path d="M140.0,230 L140,260 L140.0,312" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M450.0,230 L450,260 L450.0,312" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M760.0,230 L760,260 L760.0,312" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="450.0" y="565" text-anchor="middle" fill="#555" font-size="10">Figure 1: GPU Bottleneck Diagnosis</text>
+</svg>

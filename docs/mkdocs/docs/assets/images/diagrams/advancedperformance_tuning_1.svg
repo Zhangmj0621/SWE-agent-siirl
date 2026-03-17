@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 886 550" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="886" height="550" fill="#fff"/>
+  <rect x="20" y="10" width="846" height="490" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="846" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="443" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Advanced &gt; Performance Tuning (Fig. 1)</text>
+
+  <!-- Layer 1: All container boxes -->
+  <rect x="24" y="48" width="627" height="173" rx="2" fill="#FFF3E0" stroke="#FFB74D" stroke-width="1.2"/>
+  <rect x="24" y="48" width="627" height="26" rx="2" fill="#FFECB3" stroke="#FFB74D" stroke-width="1.2"/>
+  <text x="337" y="66" text-anchor="middle" fill="#E65100" font-size="13" font-weight="bold">Bottleneck Diagnosis</text>
+
+  <rect x="24" y="228" width="838" height="68" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="24" y="228" width="838" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="443" y="246" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Rollout is Bottleneck</text>
+
+  <rect x="24" y="303" width="838" height="68" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <rect x="24" y="303" width="838" height="26" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="443" y="321" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Training is Bottleneck</text>
+
+  <rect x="24" y="378" width="838" height="68" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="24" y="378" width="838" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="443" y="396" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Pipeline Balanced</text>
+
+  <!-- Layer 1: All sub-component boxes -->
+  <!-- Diagnosis row -->
+  <rect x="40" y="90" width="192" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="136" y="109" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Check GPU Utilization</text>
+
+  <!-- Decision boxes (evenly distributed: 3 boxes w=178, container inner=587, gap=(587-534)/2=26.5) -->
+  <rect x="40" y="145" width="178" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="129" y="164" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Training GPUs idle?</text>
+
+  <rect x="245" y="145" width="178" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="334" y="164" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Rollout GPUs idle?</text>
+
+  <rect x="449" y="145" width="178" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="538" y="164" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Both GPUs busy?</text>
+
+  <!-- Rollout bottleneck solutions (3 boxes evenly, span=798 (40 to 838), w=244 each, gap=(798-732)/2=33) -->
+  <rect x="40" y="262" width="244" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="162" y="281" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Increase rollout concurrency</text>
+
+  <rect x="317" y="262" width="244" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="439" y="281" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Add more rollout GPUs</text>
+
+  <rect x="594" y="262" width="244" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="716" y="281" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Speed up tool environments</text>
+
+  <!-- Training bottleneck solutions (3 boxes evenly, span=798, w=244 each, gap=33) -->
+  <rect x="40" y="337" width="244" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="162" y="356" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Reduce micro-batch size</text>
+
+  <rect x="317" y="337" width="244" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="439" y="356" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Enable parameter offloading</text>
+
+  <rect x="594" y="337" width="244" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="716" y="356" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Add more training GPUs</text>
+
+  <!-- Balanced solutions (2 boxes evenly distributed) -->
+  <rect x="40" y="412" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="140" y="431" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Fine-tune async_factor</text>
+
+  <rect x="320" y="412" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="420" y="431" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">Monitor for regression</text>
+
+  <!-- Layer 2: All arrows + bg rects + labels (orthogonal routing only) -->
+
+  <!-- Check GPU → Training GPUs idle? (vertical down + horizontal) -->
+  <rect x="66" y="122" width="178" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 136 120 L 136 135 L 129 135 L 129 145" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="155" y="132" fill="#607D8B" font-size="10.5" font-style="italic">generation_duration &gt;&gt; step_time</text>
+
+  <!-- Check GPU → Rollout GPUs idle? (vertical + horizontal) -->
+  <rect x="213" y="122" width="186" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 136 120 L 136 135 L 334 135 L 334 145" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="306" y="132" fill="#607D8B" font-size="10.5" font-style="italic">step_time &gt;&gt; generation_duration</text>
+
+  <!-- Check GPU → Both GPUs busy? (vertical + horizontal) -->
+  <rect x="480" y="122" width="70" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 136 120 L 136 135 L 538 135 L 538 145" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="515" y="132" fill="#607D8B" font-size="10.5" font-style="italic">Both similar</text>
+
+  <!-- Training GPUs idle → 3 rollout solutions (orthogonal fork) -->
+  <path d="M 129 175 L 129 200 L 162 200 L 162 262" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <path d="M 129 175 L 129 200 L 439 200 L 439 262" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <path d="M 129 175 L 129 200 L 716 200 L 716 262" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Rollout GPUs idle → 3 training solutions (orthogonal fork) -->
+  <path d="M 334 175 L 334 215 L 162 215 L 162 337" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <path d="M 334 175 L 334 215 L 439 215 L 439 337" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <path d="M 334 175 L 334 215 L 716 215 L 716 337" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Both GPUs busy → 2 balanced solutions (orthogonal fork) -->
+  <path d="M 538 175 L 538 397 L 140 397 L 140 412" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <path d="M 538 175 L 538 397 L 420 397 L 420 412" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="443" y="535" text-anchor="middle" fill="#555" font-size="10">Figure 1: GPU Bottleneck Diagnosis</text>
+</svg>

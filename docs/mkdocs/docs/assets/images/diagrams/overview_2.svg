@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="900" height="620" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="560" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="32" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="450" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Async Training Loop</text>
+
+  <!-- ====== Layer 1: Sequence diagram lifelines and boxes ====== -->
+
+  <!-- Sequence loop frame -->
+  <rect x="30" y="105" width="740" height="460" rx="2" fill="none" stroke="#B0BEC5" stroke-width="1" stroke-dasharray="6,3"/>
+  <rect x="30" y="105" width="140" height="16" rx="2" fill="#ECEFF1" stroke="#B0BEC5" stroke-width="0.8"/>
+  <text x="38" y="117" fill="#546E7A" font-size="10.5" font-weight="600">Async Training Loop</text>
+
+  <!-- Participant lifelines (vertical dashed) would be implicit -->
+
+  <!-- Compute reward box -->
+  <rect x="250" y="386" width="120" height="28" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="258" y="400" fill="#6D4C00" font-size="10.5">Compute reward</text>
+
+  <!-- Training computation box -->
+  <rect x="760" y="502" width="120" height="38" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="768" y="516" fill="#6D4C00" font-size="10.5">Forward + backward +</text>
+  <text x="768" y="530" fill="#6D4C00" font-size="10.5">optimizer step</text>
+
+  <!-- ====== Layer 2: All arrows + labels ====== -->
+
+  <!-- Send prompt batch -->
+  <rect x="105" y="96" width="86" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="60" y1="110" x2="230" y2="110" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="145" y="105" text-anchor="middle" fill="#607D8B" font-size="10.5">Send prompt batch</text>
+
+  <!-- Submit generation requests -->
+  <rect x="248" y="136" width="134" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="230" y1="150" x2="400" y2="150" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="315" y="145" text-anchor="middle" fill="#607D8B" font-size="10.5">Submit generation requests</text>
+
+  <!-- Model response (with tool calls) -->
+  <rect x="241" y="176" width="150" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="400" y1="190" x2="230" y2="190" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="315" y="185" text-anchor="middle" fill="#607D8B" font-size="10.5">Model response (with tool calls)</text>
+
+  <!-- Execute tool calls -->
+  <rect x="357" y="216" width="86" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="230" y1="230" x2="570" y2="230" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="400" y="225" text-anchor="middle" fill="#607D8B" font-size="10.5">Execute tool calls</text>
+
+  <!-- Tool responses -->
+  <rect x="360" y="256" width="76" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="570" y1="270" x2="230" y2="270" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="400" y="265" text-anchor="middle" fill="#607D8B" font-size="10.5">Tool responses</text>
+
+  <!-- Continue generation (next turn) -->
+  <rect x="248" y="296" width="140" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="230" y1="310" x2="400" y2="310" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="315" y="305" text-anchor="middle" fill="#607D8B" font-size="10.5">Continue generation (next turn)</text>
+
+  <!-- Final response -->
+  <rect x="278" y="336" width="72" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="400" y1="350" x2="230" y2="350" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="315" y="345" text-anchor="middle" fill="#607D8B" font-size="10.5">Final response</text>
+
+  <!-- Return scored samples -->
+  <rect x="101" y="412" width="100" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="230" y1="426" x2="60" y2="426" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="145" y="421" text-anchor="middle" fill="#607D8B" font-size="10.5">Return scored samples</text>
+
+  <!-- Provide training batch -->
+  <rect x="358" y="452" width="96" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="60" y1="466" x2="740" y2="466" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="400" y="461" text-anchor="middle" fill="#607D8B" font-size="10.5">Provide training batch</text>
+
+  <!-- Sync updated weights -->
+  <rect x="442" y="538" width="100" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="740" y1="552" x2="230" y2="552" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="485" y="547" text-anchor="middle" fill="#607D8B" font-size="10.5">Sync updated weights</text>
+
+  <!-- Caption -->
+  <text x="450" y="605" text-anchor="middle" fill="#555" font-size="10">Figure 2: Sequence of async rollout and training</text>
+</svg>

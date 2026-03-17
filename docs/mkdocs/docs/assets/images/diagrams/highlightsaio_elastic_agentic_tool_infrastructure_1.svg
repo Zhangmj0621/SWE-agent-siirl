@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-p" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#AB47BC"/>
+    </marker>
+  </defs>
+  <rect width="900" height="520" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="460" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="450" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">AIO Elastic Tool Infrastructure</text>
+
+  <!-- Layer 1: All containers and boxes -->
+  <!-- Rollout Workers -->
+  <rect x="30" y="55" width="400" height="150" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="30" y="55" width="400" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="230" y="73" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Rollout Workers</text>
+  <rect x="50" y="100" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="130" y="119" text-anchor="middle" fill="#424242" font-size="12">Worker 1</text>
+  <rect x="250" y="100" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="330" y="119" text-anchor="middle" fill="#424242" font-size="12">Worker N</text>
+  <rect x="50" y="150" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="130" y="169" text-anchor="middle" fill="#424242" font-size="12">Worker 2</text>
+
+  <!-- AIO Proxy -->
+  <rect x="460" y="55" width="200" height="150" rx="2" fill="#FFF3E0" stroke="#FFB74D" stroke-width="1.2"/>
+  <rect x="460" y="55" width="200" height="26" rx="2" fill="#FFE0B2" stroke="#FFB74D" stroke-width="1.2"/>
+  <text x="560" y="73" text-anchor="middle" fill="#E65100" font-size="13" font-weight="bold">AIO Proxy</text>
+  <rect x="480" y="100" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#FFB74D" stroke-width="0.8"/>
+  <text x="560" y="119" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Request Router</text>
+  <rect x="480" y="150" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="560" y="169" text-anchor="middle" fill="#424242" font-size="12">Task Queue</text>
+
+  <!-- External APIs -->
+  <rect x="690" y="55" width="180" height="150" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <rect x="690" y="55" width="180" height="26" rx="2" fill="#FFECB3" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="780" y="73" text-anchor="middle" fill="#F57F17" font-size="13" font-weight="bold">External APIs</text>
+  <rect x="700" y="100" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="780" y="119" text-anchor="middle" fill="#424242" font-size="12">HTTP Services</text>
+  <rect x="700" y="150" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="780" y="169" text-anchor="middle" fill="#424242" font-size="12">Databases</text>
+
+  <!-- Tool Environment Pool -->
+  <rect x="30" y="250" width="840" height="160" rx="2" fill="#F3E5F5" stroke="#CE93D8" stroke-width="1.2"/>
+  <rect x="30" y="250" width="840" height="26" rx="2" fill="#E1BEE7" stroke="#CE93D8" stroke-width="1.2"/>
+  <text x="450" y="268" text-anchor="middle" fill="#7B1FA2" font-size="13" font-weight="bold">Tool Environment Pool (Auto-scaling)</text>
+  <!-- 3 containers evenly: inner=50..850, span=800, 3*160=480, gap=(800-480)/2=160 -->
+  <rect x="50" y="295" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="130" y="314" text-anchor="middle" fill="#424242" font-size="12">ToolEnv Container 1</text>
+  <rect x="370" y="295" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="450" y="314" text-anchor="middle" fill="#424242" font-size="12">ToolEnv Container 2</text>
+  <rect x="690" y="295" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="770" y="314" text-anchor="middle" fill="#424242" font-size="12">ToolEnv Container N</text>
+  <rect x="50" y="355" width="800" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="450" y="374" text-anchor="middle" fill="#424242" font-size="12">Sandboxed Execution (Docker / Process Isolation)</text>
+
+  <!-- Layer 2: All arrows + labels (strictly orthogonal) -->
+  <!-- Worker 1 → AIO Proxy (horizontal) -->
+  <rect x="414" y="100" width="44" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="210" y1="115" x2="480" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="436" y="110" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">tool_call</text>
+
+  <!-- Worker N → AIO Proxy (horizontal) -->
+  <line x1="410" y1="115" x2="480" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Router → Task Queue (vertical) -->
+  <line x1="560" y1="130" x2="560" y2="150" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Task Queue → ToolEnv Container 1 (L-shape) -->
+  <rect x="300" y="220" width="40" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 560 180 L 560 230 L 130 230 L 130 295" stroke="#AB47BC" stroke-width="1.2" fill="none" marker-end="url(#arr-p)"/>
+  <text x="320" y="230" fill="#607D8B" font-size="8.5" font-style="italic">dispatch</text>
+
+  <!-- Task Queue → ToolEnv Container 2 (L-shape) -->
+  <path d="M 560 180 L 560 230 L 450 230 L 450 295" stroke="#AB47BC" stroke-width="1.2" fill="none" marker-end="url(#arr-p)"/>
+
+  <!-- Task Queue → ToolEnv Container N (L-shape) -->
+  <path d="M 560 180 L 560 230 L 770 230 L 770 295" stroke="#AB47BC" stroke-width="1.2" fill="none" marker-end="url(#arr-p)"/>
+
+  <!-- ToolEnv → Sandboxed (vertical) -->
+  <line x1="130" y1="325" x2="130" y2="355" stroke="#78909C" stroke-width="1.0" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <line x1="450" y1="325" x2="450" y2="355" stroke="#78909C" stroke-width="1.0" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <line x1="770" y1="325" x2="770" y2="355" stroke="#78909C" stroke-width="1.0" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+
+  <!-- AIO Proxy → External APIs (horizontal) -->
+  <rect x="664" y="100" width="42" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="640" y1="115" x2="700" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="685" y="110" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">external</text>
+
+  <!-- Caption -->
+  <text x="450" y="505" text-anchor="middle" fill="#555" font-size="10">Figure 1: All-in-One tool environment architecture</text>
+</svg>
