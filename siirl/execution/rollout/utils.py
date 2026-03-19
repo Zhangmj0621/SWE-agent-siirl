@@ -16,7 +16,7 @@ class AgentState(Enum):
 class AgentData:
     """Encapsulates all state variables for the agent loop."""
 
-    def __init__(self, raw_prompt: list[dict[str, Any]]):
+    def __init__(self, raw_prompt: list[dict[str, Any]], ground_truth: Any = None):
         self.messages: list[dict[str, Any]] = raw_prompt
         self.prompts_ids = []
         self.rollout_log_prob = []
@@ -28,6 +28,8 @@ class AgentData:
         self.state = AgentState.PENDING
         self.env_kwargs = {}
         self.env_rewards = []
+        if ground_truth:
+            self.env_kwargs["ground_truth"] = ground_truth
 
 
 def format_gpt_oss_tool_response_manually(tool_response: str, tool_call_name: str) -> str:

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import contextvars
 import copy
 import hashlib
 import importlib
@@ -69,7 +70,9 @@ class NaiveExecutor:
         self.rollout_n = config.rollout.n
 
         # Semaphore to control concurrent generation tasks (limit to batch size)
-        self.semaphore = asyncio.Semaphore(self.max_concurrency_size)
+        # Use ContextVar to store semaphore per-async-context (per-event-loop)
+        # This avoids cross-event-loop binding issues without any locks
+        self._semaphore_ctx: contextvars.ContextVar = contextvars.ContextVar("semaphore")
         self.reward_fn = None  # Custom reward function (optional)
         self.rollout_flow = None  # Rollout flow function for sample generation
         self._rank = int(os.environ.get("RANK"))
@@ -119,8 +122,8 @@ class NaiveExecutor:
             return []
         # Request new samples from data coordinator (Ray remote call)
         if len(self.pending_queue) < need_replenish:
-            #diff = need_replenish - len(self.pending_queue)
-            #pull_size = (diff + self.rollout_n - 1) // self.rollout_n
+            # diff = need_replenish - len(self.pending_queue)
+            # pull_size = (diff + self.rollout_n - 1) // self.rollout_n
 
             # Only get one sample each time to ensure load balancing among rollout workers
             pull_samples = await self.data_coordinator.get_dataloader.remote(1)
@@ -335,7 +338,9 @@ class NaiveExecutor:
         sample_uid = getattr(sample, "uid", "unknown")
 
         try:
-            async with self.semaphore:  # Limit concurrent generations to batch size
+            # Get semaphore from current async context (per-event-loop)
+            semaphore = self._semaphore_ctx.get()
+            async with semaphore:  # Limit concurrent generations to batch size
                 loop = asyncio.get_running_loop()
                 # 1. Preprocess sample (CPU-bound, offload to executor)
                 sample = await loop.run_in_executor(None, self._pre_process, sample, is_validate)
@@ -384,6 +389,15 @@ class NaiveExecutor:
         Continuously replenishes samples, creates generation tasks, and maintains batch size.
         Runs until self.running is set to False.
         """
+        # Create semaphore for this event loop if not already exists
+        # Check if ContextVar has been set to avoid creating multiple semaphores
+        # when switching between run() and validate() in the same event loop
+        try:
+            self._semaphore_ctx.get()
+        except LookupError:
+            # ContextVar not set yet - create new semaphore for this event loop
+            self._semaphore_ctx.set(asyncio.Semaphore(self.max_concurrency_size))
+
         self.running = True
         stats_task = None
         if self._dp_rank == 0:
@@ -562,6 +576,15 @@ class NaiveExecutor:
         Uses high concurrency with router load balancing.
         Streaming collection via as_completed to reduce tail latency.
         """
+        # Create semaphore for this event loop if not already exists
+        # This handles the case where validate() is called multiple times
+        # or switches with run() in the same event loop
+        try:
+            self._semaphore_ctx.get()
+        except LookupError:
+            # ContextVar not set yet - create new semaphore for this event loop
+            self._semaphore_ctx.set(asyncio.Semaphore(self.max_concurrency_size))
+
         # Enable router on rollout_flow for validate duration
         self.rollout_flow.use_router = use_router
         max_concurrent = self._resolve_validate_concurrency(use_router)

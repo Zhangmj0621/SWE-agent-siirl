@@ -84,7 +84,7 @@ class NaiveFlow:
 
         # Generate response and log probabilities from prompt using inference engine
         loop = asyncio.get_event_loop()
-        agent_data = AgentData(raw_prompt=sample.raw_prompt.tolist())
+        agent_data = AgentData(raw_prompt=sample.raw_prompt.tolist(), ground_truth=sample.reward_model["ground_truth"])
         while agent_data.state != AgentState.TERMINATED:
             if agent_data.state == AgentState.PENDING:
                 agent_data.state = await self._handle_pending_state(agent_data, loop)
@@ -114,7 +114,7 @@ class NaiveFlow:
         reward_start = time.time()
 
         if agent_data.env_rewards:
-            sample.rewards = sum(agent_data.env_rewards)
+            sample.rewards = agent_data.env_rewards[-1]
         else:
             # Extract metadata for reward calculation
             data_source = sample.data_source  # Source/type of the sample data
@@ -207,7 +207,7 @@ class NaiveFlow:
             tool_args = json.loads(tool_call.arguments)
             tool = self.env.env_name[tool_name]
             kwargs = tools_kwargs.get(tool_name, {})
-            instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
+            instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}), ground_truth=tools_kwargs.get("ground_truth"))
             action = {"instance_id": instance_id, **tool_args}
             env_response: EnvResponse = await tool.step(action)
         except Exception as e:
@@ -249,14 +249,12 @@ class NaiveFlow:
         agent_data.prompts_ids += response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
         agent_data.assistant_turns += 1
-
         if len(agent_data.response_mask) >= self.max_response_length:
             return AgentState.TERMINATED
         if self.max_assistant_turns and agent_data.assistant_turns >= self.max_assistant_turns:
             return AgentState.TERMINATED
         if self.max_env_turns and agent_data.env_turns >= self.max_env_turns:
             return AgentState.TERMINATED
-
         if self.multiturn_config.env_type == "tool_env" and self.env:
             _, agent_data.env_calls = await self.env.tool_parser.extract_tool_calls(agent_data.response_ids)
             if agent_data.env_calls:
