@@ -1,0 +1,654 @@
+{% extends "main.html" %}
+
+{% block tabs %}
+{{ super() }}
+
+{% set lang = config.theme.language %}
+
+<style>
+  /* ===== Reset home-page layout ===== */
+  .md-main__inner { margin: 0; }
+  .md-sidebar { display: none; }
+  .md-content { max-width: none; margin: 0; padding: 0; }
+  .md-content__inner { margin: 0; padding: 0; }
+  .md-typeset h1, .md-typeset h2 { font-family: 'Plus Jakarta Sans', 'Source Sans 3', sans-serif; }
+
+  /* ===== Hero Section — Compact dark gradient ===== */
+  .home-hero {
+    position: relative;
+    padding: 3rem 2rem 3rem;
+    text-align: center;
+    background: linear-gradient(145deg, #0f172a 0%, #1e1b4b 40%, #312e81 70%, #1e1b4b 100%);
+    color: #fff;
+  }
+
+  /* Hero logo + title row */
+  .hero-logo-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    margin-bottom: 0.6rem;
+  }
+  .hero-logo-row img {
+    width: 56px;
+    height: 56px;
+    filter: drop-shadow(0 2px 8px rgba(99, 102, 241, 0.3));
+  }
+  .hero-logo-row .hero-title-text {
+    text-align: left;
+  }
+  .hero-logo-row .hero-title-text h1 {
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    margin: 0;
+    color: #fff;
+  }
+  .hero-logo-row .hero-title-text small {
+    font-size: 0.82rem;
+    color: rgba(199, 210, 254, 0.6);
+    font-weight: 400;
+  }
+
+  /* Hero badge pill */
+  .hero-badge {
+    display: inline-block;
+    padding: 0.3rem 0.9rem;
+    border-radius: 50px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 0.78rem;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    margin-bottom: 1rem;
+  }
+  .hero-badge span {
+    margin: 0 0.4rem;
+    opacity: 0.4;
+  }
+
+  .home-hero .hero-tagline {
+    font-size: 1.15rem;
+    font-weight: 400;
+    color: rgba(199, 210, 254, 0.9);
+    max-width: 80%;
+    margin: 0 auto 0.4rem;
+    line-height: 1.5;
+  }
+
+  .home-hero .hero-desc {
+    font-size: 0.85rem;
+    color: rgba(199, 210, 254, 0.5);
+    max-width: 75%;
+    margin: 0 auto 1.2rem;
+    line-height: 1.6;
+  }
+
+  /* Hero badges row */
+  .hero-badges img {
+    height: 22px;
+    border-radius: 4px;
+  }
+
+  /* CTA buttons */
+  .hero-cta {
+    display: flex;
+    justify-content: center;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+  }
+  .hero-cta a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.7rem 1.8rem;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.9rem;
+    text-decoration: none;
+    transition: all 0.15s ease;
+  }
+  .hero-cta .cta-outline {
+    border: 1.5px solid rgba(255, 255, 255, 0.25);
+    color: #fff;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
+    backdrop-filter: blur(4px);
+  }
+  .hero-cta .cta-outline:hover {
+    border-color: rgba(255, 255, 255, 0.5);
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.05) 100%);
+  }
+  .hero-cta .cta-outline svg {
+    width: 18px;
+    height: 18px;
+    fill: currentColor;
+  }
+
+  /* ===== Shared Section Styles ===== */
+  .section-header {
+    text-align: center;
+    margin-bottom: 1.8rem;
+  }
+  .section-header h2 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0 0 0.3rem;
+    color: var(--md-default-fg-color);
+    border-bottom: none;
+  }
+  .section-header p {
+    font-size: 0.95rem;
+    color: var(--md-default-fg-color--light);
+    margin: 0;
+  }
+
+  /* ===== Core Advantages ===== */
+  .home-advantages {
+    padding: 3rem 2rem 2.5rem;
+    background: var(--md-default-bg-color);
+  }
+  .advantages-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.9rem;
+    max-width: 85%;
+    margin: 0 auto;
+  }
+  .advantage-card {
+    padding: 1.4rem 1.2rem;
+    border-radius: 8px;
+    background: var(--md-default-bg-color);
+    border: 1px solid var(--md-default-fg-color--lightest);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .advantage-card:hover {
+    border-color: var(--md-primary-fg-color);
+    box-shadow: 0 2px 8px rgba(79, 70, 229, 0.08);
+  }
+  .advantage-card .adv-icon {
+    margin-bottom: 0.6rem;
+    line-height: 1;
+  }
+  .advantage-card h3 {
+    font-size: 0.98rem;
+    font-weight: 700;
+    margin: 0 0 0.35rem;
+    color: var(--md-default-fg-color);
+    border-bottom: none;
+  }
+  .advantage-card p {
+    font-size: 0.84rem;
+    color: var(--md-default-fg-color--light);
+    line-height: 1.55;
+    margin: 0;
+  }
+
+  /* ===== Key Features ===== */
+  .home-features {
+    padding: 3rem 2rem;
+    background: #f9fafb;
+    border-top: 1px solid #f0f0f0;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  [data-md-color-scheme="slate"] .home-features {
+    background: rgba(255, 255, 255, 0.02);
+    border-color: rgba(255, 255, 255, 0.04);
+  }
+  .features-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.9rem;
+    max-width: 80%;
+    margin: 0 auto;
+  }
+  .feature-card {
+    padding: 1.2rem 1.1rem;
+    border-radius: 8px;
+    background: var(--md-default-bg-color);
+    border: 1px solid var(--md-default-fg-color--lightest);
+    transition: border-color 0.15s ease;
+  }
+  .feature-card:hover {
+    border-color: var(--md-default-fg-color--lighter);
+  }
+  .feature-card .feat-icon {
+    margin-bottom: 0.5rem;
+    line-height: 1;
+  }
+  .feature-card h3 {
+    font-size: 0.92rem;
+    font-weight: 700;
+    margin: 0 0 0.3rem;
+    color: var(--md-default-fg-color);
+    border-bottom: none;
+  }
+  .feature-card p {
+    font-size: 0.82rem;
+    color: var(--md-default-fg-color--light);
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  /* ===== Quick Start ===== */
+  .home-quickstart {
+    padding: 3rem 2rem;
+    background: var(--md-default-bg-color);
+  }
+  .steps-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    max-width: 80%;
+    margin: 0 auto;
+    align-items: stretch;
+  }
+  .step-card {
+    display: flex;
+    flex-direction: column;
+    padding: 1.3rem 1.2rem;
+    border-radius: 8px;
+    background: #f9fafb;
+    border: 1px solid var(--md-default-fg-color--lightest);
+    min-width: 0;
+    overflow: hidden;
+  }
+  [data-md-color-scheme="slate"] .step-card {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .step-number {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: #4f46e5;
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.8rem;
+    margin-bottom: 0.6rem;
+  }
+  .step-card h3 {
+    font-size: 0.95rem;
+    font-weight: 700;
+    margin: 0 0 0.6rem;
+    color: var(--md-default-fg-color);
+    border-bottom: none;
+  }
+  .step-card pre {
+    flex: 1;
+    margin: 0;
+    padding: 0.85rem;
+    border-radius: 6px;
+    background: #1e1e2e;
+    color: #cdd6f4;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    overflow-x: auto;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+  .step-card pre .comment { color: #6c7086; }
+  .step-card pre .keyword { color: #cba6f7; }
+  .step-card pre .string { color: #a6e3a1; }
+  .step-card pre .flag { color: #89b4fa; }
+
+  /* ===== Architecture ===== */
+  .home-architecture {
+    padding: 3rem 2rem;
+    background: #f9fafb;
+    border-top: 1px solid #f0f0f0;
+  }
+  [data-md-color-scheme="slate"] .home-architecture {
+    background: rgba(255, 255, 255, 0.02);
+    border-color: rgba(255, 255, 255, 0.04);
+  }
+  .arch-container {
+    max-width: 75%;
+    margin: 0 auto;
+    padding: 1.5rem;
+    border-radius: 8px;
+    background: var(--md-default-bg-color);
+    border: 1px solid var(--md-default-fg-color--lightest);
+  }
+
+  /* ===== Bottom CTA ===== */
+  .home-bottom-cta {
+    padding: 3.5rem 2rem;
+    text-align: center;
+    background: linear-gradient(145deg, #0f172a 0%, #1e1b4b 50%, #312e81 100%);
+    color: #fff;
+  }
+  .home-bottom-cta h2 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0 0 0.5rem;
+    color: #fff;
+    border-bottom: none;
+  }
+  .home-bottom-cta p {
+    font-size: 0.95rem;
+    color: rgba(199, 210, 254, 0.65);
+    margin: 0 0 1.2rem;
+  }
+  .home-bottom-cta .cta-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.7rem 2rem;
+    border-radius: 8px;
+    background: #fff;
+    color: #312e81;
+    font-weight: 600;
+    font-size: 0.95rem;
+    text-decoration: none;
+    transition: background 0.15s ease;
+  }
+  .home-bottom-cta .cta-btn:hover {
+    background: #eef2ff;
+  }
+
+  /* ===== Responsive ===== */
+  @media (max-width: 1024px) {
+    .advantages-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+  @media (max-width: 900px) {
+    .features-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    .steps-grid {
+      grid-template-columns: 1fr;
+      max-width: 480px;
+    }
+    .step-card pre {
+      flex: none;
+    }
+  }
+  @media (max-width: 768px) {
+    .home-hero {
+      padding: 2rem 1.2rem 2rem;
+    }
+    .hero-logo-row h1 {
+      font-size: 1.6rem;
+    }
+    .home-hero .hero-tagline {
+      font-size: 0.95rem;
+      max-width: 95%;
+    }
+    .home-hero .hero-desc {
+      max-width: 95%;
+    }
+    .advantages-grid {
+      grid-template-columns: 1fr;
+    }
+    .features-grid {
+      grid-template-columns: 1fr;
+    }
+    .home-advantages, .home-features, .home-quickstart, .home-architecture {
+      padding: 2rem 1.2rem;
+    }
+    .home-bottom-cta {
+      padding: 2.5rem 1.2rem;
+    }
+    .home-bottom-cta h2 {
+      font-size: 1.3rem;
+    }
+  }
+  @media (max-width: 480px) {
+    .hero-logo-row h1 {
+      font-size: 1.4rem;
+    }
+    .hero-logo-row img {
+      width: 40px;
+      height: 40px;
+    }
+    .hero-cta {
+      flex-direction: column;
+      align-items: center;
+    }
+    .hero-cta a {
+      width: 100%;
+      max-width: 260px;
+      justify-content: center;
+    }
+  }
+</style>
+
+<!-- ==================== HERO ==================== -->
+<section class="home-hero">
+  <div class="hero-logo-row">
+    <img src="{{ base_url }}/assets/images/logo.svg" alt="siirl-agentic logo">
+    <div class="hero-title-text">
+      <h1>siirl-agentic</h1>
+      <small>Async Agentic RL Framework</small>
+    </div>
+  </div>
+
+  <div class="hero-badge">
+    {% if lang == 'zh' %}开源<span>&#183;</span>异步 Agentic RL{% else %}Open Source<span>&#183;</span>Async Agentic RL{% endif %}
+  </div>
+
+  <p class="hero-tagline">
+    {% if lang == 'zh' %}面向 LLM Agent 的异步多轮强化学习框架{% else %}Async Multi-Turn Reinforcement Learning for LLM Agents{% endif %}
+  </p>
+  <p class="hero-desc">
+    {% if lang == 'zh' %}专为 Agent-工具交互训练打造。支持 PPO 和 GRPO 算法，异步非阻塞推理与弹性工具基础设施。{% else %}Purpose-built for agent-tool interaction training. PPO &amp; GRPO on SWE-style tasks
+    with non-blocking async rollout and elastic tool infrastructure.{% endif %}
+  </p>
+
+  <div class="hero-badges" style="display: flex; justify-content: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1.2rem;">
+    <img src="https://img.shields.io/badge/license-Apache_2.0-blue.svg" alt="License">
+    <img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python">
+    <img src="https://img.shields.io/badge/framework-PyTorch-red.svg" alt="PyTorch">
+    <img src="https://img.shields.io/badge/inference-SGLang-green.svg" alt="SGLang">
+    <img src="https://img.shields.io/badge/RL-PPO%20%7C%20GRPO-purple.svg" alt="Algorithms">
+  </div>
+
+  <div class="hero-cta">
+    <a href="{{ base_url }}/get_started/quickstart/" class="cta-outline">{% if lang == 'zh' %}快速开始{% else %}Get Started{% endif %}</a>
+    <a href="https://github.com/siirl-agentic" class="cta-outline">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+      GitHub
+    </a>
+    <a href="{{ base_url }}/overview/" class="cta-outline">{% if lang == 'zh' %}文档{% else %}Documentation{% endif %}</a>
+  </div>
+</section>
+
+<!-- ==================== CORE ADVANTAGES ==================== -->
+<section class="home-advantages">
+  <div class="section-header">
+    <h2>{% if lang == 'zh' %}核心优势{% else %}Core Advantages{% endif %}</h2>
+    <p>{% if lang == 'zh' %}与单轮 RL 框架的本质区别{% else %}What makes siirl-agentic different from single-turn RL frameworks{% endif %}</p>
+  </div>
+  <div class="advantages-grid">
+    <div class="advantage-card">
+      <div class="adv-icon">
+        <svg width="36" height="36" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M32 14H20a8 8 0 0 0 0 16h2" stroke="#6366f1" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M16 34h12a8 8 0 0 0 0-16h-2" stroke="#6366f1" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M28 10l4 4-4 4" stroke="#6366f1" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M20 38l-4-4 4-4" stroke="#6366f1" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}原生多轮训练{% else %}Native Multi-Turn{% endif %}</h3>
+      <p>{% if lang == 'zh' %}一等公民的多轮轨迹支持，不是单轮 hack。跨轮次追踪 token 级 log-probs 和逐轮 loss mask。{% else %}First-class multi-turn trajectory support, not a single-turn hack. Token-level log-probs and per-turn loss masks tracked across the entire rollout.{% endif %}</p>
+    </div>
+    <div class="advantage-card">
+      <div class="adv-icon">
+        <svg width="36" height="36" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M26 6L12 26h10l-2 16 14-20H24l2-16z" stroke="#f59e0b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}异步 MPMD 引擎{% else %}Async MPMD Engine{% endif %}</h3>
+      <p>{% if lang == 'zh' %}Trainer 和 Rollout 作为独立 Ray Actor 运行。工具调用绝不阻塞 GPU —— 其他 rollout 持续生成。{% else %}Trainer and Rollout run as independent Ray actors. Tool calls never block GPUs &mdash; other rollouts continue generating while agents wait for tool responses.{% endif %}</p>
+    </div>
+    <div class="advantage-card">
+      <div class="adv-icon">
+        <svg width="36" height="36" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="20" cy="24" r="7" stroke="#10b981" stroke-width="2" fill="none"/>
+          <path d="M20 17v-2m0 18v-2m-7-7h-2m18 0h-2m-1.95-4.95l1.41-1.41m-12.72 12.72l1.41-1.41m0-9.9l-1.41-1.41m12.72 12.72l-1.41-1.41" stroke="#10b981" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="34" cy="14" r="4.5" stroke="#10b981" stroke-width="1.5" fill="none"/>
+          <circle cx="35" cy="36" r="3.5" stroke="#10b981" stroke-width="1.5" fill="none"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}弹性工具基础设施{% else %}Elastic Tool Infra{% endif %}</h3>
+      <p>{% if lang == 'zh' %}AIO 三层调度器根据需求预测自动伸缩工具实例，透明地吸收沙箱执行的延迟尖峰。{% else %}AIO three-layer scheduler auto-scales tool instances based on demand prediction. Absorbs latency spikes from sandbox execution transparently.{% endif %}</p>
+    </div>
+    <div class="advantage-card">
+      <div class="adv-icon">
+        <svg width="36" height="36" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M22 10h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h1a3 3 0 1 1 6 0h1a2 2 0 0 0 2-2v-1a3 3 0 1 1 0-6v-1a2 2 0 0 0-2-2z" stroke="#ec4899" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M34 22h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h1a3 3 0 1 1 6 0h1a2 2 0 0 0 2-2v-1a3 3 0 1 1 0-6v-1a2 2 0 0 0-2-2z" stroke="#ec4899" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}可插拔 AgentFlow{% else %}Pluggable AgentFlow{% endif %}</h3>
+      <p>{% if lang == 'zh' %}三方法协议（preprocess, generate, reward），YAML 动态注入。无需修改框架代码即可切换任务。{% else %}Three-method protocol (preprocess, generate, reward) with dynamic YAML injection. Switch tasks, reward functions, or tool sets without touching framework code.{% endif %}</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== KEY FEATURES ==================== -->
+<section class="home-features">
+  <div class="section-header">
+    <h2>{% if lang == 'zh' %}关键特性{% else %}Key Features{% endif %}</h2>
+    <p>{% if lang == 'zh' %}面向 Agentic RL 的生产级组件{% else %}Production-ready components for agentic RL workloads{% endif %}</p>
+  </div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feat-icon">
+        <svg width="28" height="28" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6 28L14 18l6 4 10-14" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M6 6v22h24" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}PPO 与 GRPO 算法{% else %}PPO &amp; GRPO Algorithms{% endif %}</h3>
+      <p>{% if lang == 'zh' %}基于 Megatron 后端的生产级实现，支持 TP/PP/DP 并行和混合精度训练。{% else %}Production-ready implementations with Megatron backend, supporting TP/PP/DP parallelism and mixed-precision training.{% endif %}</p>
+    </div>
+    <div class="feature-card">
+      <div class="feat-icon">
+        <svg width="28" height="28" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M18 4c0 0-10 8-10 18a10 10 0 0 0 20 0c0-10-10-18-10-18z" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M14 28l4-8 4 8" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <circle cx="18" cy="16" r="2" fill="#6366f1"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}SGLang 推理引擎{% else %}SGLang Inference Engine{% endif %}</h3>
+      <p>{% if lang == 'zh' %}基于 SGLang 的高吞吐 LLM 推理，自动路由器负载均衡多引擎实例。{% else %}Powered by SGLang for high-throughput LLM inference during rollout, with automatic router load balancing across engine instances.{% endif %}</p>
+    </div>
+    <div class="feature-card">
+      <div class="feat-icon">
+        <svg width="28" height="28" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 10h14l4 4-4 4H8" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M28 18H14l-4 4 4 4h14" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}多轮轨迹训练{% else %}Multi-Turn Trajectory Training{% endif %}</h3>
+      <p>{% if lang == 'zh' %}端到端多轮训练流水线，状态机编排、逐轮 mask、跨轮优势估计。{% else %}End-to-end multi-turn training pipeline with state-machine orchestration, per-turn masking, and cross-turn advantage estimation.{% endif %}</p>
+    </div>
+    <div class="feature-card">
+      <div class="feat-icon">
+        <svg width="28" height="28" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="4" y="6" width="28" height="24" rx="3" stroke="#6366f1" stroke-width="2" fill="none"/>
+          <path d="M10 16l4 4-4 4" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M18 24h8" stroke="#6366f1" stroke-width="2" stroke-linecap="round" fill="none"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}SWE Agent 支持{% else %}SWE Agent Support{% endif %}</h3>
+      <p>{% if lang == 'zh' %}内置软件工程 Agent，支持文件编辑、终端执行和仓库导航工具环境。{% else %}Built-in software engineering agent with file editing, terminal execution, and repository navigation tool environments.{% endif %}</p>
+    </div>
+    <div class="feature-card">
+      <div class="feat-icon">
+        <svg width="28" height="28" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M28 30H8a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h16l6 6v16a2 2 0 0 1-2 2z" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M24 30V20H12v10" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M12 6v6h10" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}检查点与恢复{% else %}Checkpoint &amp; Resume{% endif %}</h3>
+      <p>{% if lang == 'zh' %}Megatron 分布式检查点，支持 TP/PP/DP 重分片。中断或集群重配后无缝恢复训练。{% else %}Megatron distributed checkpointing with TP/PP/DP resharding. Resume training seamlessly after interruption or cluster reconfiguration.{% endif %}</p>
+    </div>
+    <div class="feature-card">
+      <div class="feat-icon">
+        <svg width="28" height="28" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="18" cy="20" r="12" stroke="#6366f1" stroke-width="2" fill="none"/>
+          <path d="M18 12v8l5 3" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <path d="M10 8l-2-2m20 2l2-2" stroke="#6366f1" stroke-width="2" stroke-linecap="round" fill="none"/>
+          <path d="M18 6V4" stroke="#6366f1" stroke-width="2" stroke-linecap="round" fill="none"/>
+        </svg>
+      </div>
+      <h3>{% if lang == 'zh' %}指标与评估{% else %}Metrics &amp; Evaluation{% endif %}</h3>
+      <p>{% if lang == 'zh' %}全面的指标追踪，WandB 集成，验证驱动的评估扩展，实时训练诊断。{% else %}Comprehensive metric tracking with WandB integration, validation-driven evaluation scaling, and real-time training diagnostics.{% endif %}</p>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== QUICK START ==================== -->
+<section class="home-quickstart">
+  <div class="section-header">
+    <h2>{% if lang == 'zh' %}快速开始{% else %}Quick Start{% endif %}</h2>
+    <p>{% if lang == 'zh' %}三步启动{% else %}Get running in three steps{% endif %}</p>
+  </div>
+  <div class="steps-grid">
+    <div class="step-card">
+      <div class="step-number">1</div>
+      <h3>{% if lang == 'zh' %}安装{% else %}Install{% endif %}</h3>
+      <pre><span class="comment"># Clone and install</span>
+git clone &lt;repo-url&gt;
+cd siirl-agentic
+pip install <span class="flag">-e</span> <span class="string">".[gpu]"</span>
+
+<span class="comment"># Verify</span>
+python <span class="flag">-c</span> <span class="string">"import siirl"</span></pre>
+    </div>
+    <div class="step-card">
+      <div class="step-number">2</div>
+      <h3>{% if lang == 'zh' %}配置{% else %}Configure{% endif %}</h3>
+      <pre><span class="comment"># config.yaml</span>
+<span class="keyword">algorithm</span>: grpo
+<span class="keyword">model</span>:
+  <span class="keyword">name</span>: <span class="string">Qwen/Qwen2.5-7B</span>
+  <span class="keyword">tp_size</span>: 4
+<span class="keyword">rollout</span>:
+  <span class="keyword">max_turns</span>: 8</pre>
+    </div>
+    <div class="step-card">
+      <div class="step-number">3</div>
+      <h3>{% if lang == 'zh' %}启动{% else %}Launch{% endif %}</h3>
+      <pre><span class="comment"># Start training</span>
+python <span class="flag">-m</span> siirl.async_train \
+  <span class="flag">--config</span> config.yaml \
+  <span class="flag">--rollout-workers</span> 4 \
+  <span class="flag">--tool-instances</span> 16
+
+<span class="comment"># Metrics → wandb.ai</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== ARCHITECTURE ==================== -->
+<section class="home-architecture">
+  <div class="section-header">
+    <h2>{% if lang == 'zh' %}系统架构{% else %}System Architecture{% endif %}</h2>
+    <p>{% if lang == 'zh' %}异步 MPMD 设计，训练、推理与工具执行解耦{% else %}Async MPMD design with decoupled training, rollout, and tool execution{% endif %}</p>
+  </div>
+  <div class="arch-container">
+    <img src="{{ base_url }}/assets/images/architecture.jpg" alt="System Architecture" style="width: 100%; height: auto; border-radius: 8px;">
+  </div>
+</section>
+
+<!-- ==================== BOTTOM CTA ==================== -->
+<section class="home-bottom-cta">
+  <h2>{% if lang == 'zh' %}准备好训练你的第一个 Agent 了吗？{% else %}Ready to train your first agent?{% endif %}</h2>
+  <p>{% if lang == 'zh' %}参考快速开始指南，几分钟内启动 Agentic RL 训练任务。{% else %}Follow the quickstart guide and launch an agentic RL training job in minutes.{% endif %}</p>
+  <a href="{{ base_url }}/get_started/quickstart/" class="cta-btn">
+    {% if lang == 'zh' %}快速开始 &rarr;{% else %}Get Started &rarr;{% endif %}
+  </a>
+</section>
+
+{% endblock %}
+
+{% block content %}{% endblock %}

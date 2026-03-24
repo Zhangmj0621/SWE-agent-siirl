@@ -25,6 +25,7 @@ from siirl.utils.task_coordinator import create_coordinator
 from siirl.worker.actor.trainer_group import TrainerGroup
 from siirl.worker.ray_utils import allocate_resources
 from siirl.worker.rollout.rollout_manager import RolloutManager
+from siirl.worker.validate.progress import ValidateProgressMonitor
 
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
@@ -34,6 +35,34 @@ RAY_RUNTIME_ENV_VARS = {
 }
 
 MAIN_RUNNER_CPU_RESERVATION = 5
+VALIDATE_PROGRESS_DRIVER_POLL_S = 0.5
+COLOCATE_MAX_GPU_MEM_UTIL = 0.45
+
+
+def _apply_colocate_guards(config: SiiRLArguments, logger) -> None:
+    if not config.trainer.colocate:
+        return
+
+    if config.trainer.validate_reuse_train_gpus:
+        logger.warning("colocate mode: force disabling validate_reuse_train_gpus")
+        config.trainer.validate_reuse_train_gpus = False
+
+    megatron_cfgs = [
+        ("actor.megatron", config.actor_ref.actor.megatron),
+        ("ref.megatron", config.actor_ref.ref.megatron),
+    ]
+    if config.actor_ref.algorithm.adv_estimator == "ppo":
+        megatron_cfgs.append(("critic.megatron", config.critic.megatron))
+
+    for name, megatron_cfg in megatron_cfgs:
+        if not megatron_cfg.param_offload:
+            logger.warning(f"colocate mode: force enabling {name}.param_offload")
+            megatron_cfg.param_offload = True
+
+    if config.rollout.gpu_memory_utilization > COLOCATE_MAX_GPU_MEM_UTIL:
+        current = config.rollout.gpu_memory_utilization
+        logger.warning(f"colocate mode: clamping rollout.gpu_memory_utilization from {current} to {COLOCATE_MAX_GPU_MEM_UTIL}")
+        config.rollout.gpu_memory_utilization = COLOCATE_MAX_GPU_MEM_UTIL
 
 
 @ray.remote(num_cpus=MAIN_RUNNER_CPU_RESERVATION)
@@ -47,7 +76,7 @@ class MainRunner:
     and that the setup process is managed within the Ray cluster.
     """
 
-    def run(self, config: SiiRLArguments) -> None:
+    def run(self, config: SiiRLArguments, rollout_manager_name: str | None = None) -> None:
         """
         Executes the main training workflow.
 
@@ -63,12 +92,13 @@ class MainRunner:
 
         logger.info("MainRunner started. Beginning workflow setup...")
         start_time = time.time()
+        _apply_colocate_guards(config, logger)
         # === 0. Create Task Coordinator ===
         # Coordinator manages task lifecycle: graceful shutdown, failure propagation
         coordinator = create_coordinator()
         logger.info("TaskCoordinator created for lifecycle management")
 
-        # === 1. Allocate GPU Resources (Separated Mode) ===
+        # === 1. Allocate GPU Resources ===
         logger.info("Allocating GPU resources...")
         resources = allocate_resources(config)
         actor_resources = resources["actor"]
@@ -101,7 +131,18 @@ class MainRunner:
         try:
             logger.info(f"Initializing components: {actor_resources.num_gpus} training GPUs, {rollout_resources.num_gpus} rollout GPUs...")
 
-            rollout_manager = RolloutManager.remote(config, rollout_resources, data_coordinator, coordinator, metric_worker)
+            rollout_manager_options = {}
+            if rollout_manager_name:
+                rollout_manager_options["name"] = rollout_manager_name
+
+            rollout_manager = RolloutManager.options(**rollout_manager_options).remote(
+                config,
+                rollout_resources,
+                data_coordinator,
+                actor_resources,
+                coordinator,
+                metric_worker,
+            )
             trainer_group = TrainerGroup(
                 config,
                 actor_resources,
@@ -122,7 +163,28 @@ class MainRunner:
             config.critic.optim.total_training_steps = total_training_steps
             logger.success(f"DataCoordinator initialized: {batches_per_epoch} batches/epoch, {total_training_steps} total steps")
 
-            # Initialize trainer actors (creates Trainer Ray actors with models)
+            is_colocate = getattr(config.trainer, "colocate", False)
+
+            if is_colocate:
+                # Colocate startup must finish rollout init/offload before trainer init.
+                ray.get(rollout_fut)
+                logger.success("RolloutManager initialized (colocate: pre-trainer)")
+
+                # Bootstrap always offloads weights to maximize headroom for trainer init/checkpoint load.
+                colocate_offload_timeout = max(1, int(getattr(config.trainer, "colocate_timeout_s", 120)))
+                try:
+                    ray.get(
+                        rollout_manager.offload_for_train.remote(
+                            timeout_s=colocate_offload_timeout,
+                            trace_id="bootstrap-pre-trainer-init",
+                            offload_weights_override=True,
+                        )
+                    )
+                except Exception:
+                    logger.error("bootstrap-phase offload failure (pre-trainer-init)")
+                    raise
+
+            # Non-colocate keeps rollout init/trainer init overlap.
             trainer_group.init_actors()
 
             # Load checkpoint if resume mode is enabled
@@ -134,20 +196,22 @@ class MainRunner:
             init_time = time.time() - start_time
             logger.info(f"Initialization completed in {init_time:.1f}s")
 
-            # Wait rollout and Get Rollout Info
-            ray.get(rollout_fut)
+            if not is_colocate:
+                ray.get(rollout_fut)
+
             router_address = ray.get(rollout_manager.get_router_address.remote()) if rollout_manager else "N/A"
             logger.success(f"RolloutManager initialized. Router at: {router_address}")
             logger.success(f"TrainerGroup initialized with {len(trainer_group.trainers)} trainers")
 
             # === 5. Async Training Loop ===
+            # run_dataloader waits on next_rollout(), so rollout GPU work starts after bootstrap.
             logger.info("Starting async training loop...")
-            rollout_manager.run_dataloader.remote()
+            dataloader_ref = rollout_manager.run_dataloader.remote()
 
             trainer_group.train()
 
             # === 6. Wait for completion or failure ===
-            self._wait_for_completion(coordinator, logger)
+            self._wait_for_completion(coordinator, logger, dataloader_ref=dataloader_ref)
 
             # === 7. Check final status and raise if failed ===
             final_status = ray.get(coordinator.get_status.remote())
@@ -169,7 +233,7 @@ class MainRunner:
             # Note: MetricTracker cleanup is handled inside Trainer (rank=0)
             self._cleanup_and_report(coordinator, trainer_group, rollout_manager, start_time, logger)
 
-    def _wait_for_completion(self, coordinator, logger, check_interval: float = 5.0):
+    def _wait_for_completion(self, coordinator, logger, dataloader_ref=None, check_interval: float = 5.0):
         """
         Wait for training to complete, fail, or shutdown.
 
@@ -178,6 +242,21 @@ class MainRunner:
         logger.info("Monitoring task status...")
 
         while True:
+            if dataloader_ref is not None:
+                ready, _ = ray.wait([dataloader_ref], timeout=0)
+                if ready:
+                    try:
+                        ray.get(dataloader_ref)
+                        logger.info("RolloutManager.run_dataloader finished")
+                    except Exception as e:
+                        logger.error(f"RolloutManager.run_dataloader failed: {e}")
+                        current_status = ray.get(coordinator.get_status.remote())
+                        if current_status == "running":
+                            ray.get(coordinator.report_failure.remote("rollout_manager", f"run_dataloader failed: {e}"))
+                        raise
+                    finally:
+                        dataloader_ref = None
+
             status = ray.get(coordinator.get_status.remote())
             if status != "running":
                 break
@@ -255,9 +334,21 @@ def main() -> None:
         # Launch the main orchestration actor and wait for it to complete.
         logger.info("Starting MainRunner actor to orchestrate the job.")
         runner = MainRunner.remote()
-
-        # This is a blocking call that waits for the remote `run` method to finish.
-        ray.get(runner.run.remote(siirl_args))
+        rollout_manager_name = f"siirl_rollout_manager_{time.time_ns()}"
+        progress_monitor = ValidateProgressMonitor(rollout_manager_name)
+        run_completed = False
+        try:
+            run_ref = runner.run.remote(siirl_args, rollout_manager_name)
+            while True:
+                ready_refs, _ = ray.wait([run_ref], timeout=VALIDATE_PROGRESS_DRIVER_POLL_S)
+                progress_monitor.poll_once()
+                if ready_refs:
+                    ray.get(ready_refs[0])
+                    run_completed = True
+                    progress_monitor.poll_once()
+                    break
+        finally:
+            progress_monitor.close(force_complete=run_completed)
         logger.success("MainRunner has completed its execution.")
 
     except KeyboardInterrupt:

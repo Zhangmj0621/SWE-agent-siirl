@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 350 694" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="350" height="694" fill="#fff"/>
+  <rect x="20" y="10" width="310" height="634" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="310" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="175" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Advanced &gt; Failure Propagation (Fig. 1)</text>
+
+  <!-- Layer 1: All state boxes and circles -->
+  <circle cx="175" cy="70" r="6" fill="#424242"/>
+  <rect x="95" y="110" width="160" height="34" rx="17" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="175" y="131" text-anchor="middle" fill="#1565C0" font-size="12" font-weight="600">RUNNING</text>
+  <rect x="95" y="194" width="160" height="34" rx="17" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="175" y="215" text-anchor="middle" fill="#1565C0" font-size="12" font-weight="600">COMPLETED</text>
+  <rect x="95" y="278" width="160" height="34" rx="17" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="175" y="299" text-anchor="middle" fill="#1565C0" font-size="12" font-weight="600">FAILED</text>
+  <rect x="95" y="362" width="160" height="34" rx="17" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="175" y="383" text-anchor="middle" fill="#1565C0" font-size="12" font-weight="600">SHUTDOWN</text>
+  <circle cx="175" cy="446" r="8" fill="none" stroke="#424242" stroke-width="1.5"/>
+  <circle cx="175" cy="446" r="5" fill="#424242"/>
+
+  <!-- Layer 2: All arrows + bg rects + labels -->
+  <!-- Initial → RUNNING -->
+  <rect x="113" y="78" width="96" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="175" y1="76" x2="175" y2="110" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="175" y="88" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">System initialized</text>
+
+  <!-- RUNNING → COMPLETED -->
+  <rect x="113" y="154" width="96" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="175" y1="144" x2="175" y2="194" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="175" y="164" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">All epochs finished</text>
+
+  <!-- RUNNING → FAILED (route right side) -->
+  <rect x="260" y="197" width="66" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 255 127 L 280 127 L 280 295 L 255 295" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="293" y="207" fill="#607D8B" font-size="10.5" font-style="italic">Error in any</text>
+  <rect x="260" y="210" width="66" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="293" y="220" fill="#607D8B" font-size="10.5" font-style="italic">component</text>
+
+  <!-- RUNNING → SHUTDOWN (route left side) -->
+  <rect x="30" y="231" width="60" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 95 127 L 70 127 L 70 379 L 95 379" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="60" y="241" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">Graceful</text>
+  <rect x="30" y="244" width="60" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="60" y="254" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">shutdown</text>
+
+  <!-- COMPLETED → End -->
+  <line x1="175" y1="228" x2="175" y2="438" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <!-- FAILED → End -->
+  <line x1="175" y1="312" x2="175" y2="438" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <!-- SHUTDOWN → End -->
+  <line x1="175" y1="396" x2="175" y2="438" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="175" y="679" text-anchor="middle" fill="#555" font-size="10">Figure 1: Training system state machine lifecycle</text>
+</svg>

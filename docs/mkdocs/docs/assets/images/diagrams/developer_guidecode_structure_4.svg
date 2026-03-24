@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1090 490" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="1090" height="490" fill="#fff"/>
+  <rect x="20" y="10" width="1050" height="430" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="1050" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="545" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Developer Guide > Code Structure (Fig. 4)</text>
+
+  <!-- Layer 1: All boxes -->
+  <!-- CLI Input container with header bar -->
+  <rect x="24" y="48" width="240" height="88" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="24" y="48" width="240" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="144" y="66" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">CLI Input</text>
+  <rect x="40" y="90" width="185" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="132" y="109" text-anchor="middle" fill="#424242" font-size="12">CLI args (dot-notation)</text>
+
+  <!-- Config Parsing container with header bar -->
+  <rect x="276" y="48" width="454" height="88" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="276" y="48" width="454" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="503" y="66" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Config Parsing</text>
+  <rect x="288" y="90" width="207" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="391" y="109" text-anchor="middle" fill="#424242" font-size="12">parser.py</text>
+  <rect x="510" y="90" width="207" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="613" y="109" text-anchor="middle" fill="#424242" font-size="12">argparse + OmegaConf.from_cli()</text>
+
+  <!-- SiiRLArguments container with header bar -->
+  <rect x="743" y="48" width="314" height="368" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="743" y="48" width="314" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="900" y="66" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">SiiRLArguments</text>
+  <rect x="759" y="90" width="185" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="851" y="109" text-anchor="middle" fill="#424242" font-size="12">.data: DataArguments</text>
+  <rect x="759" y="160" width="252" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="885" y="179" text-anchor="middle" fill="#424242" font-size="12">.actor_ref: ActorRefArguments</text>
+  <rect x="759" y="230" width="230" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="874" y="249" text-anchor="middle" fill="#424242" font-size="12">.rollout: RolloutArguments</text>
+  <rect x="759" y="300" width="215" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="866" y="319" text-anchor="middle" fill="#424242" font-size="12">.critic: CriticArguments</text>
+  <rect x="759" y="370" width="237" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="877" y="389" text-anchor="middle" fill="#424242" font-size="12">.trainer: TrainingArguments</text>
+
+  <!-- Layer 2: All arrows + labels -->
+  <!-- CLI → parser.py -->
+  <rect x="230" y="92" width="50" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="225" y1="105" x2="292" y2="105" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="255" y="102" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">key=value</text>
+
+  <!-- parser.py → OmegaConf -->
+  <rect x="497" y="92" width="12" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="495" y1="105" x2="510" y2="105" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- OmegaConf → .data (horizontal) -->
+  <rect x="720" y="92" width="40" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="717" y1="105" x2="759" y2="105" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="738" y="102" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">dataclass</text>
+
+  <!-- OmegaConf → .actor_ref (L-shape: right then down) -->
+  <path d="M 717 105 L 735 105 L 735 175 L 759 175" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- OmegaConf → .rollout (L-shape) -->
+  <path d="M 717 105 L 735 105 L 735 245 L 759 245" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- OmegaConf → .critic (L-shape) -->
+  <path d="M 717 105 L 735 105 L 735 315 L 759 315" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- OmegaConf → .trainer (L-shape) -->
+  <path d="M 717 105 L 735 105 L 735 385 L 759 385" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="545" y="475" text-anchor="middle" fill="#555" font-size="10">Figure 4: Config Parsing Pipeline</text>
+</svg>

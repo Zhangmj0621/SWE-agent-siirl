@@ -18,11 +18,14 @@ Console Logger Backend
 Provides formatted console output for training metrics.
 """
 
+import math
 from typing import Any
 
 from loguru import logger
 
-from .base import BackendConfig
+from .base import BackendConfig, NumericScalar
+
+STEP_METRIC_KEYS = {"training/global_step", "training/global_step_1based"}
 
 
 class ConsoleBackend:
@@ -58,7 +61,12 @@ class ConsoleBackend:
         """Console backend is always initialized."""
         return True
 
-    def log(self, data: dict[str, float], step: int) -> None:
+    @staticmethod
+    def _display_step(step: int) -> int:
+        """Render canonical training step without implicit offset."""
+        return step
+
+    def log(self, data: dict[str, NumericScalar], step: int) -> None:
         """
         Log metrics to console with grouped formatting.
 
@@ -80,7 +88,7 @@ class ConsoleBackend:
         """
         # Truncate long text
         display_text = text[:500] + "..." if len(text) > 500 else text
-        logger.info(f"[Step {step}] {tag}:\n{display_text}")
+        logger.info(f"[Step {self._display_step(step)}] {tag}:\n{display_text}")
 
     def log_table(self, tag: str, columns: list[str], data: list[list[Any]], step: int) -> None:
         """
@@ -101,7 +109,7 @@ class ConsoleBackend:
             if self._console is None:
                 self._console = Console()
 
-            table = Table(title=f"{tag} (Step {step})")
+            table = Table(title=f"{tag} (Step {self._display_step(step)})")
             for col in columns:
                 table.add_column(col, overflow="fold", max_width=50)
 
@@ -116,7 +124,7 @@ class ConsoleBackend:
 
         except ImportError:
             # Fallback without rich
-            logger.info(f"[Step {step}] {tag}: {len(data)} rows")
+            logger.info(f"[Step {self._display_step(step)}] {tag}: {len(data)} rows")
             for i, row in enumerate(data[:3]):
                 logger.info(f"  Row {i}: {row}")
             if len(data) > 3:
@@ -126,7 +134,7 @@ class ConsoleBackend:
         """Console backend doesn't need cleanup."""
         pass
 
-    def _format_metrics(self, data: dict[str, float], step: int) -> str:
+    def _format_metrics(self, data: dict[str, NumericScalar], step: int) -> str:
         """
         Format metrics into a grouped string.
 
@@ -155,22 +163,21 @@ class ConsoleBackend:
                 groups[group] = []
 
             # Format value
-            if isinstance(value, float):
-                if abs(value) < 0.0001 or abs(value) > 10000:
-                    formatted_value = f"{value:.2e}"
-                elif abs(value) < 1:
-                    formatted_value = f"{value:.4f}"
-                else:
-                    formatted_value = f"{value:.2f}"
-            elif isinstance(value, int):
-                formatted_value = str(value)
+            value_for_display = value
+            if key in STEP_METRIC_KEYS and isinstance(value_for_display, (int, float)):
+                value_for_display = int(value_for_display)
+
+            if isinstance(value_for_display, float):
+                formatted_value = f"{value_for_display:.8f}" if math.isfinite(value_for_display) else str(value_for_display)
+            elif isinstance(value_for_display, int):
+                formatted_value = str(value_for_display)
             else:
-                formatted_value = str(value)
+                formatted_value = str(value_for_display)
 
             groups[group].append(f"{name}={formatted_value}")
 
         # Build output string
-        parts = [f"Step {step}"]
+        parts = [f"Step {self._display_step(step)}"]
 
         # Priority order for groups
         priority_groups = ["training", "actor", "critic", "response", "prompt", "perf"]

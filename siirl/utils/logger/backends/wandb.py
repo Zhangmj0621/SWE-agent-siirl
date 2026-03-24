@@ -22,7 +22,7 @@ from typing import Any
 
 from loguru import logger
 
-from .base import BackendConfig
+from .base import BackendConfig, NumericScalar
 
 
 class WandBBackend:
@@ -96,7 +96,7 @@ class WandBBackend:
             logger.error(f"WandB initialization failed: {e}")
             return False
 
-    def log(self, data: dict[str, float], step: int) -> None:
+    def log(self, data: dict[str, NumericScalar], step: int) -> None:
         """
         Log scalar metrics to wandb.
 

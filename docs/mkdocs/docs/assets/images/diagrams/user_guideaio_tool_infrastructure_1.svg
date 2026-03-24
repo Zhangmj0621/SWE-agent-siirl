@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-p" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#AB47BC"/>
+    </marker>
+  </defs>
+  <rect width="800" height="420" fill="#fff"/>
+  <rect x="20" y="10" width="760" height="360" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="760" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="400" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">AIO Tool Infrastructure</text>
+
+  <!-- Layer 1: All container boxes -->
+  <rect x="30" y="50" width="250" height="145" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="30" y="50" width="250" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="155" y="68" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Rollout Workers</text>
+  <rect x="320" y="50" width="180" height="145" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <rect x="320" y="50" width="180" height="26" rx="2" fill="#FFECB3" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="410" y="68" text-anchor="middle" fill="#F57F17" font-size="13" font-weight="bold">AIO Proxy</text>
+  <rect x="540" y="50" width="230" height="245" rx="2" fill="#F3E5F5" stroke="#CE93D8" stroke-width="1.2"/>
+  <rect x="540" y="50" width="230" height="26" rx="2" fill="#E1BEE7" stroke="#CE93D8" stroke-width="1.2"/>
+  <text x="655" y="68" text-anchor="middle" fill="#7B1FA2" font-size="13" font-weight="bold">Tool Environments</text>
+
+  <!-- Sub-boxes: Rollout Workers (w=140, centered in 250-wide container: x=30+20+35=85..225, center at 30+125=155) -->
+  <!-- Container inner: x=50..260, span=210. 1 box w=140 centered: x=50+(210-140)/2=85 -->
+  <rect x="85" y="95" width="140" height="30" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="155" y="114" text-anchor="middle" fill="#424242" font-size="11">Worker 1</text>
+  <rect x="85" y="145" width="140" height="30" rx="1" fill="#FFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="155" y="164" text-anchor="middle" fill="#424242" font-size="11">Worker N</text>
+
+  <!-- Sub-boxes: AIO Proxy (w=140, centered in 180-wide container: x=320+20=340, center at 410) -->
+  <rect x="340" y="95" width="140" height="30" rx="1" fill="#FFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="410" y="114" text-anchor="middle" fill="#424242" font-size="11" font-weight="600">Request Router</text>
+
+  <!-- Sub-boxes: Tool Environments (w=140 would be too narrow for text; keep w=190 for these since they're in a different row context)
+       Actually normalizing to 140 to match the other y=95 boxes. Container inner: x=560..750, span=190. 1 box w=140 centered: x=560+(190-140)/2=585 -->
+  <rect x="585" y="95" width="140" height="28" rx="1" fill="#FFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="655" y="113" text-anchor="middle" fill="#424242" font-size="11">ToolEnv Container 1</text>
+  <rect x="585" y="140" width="140" height="28" rx="1" fill="#FFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="655" y="158" text-anchor="middle" fill="#424242" font-size="11">ToolEnv Container 2</text>
+  <rect x="585" y="185" width="140" height="28" rx="1" fill="#FFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="655" y="203" text-anchor="middle" fill="#424242" font-size="11">ToolEnv Container N</text>
+  <rect x="585" y="245" width="140" height="28" rx="1" fill="#FFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="655" y="263" text-anchor="middle" fill="#424242" font-size="11">Sandbox Isolation</text>
+
+  <!-- Layer 2: All arrows + labels (drawn on top of all boxes) -->
+
+  <!-- Worker 1 -> Router: horizontal at y=110 -->
+  <rect x="235" y="97" width="50" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="225" y1="110" x2="340" y2="110" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="260" y="107" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">tool_call</text>
+
+  <!-- Worker N -> Router: L-path orthogonal (right then up) -->
+  <path d="M 225 160 L 290 160 L 290 110 L 340 110" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Router -> Container 1: horizontal at y=109 -->
+  <rect x="495" y="96" width="44" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="480" y1="109" x2="585" y2="109" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="517" y="106" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">dispatch</text>
+
+  <!-- Router -> Container 2: L-path orthogonal (right then down) -->
+  <path d="M 480 120 L 530 120 L 530 154 L 585 154" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="400" y="405" text-anchor="middle" fill="#555" font-size="10">Figure 1: All-in-One tool environment</text>
+</svg>

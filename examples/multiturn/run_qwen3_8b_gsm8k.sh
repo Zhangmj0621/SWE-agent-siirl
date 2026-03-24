@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 # ===================================================================================
 # ===                       USER CONFIGURATION SECTION                            ===
@@ -8,28 +9,26 @@
 export SIIRL_DIR="${SIIRL_DIR:-{siirl-agentic-dir}}"
 export PYTHONPATH="$SIIRL_DIR:$PYTHONPATH"
 
-#  --- Experiment and Model Definition ---
+ --- Experiment and Model Definition ---
 export DATASET=deepscaler
 export ALG=grpo
-export MODEL_NAME=qwen3-8b
+export MODEL_NAME=qwen2.5-7b-gsm8k
 
 # --- Path Definitions ---
 # Modify these paths according to your environment
-export HOME_DIR=${HOME_DIR:-{your-home-dir}}
 export TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/train.parquet}
 export TEST_DATA_PATH=${TEST_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/test.parquet}
 export MODEL_PATH=${MODEL_PATH:-$HOME_DIR/data/models/Qwen3-8B}
-
 # Base output paths
 export BASE_CKPT_PATH=ckpts
 export BASE_TENSORBOARD_PATH=tensorboard
 
 # --- Key Training Hyperparameters ---
-export TRAIN_BATCH_SIZE=512
-export PPO_MINI_BATCH_SIZE=256
+export TRAIN_BATCH_SIZE=32
+export PPO_MINI_BATCH_SIZE=16
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
 export MAX_PROMPT_LENGTH=2048
-export MAX_RESPONSE_LENGTH=4096
+export MAX_RESPONSE_LENGTH=13312
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.5
 export ROLLOUT_TP=2                    # Tensor parallelism for rollout
 export ROLLOUT_N=8                     # Number of samples per prompt
@@ -52,7 +51,7 @@ export ROLLOUT_GPUS=4                  # 6 GPUs for inference (SGLang)
 # PP (Pipeline Parallel): Model layer sharding across pipeline stages
 # CP (Context Parallel): Sequence parallelism for long context
 # DP (Data Parallel): Automatically computed as ACTOR_GPUS / (TP * PP * CP)
-export ACTOR_TP=4                      # Actor tensor parallelism (default: 1)
+export ACTOR_TP=2                      # Actor tensor parallelism (default: 1)
 export ACTOR_PP=1                      # Actor pipeline parallelism (default: 1)
 export ACTOR_CP=1                      # Actor context parallelism (default: 1)
 # With ACTOR_GPUS=2, TP=1, PP=1, CP=1 -> DP=2 (2 data parallel trainers)
@@ -60,8 +59,8 @@ export ACTOR_CP=1                      # Actor context parallelism (default: 1)
 # --- Output Paths and Experiment Naming ---
 timestamp=$(date +"%Y%m%d_%H%M%S")
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}node_${ACTOR_GPUS}actor_${ROLLOUT_GPUS}rollout
-export PROJECT_NAME=siirl_${DATASET}_${ALG}
-export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_experiment
+export EXPERIMENT_NAME=AIO_${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}_nodes_experiment
+export PROJECT_NAME=siirl_agentic_deepscaler_grpo
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_tensorboard_$timestamp
 
 # --- Define the Training Command and its Arguments ---
@@ -84,6 +83,7 @@ TRAINING_CMD=(
     data.max_response_length=$MAX_RESPONSE_LENGTH
     data.filter_overlong_prompts=True
     data.truncation='error'
+    data.force_on_the_fly=True
     data.shuffle=False
     # === Actor/Ref Model Settings ===
     actor_ref.model.path=$MODEL_PATH
@@ -98,10 +98,15 @@ TRAINING_CMD=(
     actor_ref.actor.kl_loss_type=low_var_kl
     actor_ref.actor.megatron.param_offload=False
     actor_ref.actor.megatron.optimizer_offload=False
-    # Actor parallelism is configured via trainer.* below
+    actor_ref.actor.megatron.tensor_model_parallel_size=$ACTOR_TP
+    actor_ref.actor.megatron.pipeline_model_parallel_size=$ACTOR_PP
+    actor_ref.actor.megatron.context_parallel_size=$ACTOR_CP
     # === Reference Model Settings ===
     actor_ref.ref.log_prob_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_ref.ref.megatron.param_offload=True
+    actor_ref.ref.megatron.tensor_model_parallel_size=$ACTOR_TP
+    actor_ref.ref.megatron.pipeline_model_parallel_size=$ACTOR_PP
+    actor_ref.ref.megatron.context_parallel_size=$ACTOR_CP
     actor_ref.actor.megatron.use_mbridge=True
     # === Rollout Settings (SGLang) ===
     rollout.name=sglang
@@ -109,6 +114,12 @@ TRAINING_CMD=(
     rollout.gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTILIZATION
     rollout.n=$ROLLOUT_N
     rollout.trust_remote_code=True
+    # === MultiTurn Env Settings ===
+    rollout.multiturn.env_type='tool_env'
+    rollout.multiturn.env_path='examples/multiturn/config/tools_config_gsm8k.yaml'
+    rollout.multiturn.max_env_turns=3
+    rollout.multiturn.max_assistant_turns=3
+    rollout.multiturn.max_env_response_length=1024
     # === Trainer Settings ===
     trainer.n_gpus_per_node=$N_GPUS_PER_NODE
     trainer.nnodes=$NNODES
@@ -124,11 +135,7 @@ TRAINING_CMD=(
     trainer.experiment_name=$EXPERIMENT_NAME
     trainer.logger="['console','tensorboard']"
     trainer.resume_mode=auto
-    trainer.val_before_train=True
-    # === Parallel Config ===
-    trainer.tensor_model_parallel_size=$ACTOR_TP
-    trainer.pipeline_model_parallel_size=$ACTOR_PP
-    trainer.context_parallel_size=$ACTOR_CP
+    trainer.val_before_train=False
 )
 
 # ===================================================================================
@@ -196,7 +203,7 @@ main() {
     export RAY_MASTER_PORT=${RAY_MASTER_PORT:-6379}
     export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
     export RAY_MASTER_ADDR=$MASTER_ADDR
-
+    
     start_ray_cluster
 
     if [ "$NNODES" -gt 1 ] && [ "$NODE_RANK" = "0" ]; then

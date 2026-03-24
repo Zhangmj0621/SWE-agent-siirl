@@ -1,0 +1,158 @@
+<svg width="100%" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 480" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-down" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#607D8B"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="820" height="480" fill="#fff"/>
+
+  <!-- Title bar -->
+  <rect x="20" y="10" width="780" height="420" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="780" height="30" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="410" y="30" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Initialization Phase</text>
+
+  <!-- ═══════ Step numbering column ═══════ -->
+
+  <!-- Step 1: Parse Config (Gray) -->
+  <circle cx="60" cy="75" r="14" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1"/>
+  <text x="60" y="80" text-anchor="middle" fill="#616161" font-size="12" font-weight="bold">1</text>
+  <rect x="90" y="58" width="170" height="34" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1"/>
+  <text x="175" y="75" text-anchor="middle" fill="#424242" font-size="11.5" font-weight="600">parse_config()</text>
+  <text x="175" y="87" text-anchor="middle" fill="#9E9E9E" font-size="9">SiiRLArguments + OmegaConf</text>
+
+  <!-- Vertical connector -->
+  <line x1="60" y1="89" x2="60" y2="107" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Step 2: Ray Init (Gray) -->
+  <circle cx="60" cy="125" r="14" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1"/>
+  <text x="60" y="130" text-anchor="middle" fill="#616161" font-size="12" font-weight="bold">2</text>
+  <rect x="90" y="108" width="170" height="34" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1"/>
+  <text x="175" y="125" text-anchor="middle" fill="#424242" font-size="11.5" font-weight="600">ray.init()</text>
+  <text x="175" y="137" text-anchor="middle" fill="#9E9E9E" font-size="9">Cluster connection</text>
+
+  <!-- Vertical connector -->
+  <line x1="60" y1="139" x2="60" y2="157" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Step 3: MainRunner (Gray) -->
+  <circle cx="60" cy="175" r="14" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1"/>
+  <text x="60" y="180" text-anchor="middle" fill="#616161" font-size="12" font-weight="bold">3</text>
+  <rect x="90" y="158" width="170" height="34" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="175" y="175" text-anchor="middle" fill="#424242" font-size="11.5" font-weight="600">MainRunner</text>
+  <text x="175" y="187" text-anchor="middle" fill="#9E9E9E" font-size="9">Ray actor (num_cpus=5)</text>
+
+  <!-- Vertical connector -->
+  <line x1="60" y1="189" x2="60" y2="207" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Step 4: Resource Allocation (Gray) -->
+  <circle cx="60" cy="225" r="14" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1"/>
+  <text x="60" y="230" text-anchor="middle" fill="#616161" font-size="12" font-weight="bold">4</text>
+  <rect x="90" y="208" width="170" height="34" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1"/>
+  <text x="175" y="225" text-anchor="middle" fill="#424242" font-size="11.5" font-weight="600">allocate_resources()</text>
+  <text x="175" y="237" text-anchor="middle" fill="#9E9E9E" font-size="9">GPU split: actor vs rollout</text>
+
+  <!-- ═══════ Parallel initialization (Steps 5-7) ═══════ -->
+
+  <!-- Fork indicator -->
+  <line x1="60" y1="239" x2="60" y2="262" stroke="#78909C" stroke-width="1.2"/>
+  <!-- Three branches (target = box center x: 185, 440, 695) -->
+  <line x1="60" y1="262" x2="185" y2="262" stroke="#78909C" stroke-width="1.2"/>
+  <line x1="60" y1="262" x2="440" y2="262" stroke="#78909C" stroke-width="1.2"/>
+  <line x1="60" y1="262" x2="695" y2="262" stroke="#78909C" stroke-width="1.2"/>
+  <!-- Down arrows -->
+  <line x1="185" y1="262" x2="185" y2="284" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="440" y1="262" x2="440" y2="284" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="695" y1="262" x2="695" y2="284" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- "parallel" label (centered between fork branches) -->
+  <rect x="340" y="249" width="60" height="16" rx="2" fill="#FFF" stroke="#BDBDBD" stroke-width="0.6"/>
+  <text x="370" y="260" text-anchor="middle" fill="#78909C" font-size="9" font-weight="bold">parallel</text>
+
+  <!-- Step 5a: DataCoordinator (Amber) -->
+  <circle cx="85" cy="300" r="12" fill="#FFF8E1" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="85" y="304" text-anchor="middle" fill="#F57F17" font-size="10" font-weight="bold">5</text>
+  <rect x="105" y="284" width="160" height="54" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="185" y="303" text-anchor="middle" fill="#424242" font-size="11.5" font-weight="600">DataCoordinator</text>
+  <text x="185" y="316" text-anchor="middle" fill="#9E9E9E" font-size="9">Dataloader + buffer init</text>
+  <text x="185" y="330" text-anchor="middle" fill="#F57F17" font-size="9" font-style="italic">Ray actor</text>
+
+  <!-- Step 5b: RolloutManager (Blue) -->
+  <circle cx="340" cy="300" r="12" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="340" y="304" text-anchor="middle" fill="#1565C0" font-size="10" font-weight="bold">6</text>
+  <rect x="360" y="284" width="160" height="54" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="440" y="303" text-anchor="middle" fill="#424242" font-size="11.5" font-weight="600">RolloutManager</text>
+  <text x="440" y="316" text-anchor="middle" fill="#9E9E9E" font-size="9">SGLang engines startup</text>
+  <text x="440" y="330" text-anchor="middle" fill="#1565C0" font-size="9" font-style="italic">Ray actor</text>
+
+  <!-- Step 5c: TrainerGroup (Green) -->
+  <circle cx="595" cy="300" r="12" fill="#E8F5E9" stroke="#81C784" stroke-width="0.8"/>
+  <text x="595" y="304" text-anchor="middle" fill="#2E7D32" font-size="10" font-weight="bold">7</text>
+  <rect x="615" y="284" width="160" height="54" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="695" y="303" text-anchor="middle" fill="#424242" font-size="11.5" font-weight="600">TrainerGroup</text>
+  <text x="695" y="316" text-anchor="middle" fill="#9E9E9E" font-size="9">Model loading + FSDP init</text>
+  <text x="695" y="330" text-anchor="middle" fill="#2E7D32" font-size="9" font-style="italic">Trainer actors ×N</text>
+
+  <!-- ═══════ Join → Step 8 ═══════ -->
+  <line x1="185" y1="338" x2="185" y2="360" stroke="#78909C" stroke-width="1.2"/>
+  <line x1="440" y1="338" x2="440" y2="360" stroke="#78909C" stroke-width="1.2"/>
+  <line x1="695" y1="338" x2="695" y2="360" stroke="#78909C" stroke-width="1.2"/>
+  <!-- Join line -->
+  <line x1="185" y1="360" x2="695" y2="360" stroke="#78909C" stroke-width="1.2"/>
+  <line x1="440" y1="360" x2="440" y2="383" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- "barrier" label -->
+  <rect x="415" y="349" width="50" height="14" rx="2" fill="#FFF" stroke="#BDBDBD" stroke-width="0.6"/>
+  <text x="440" y="359" text-anchor="middle" fill="#78909C" font-size="9" font-weight="bold">barrier</text>
+
+  <!-- Step 8: Start Training Loop -->
+  <circle cx="330" cy="400" r="14" fill="#E8F5E9" stroke="#81C784" stroke-width="1"/>
+  <text x="330" y="405" text-anchor="middle" fill="#2E7D32" font-size="12" font-weight="bold">8</text>
+  <rect x="355" y="383" width="200" height="34" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="455" y="404" text-anchor="middle" fill="#2E7D32" font-size="11.5" font-weight="600">start_training_loop()</text>
+
+  <!-- ═══════ Right side: GPU allocation detail ═══════ -->
+  <rect x="310" y="58" width="470" height="176" rx="3" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="545" y="76" text-anchor="middle" fill="#616161" font-size="11" font-weight="bold">Resource Allocation Detail</text>
+
+  <!-- Node visualization -->
+  <rect x="330" y="92" width="430" height="60" rx="2" fill="#FFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="545" y="108" text-anchor="middle" fill="#757575" font-size="10">Node (8 GPUs)</text>
+
+  <!-- GPU boxes -->
+  <rect x="345" y="118" width="48" height="24" rx="1" fill="#E8F5E9" stroke="#81C784" stroke-width="0.8"/>
+  <text x="369" y="134" text-anchor="middle" fill="#2E7D32" font-size="9">GPU 0</text>
+  <rect x="398" y="118" width="48" height="24" rx="1" fill="#E8F5E9" stroke="#81C784" stroke-width="0.8"/>
+  <text x="422" y="134" text-anchor="middle" fill="#2E7D32" font-size="9">GPU 1</text>
+
+  <rect x="460" y="118" width="48" height="24" rx="1" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="484" y="134" text-anchor="middle" fill="#1565C0" font-size="9">GPU 2</text>
+  <rect x="513" y="118" width="48" height="24" rx="1" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="537" y="134" text-anchor="middle" fill="#1565C0" font-size="9">GPU 3</text>
+  <rect x="566" y="118" width="48" height="24" rx="1" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="590" y="134" text-anchor="middle" fill="#1565C0" font-size="9">GPU 4</text>
+  <rect x="619" y="118" width="48" height="24" rx="1" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="643" y="134" text-anchor="middle" fill="#1565C0" font-size="9">GPU 5</text>
+  <rect x="672" y="118" width="48" height="24" rx="1" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="696" y="134" text-anchor="middle" fill="#1565C0" font-size="9">GPU 6</text>
+  <rect x="725" y="118" width="28" height="24" rx="1" fill="#E3F2FD" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="739" y="134" text-anchor="middle" fill="#1565C0" font-size="9">7</text>
+
+  <!-- Labels under GPU groups -->
+  <text x="395" y="168" text-anchor="middle" fill="#2E7D32" font-size="10" font-weight="bold">Training (actor_gpus=2)</text>
+  <text x="610" y="168" text-anchor="middle" fill="#1565C0" font-size="10" font-weight="bold">Rollout (rollout_gpus=6)</text>
+
+  <!-- Divider -->
+  <line x1="454" y1="118" x2="454" y2="142" stroke="#BDBDBD" stroke-width="1" stroke-dasharray="3,2"/>
+
+  <!-- Config box -->
+  <rect x="330" y="185" width="430" height="35" rx="2" fill="#FFF" stroke="#E0E0E0" stroke-width="0.6"/>
+  <text x="545" y="200" text-anchor="middle" fill="#757575" font-size="10" font-family="'Courier New', monospace">trainer.actor_gpus=2  trainer.rollout_gpus=6  trainer.colocate=false</text>
+  <text x="545" y="214" text-anchor="middle" fill="#9E9E9E" font-size="9" font-style="italic">Separated mode (default)</text>
+
+  <!-- Caption -->
+  <text x="410" y="465" text-anchor="middle" fill="#555" font-size="10">Figure 3: Initialization Sequence</text>
+</svg>

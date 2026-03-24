@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="800" height="300" fill="#fff"/>
+  <rect x="20" y="10" width="760" height="240" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="760" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="400" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Tool Execution Flow</text>
+
+  <!-- Layer 1: All component boxes -->
+  <!-- 5 boxes, w=120, span from x=40 to x=740 (700), gap=(700-600)/4=25 -->
+  <rect x="40" y="120" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="100" y="139" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Tool Call</text>
+  <rect x="185" y="120" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="245" y="139" text-anchor="middle" fill="#424242" font-size="12">Parse JSON</text>
+  <rect x="330" y="120" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#FFCC80" stroke-width="0.8"/>
+  <text x="390" y="139" text-anchor="middle" fill="#424242" font-size="12">Route</text>
+  <rect x="475" y="120" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#E1BEE7" stroke-width="0.8"/>
+  <text x="535" y="139" text-anchor="middle" fill="#424242" font-size="12">Execute</text>
+  <rect x="620" y="120" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="680" y="139" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Response</text>
+
+  <!-- Layer 2: All arrows + labels -->
+  <!-- Tool Call → Parse JSON -->
+  <rect x="162" y="121" width="32" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="160" y1="135" x2="185" y2="135" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="172" y="131" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">parse</text>
+
+  <!-- Parse JSON → Route -->
+  <rect x="307" y="121" width="32" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="305" y1="135" x2="330" y2="135" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="317" y="131" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">route</text>
+
+  <!-- Route → Execute -->
+  <rect x="452" y="121" width="32" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="450" y1="135" x2="475" y2="135" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="462" y="131" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">exec</text>
+
+  <!-- Execute → Response -->
+  <rect x="597" y="121" width="32" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="595" y1="135" x2="620" y2="135" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="607" y="131" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">result</text>
+
+  <!-- Caption -->
+  <text x="400" y="285" text-anchor="middle" fill="#555" font-size="10">Figure 2: How tool calls are processed</text>
+</svg>

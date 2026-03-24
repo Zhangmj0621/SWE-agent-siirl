@@ -116,7 +116,15 @@ class CheckpointManager:
         if dataloader_state is not None:
             dataloader_path = os.path.join(step_dir, "dataloader_state.pt")
             torch.save(dataloader_state, dataloader_path)
-            logger.debug(f"Rank {self.rank}: Saved dataloader state to {dataloader_path}")
+            if isinstance(dataloader_state, dict) and "dataloader_state" in dataloader_state:
+                train_q_size = len(dataloader_state.get("train_queue", []))
+                val_q_size = len(dataloader_state.get("val_queue", []))
+                logger.debug(
+                    f"Rank {self.rank}: Saved dataloader state to {dataloader_path} "
+                    f"(train_queue={train_q_size}, val_queue={val_q_size})"
+                )
+            else:
+                logger.debug(f"Rank {self.rank}: Saved legacy dataloader state to {dataloader_path}")
 
     def _commit_checkpoint(self, global_steps: int) -> None:
         """Atomically commit checkpoint by writing tracker file."""
@@ -258,8 +266,17 @@ class CheckpointManager:
         dataloader_path = os.path.join(global_step_folder, "dataloader_state.pt")
 
         if os.path.exists(dataloader_path):
-            dataloader_state = torch.load(dataloader_path, map_location="cpu")
+            # The checkpoint may include queued Sample objects, so disable weights_only.
+            dataloader_state = torch.load(dataloader_path, map_location="cpu", weights_only=False)
             ray.get(self.data_coordinator.load_dataloader_state.remote(dataloader_state))
-            logger.debug(f"Rank {self.rank}: Loaded dataloader state from {dataloader_path}")
+            if isinstance(dataloader_state, dict) and "dataloader_state" in dataloader_state:
+                train_q_size = len(dataloader_state.get("train_queue", []))
+                val_q_size = len(dataloader_state.get("val_queue", []))
+                logger.debug(
+                    f"Rank {self.rank}: Loaded dataloader state from {dataloader_path} "
+                    f"(train_queue={train_q_size}, val_queue={val_q_size})"
+                )
+            else:
+                logger.debug(f"Rank {self.rank}: Loaded legacy dataloader state from {dataloader_path}")
         else:
             logger.warning(f"Rank {self.rank}: Dataloader checkpoint not found at {dataloader_path}")

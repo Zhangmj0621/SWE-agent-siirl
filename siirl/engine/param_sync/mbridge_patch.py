@@ -1,7 +1,6 @@
 from collections.abc import Sequence
 
 import torch
-from loguru import logger
 from mbridge.core.bridge import Bridge
 from mbridge.core.util import unwrap_model
 
@@ -36,6 +35,7 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
 
     model_chunk_generator = get_model_chunk_generator()
     local_to_global_maps = [self._weight_name_mapping_mcore_local_to_global(model, consider_ep=False) for model in models]
+
     for _, iter_vpp_rank, iter_name in weights_names:
         local_to_global_map = local_to_global_maps[iter_vpp_rank]
         try:
@@ -67,7 +67,8 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
 
                 merge_params = self._weight_merge_across_tp(name, params, param)
                 converted_names, converted_params = self._weight_to_hf_format(name, merge_params)
-                yield from zip(converted_names, converted_params, strict=False)
+                for converted_name, converted_param in zip(converted_names, converted_params, strict=False):
+                    yield converted_name, converted_param
             continue
 
         # TP
@@ -83,9 +84,8 @@ def _export_weights_in_current_pipeline_stage(self: Bridge, models: Sequence[tor
             infer_params = param
 
         converted_names, converted_params = self._weight_to_hf_format(name, infer_params)
+        for converted_name, converted_param in zip(converted_names, converted_params, strict=False):
+            yield converted_name, converted_param
 
-        yield from zip(converted_names, converted_params, strict=False)
 
-
-logger.debug("patching mbridge with _export_weights_in_current_pipeline_stage")
 Bridge._export_weights_in_current_pipeline_stage = _export_weights_in_current_pipeline_stage

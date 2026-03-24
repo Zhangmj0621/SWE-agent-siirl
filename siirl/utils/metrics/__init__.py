@@ -43,6 +43,7 @@ from .metric_utils import (
 )
 from .metric_worker import MetricClient, MetricWorker
 from .utils import MaxMetric, MeanMetric, Metric, MetricFunc, MinMetric, StdMetric, StdStats, SumMetric
+from .weighted_metrics import restore_weighted_metrics
 
 __all__ = [
     # Data structures and aggregation functions
@@ -64,4 +65,5 @@ __all__ = [
     "compute_log_prob_diff_metrics",
     "extract_rollout_timing_metrics",
     "aggregate_validation_metrics",
+    "restore_weighted_metrics",
 ]

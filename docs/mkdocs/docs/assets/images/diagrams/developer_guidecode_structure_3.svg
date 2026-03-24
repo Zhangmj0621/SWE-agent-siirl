@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 490 720" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="490" height="720" fill="#fff"/>
+  <rect x="20" y="10" width="450" height="660" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="450" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="245" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Developer Guide > Code Structure (Fig. 3)</text>
+
+  <!-- Containers with header bars -->
+  <rect x="30" y="48" width="400" height="343" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <rect x="30" y="48" width="400" height="26" rx="2" fill="#FFECB3" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="230" y="66" text-anchor="middle" fill="#F57F17" font-size="13" font-weight="bold">AgentFlow Loading</text>
+
+  <rect x="30" y="410" width="300" height="250" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="30" y="410" width="300" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="180" y="428" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Three-Stage Protocol</text>
+
+  <!-- ====== Layer 1: All boxes ====== -->
+
+  <!-- AgentFlow Loading boxes (header bottom=74, 74+15=89, was 90 -> OK at 90) -->
+  <rect x="50" y="90" width="250" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="175" y="109" text-anchor="middle" fill="#424242" font-size="12">load_agentflow(config, model)</text>
+
+  <rect x="50" y="165" width="200" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="150" y="184" text-anchor="middle" fill="#424242" font-size="12">Import AgentFlow class</text>
+
+  <rect x="50" y="240" width="170" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="135" y="259" text-anchor="middle" fill="#424242" font-size="12">Instantiate agent</text>
+
+  <rect x="50" y="315" width="360" height="30" rx="1" fill="#FFFFFF" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="230" y="334" text-anchor="middle" fill="#424242" font-size="12">Inject preprocess_fn, generate_fn, reward_fn</text>
+
+  <!-- Three-Stage Protocol boxes (header bottom=436, 436+15=451, was 450 -> shift to 451) -->
+  <rect x="50" y="451" width="250" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="175" y="470" text-anchor="middle" fill="#424242" font-size="12">agent.preprocess(sample: dict)</text>
+
+  <rect x="50" y="526" width="250" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="175" y="545" text-anchor="middle" fill="#424242" font-size="12">agent.generate(sample: Sample)</text>
+
+  <rect x="50" y="601" width="250" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="175" y="620" text-anchor="middle" fill="#424242" font-size="12">agent.reward(sample: Sample)</text>
+
+  <!-- ====== Layer 2: All arrows + labels (orthogonal only) ====== -->
+
+  <!-- load_agentflow -> Import AgentFlow class (vertical) -->
+  <line x1="150" y1="120" x2="150" y2="165" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="112" y="134" width="76" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="150" y="144" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">dynamic import</text>
+
+  <!-- Import AgentFlow class -> Instantiate agent (vertical) -->
+  <line x1="135" y1="195" x2="135" y2="240" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="50" y="207" width="160" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="135" y="217" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">AgentFlowClass(config, model)</text>
+
+  <!-- Instantiate agent -> Inject methods (L-path: down then right) -->
+  <path d="M 135 270 L 135 295 L 230 295 L 230 315" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="112" y="284" width="100" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="170" y="294" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">MethodType injection</text>
+
+  <!-- Inject methods -> preprocess (L-path: down then left) -->
+  <path d="M 230 345 L 230 380 L 175 380 L 175 451" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- preprocess -> generate (vertical) -->
+  <line x1="175" y1="481" x2="175" y2="526" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="140" y="495" width="70" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="175" y="505" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">returns Sample</text>
+
+  <!-- generate -> reward (vertical) -->
+  <line x1="175" y1="556" x2="175" y2="601" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <rect x="87" y="570" width="150" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="175" y="580" text-anchor="middle" fill="#607D8B" font-size="9.5" font-style="italic">async inference + tool interaction</text>
+
+  <!-- Caption -->
+  <text x="245" y="705" text-anchor="middle" fill="#555" font-size="10">Figure 3: AgentFlow Loading and Three-Stage Protocol</text>
+</svg>

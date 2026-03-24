@@ -1,0 +1,184 @@
+/* =============================================================
+   siirl-agentic documentation — custom styles
+   Theme: sphinx-book-theme
+   ============================================================= */
+
+/* ------------------------------------------------------------------
+   1. Layout — full-width content area
+   ------------------------------------------------------------------ */
+.bd-page-width {
+  max-width: 1280px;
+}
+
+.bd-content .bd-article-container {
+  max-width: 900px;
+}
+
+/* Wider sidebar for deep nav trees */
+.bd-sidebar-primary {
+  min-width: 260px;
+  max-width: 300px;
+}
+
+/* ------------------------------------------------------------------
+   2. Typography
+   ------------------------------------------------------------------ */
+.bd-article h1 { font-size: 1.9rem; }
+.bd-article h2 { font-size: 1.45rem; }
+.bd-article h3 { font-size: 1.2rem; }
+
+/* Tighten paragraph spacing in dense reference pages */
+.bd-article p { margin-bottom: 0.75rem; }
+
+/* ------------------------------------------------------------------
+   3. Code blocks
+   ------------------------------------------------------------------ */
+/* Slightly larger font for inline code */
+code.literal {
+  font-size: 0.875em;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--pst-color-surface, #f6f8fa);
+  border: 1px solid var(--pst-color-border, #d0d7de);
+}
+
+/* Highlighted lines in code blocks */
+div.highlight .hll {
+  background-color: rgba(255, 213, 0, 0.15);
+}
+
+/* Copy button position fix */
+.copybtn {
+  top: 0.4rem !important;
+  right: 0.4rem !important;
+}
+
+/* ------------------------------------------------------------------
+   4. Tables
+   ------------------------------------------------------------------ */
+table.autosummary td {
+  width: 50%;
+}
+
+/* RST grid tables — zebra stripe */
+table.docutils tbody tr:nth-child(even) {
+  background: var(--pst-color-surface, #f6f8fa);
+}
+
+table.docutils th {
+  background: var(--pst-color-primary, #0969da);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------
+   5. Images
+   ------------------------------------------------------------------ */
+img.align-center {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+  max-width: 100%;
+}
+
+/* Architecture / flow diagrams */
+.mermaid {
+  text-align: center;
+  margin: 1.5rem 0;
+}
+
+/* ------------------------------------------------------------------
+   6. Admonitions — "Who this is for / What you will get" style
+   ------------------------------------------------------------------ */
+.admonition.note > .admonition-title {
+  background-color: var(--pst-color-primary, #0969da);
+}
+
+/* ------------------------------------------------------------------
+   7. Navigation bar — active section highlight
+   ------------------------------------------------------------------ */
+.bd-sidenav .current > a {
+  font-weight: 600;
+  color: var(--pst-color-primary, #0969da);
+}
+
+/* ------------------------------------------------------------------
+   8. Language toggle button
+   ------------------------------------------------------------------ */
+.lang-toggle-btn {
+  --lt-border:   var(--pst-color-border,      #d0d7de);
+  --lt-bg:       var(--pst-color-surface,     #f6f8fa);
+  --lt-bg-hover: var(--pst-color-on-surface,  #e6ebf1);
+  --lt-active:   var(--pst-color-primary,     #0969da);
+
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  line-height: 1.1;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: 1px solid var(--lt-border);
+  border-radius: 6px;
+  background: var(--lt-bg);
+  cursor: pointer;
+  gap: 2px;
+  letter-spacing: .5px;
+  transition: background 0.15s;
+}
+
+.lang-toggle-btn:hover {
+  background: var(--lt-bg-hover);
+}
+
+.lang-toggle-btn .lang-seg {
+  opacity: .55;
+  transition: opacity .15s;
+}
+
+.lang-toggle-btn[data-current="en"] .lang-seg[data-lang="en"],
+.lang-toggle-btn[data-current="zh"] .lang-seg[data-lang="zh"] {
+  opacity: 1;
+  color: var(--lt-active);
+}
+
+.lang-toggle-btn .lang-sep {
+  opacity: .35;
+}
+
+/* ------------------------------------------------------------------
+   9. Dark mode overrides
+   ------------------------------------------------------------------ */
+@media (prefers-color-scheme: dark) {
+  code.literal {
+    background: #1c2128;
+    border-color: #30363d;
+  }
+
+  table.docutils tbody tr:nth-child(even) {
+    background: #161b22;
+  }
+
+  .lang-toggle-btn {
+    --lt-border:   #30363d;
+    --lt-bg:       #161b22;
+    --lt-bg-hover: #1c2128;
+  }
+
+  .lang-toggle-btn .lang-seg {
+    color: #adbac7;
+  }
+}
+
+/* ------------------------------------------------------------------
+   10. Responsive — mobile
+   ------------------------------------------------------------------ */
+@media (max-width: 768px) {
+  .bd-content .bd-article-container {
+    max-width: 100%;
+    padding: 0 1rem;
+  }
+
+  .bd-sidebar-primary {
+    min-width: unset;
+  }
+}

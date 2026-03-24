@@ -1,0 +1,140 @@
+<svg width="100%" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 930 500" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/></marker>
+    <marker id="arr-g" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0.8, 7 3, 0 5.2" fill="#66BB6A"/></marker>
+    <marker id="arr-b" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0.8, 7 3, 0 5.2" fill="#42A5F5"/></marker>
+    <marker id="arr-a" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0.8, 7 3, 0 5.2" fill="#FFB300"/></marker>
+  </defs>
+  <rect width="840" height="500" fill="#fff"/>
+
+  <!-- Outer frame -->
+  <rect x="20" y="10" width="800" height="440" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="800" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="420" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Async Training Loop</text>
+
+  <!-- Timeline -->
+  <line x1="155" y1="52" x2="795" y2="52" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="100" y="56" text-anchor="middle" fill="#616161" font-size="10" font-weight="bold">Time →</text>
+
+  <!-- Swim lane backgrounds -->
+  <rect x="20" y="64" width="800" height="48" fill="#F5F9FF" stroke="none"/>
+  <rect x="20" y="112" width="800" height="48" fill="#FFFDF5" stroke="none"/>
+  <rect x="20" y="160" width="800" height="48" fill="#F5FFF5" stroke="none"/>
+  <rect x="20" y="208" width="800" height="48" fill="#FAFAFA" stroke="none"/>
+  <!-- Lane dividers -->
+  <line x1="20" y1="112" x2="820" y2="112" stroke="#EEEEEE" stroke-width="0.6"/>
+  <line x1="20" y1="160" x2="820" y2="160" stroke="#EEEEEE" stroke-width="0.6"/>
+  <line x1="20" y1="208" x2="820" y2="208" stroke="#EEEEEE" stroke-width="0.6"/>
+  <line x1="20" y1="256" x2="820" y2="256" stroke="#EEEEEE" stroke-width="0.6"/>
+
+  <!-- ====== LANE 1: RolloutManager (y=64..112) ====== -->
+  <rect x="28" y="76" width="118" height="24" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1"/>
+  <text x="87" y="92" text-anchor="middle" fill="#1565C0" font-size="10" font-weight="600">RolloutManager</text>
+  <!--                     batch 0: x=160..340        batch 1: x=345..525       batch 2: x=530..710 -->
+  <rect x="160" y="76" width="180" height="24" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="250" y="92" text-anchor="middle" fill="#1565C0" font-size="9.5">rollout batch 0</text>
+  <rect x="345" y="76" width="180" height="24" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="435" y="92" text-anchor="middle" fill="#1565C0" font-size="9.5">rollout batch 1</text>
+  <rect x="530" y="76" width="180" height="24" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="620" y="92" text-anchor="middle" fill="#1565C0" font-size="9.5">rollout batch 2</text>
+  <rect x="715" y="76" width="80" height="24" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="0.8" stroke-dasharray="4,2"/>
+  <text x="755" y="92" text-anchor="middle" fill="#1565C0" font-size="9.5">…</text>
+
+  <!-- ====== LANE 2: DataCoordinator (y=112..160) ====== -->
+  <rect x="28" y="124" width="118" height="24" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1"/>
+  <text x="87" y="140" text-anchor="middle" fill="#F57F17" font-size="10" font-weight="600">DataCoordinator</text>
+  <!--                     buffer: x=280..340  emit: x=345..395 | buffer: x=465..525  emit: x=530..580 | buffer: x=650..710  emit: x=715..765 -->
+  <rect x="280" y="124" width="60" height="24" rx="2" fill="#FFECB3" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="310" y="140" text-anchor="middle" fill="#F57F17" font-size="9">buffer</text>
+  <rect x="345" y="124" width="50" height="24" rx="2" fill="#FFE082" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="370" y="140" text-anchor="middle" fill="#F57F17" font-size="9">emit</text>
+  <rect x="465" y="124" width="60" height="24" rx="2" fill="#FFECB3" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="495" y="140" text-anchor="middle" fill="#F57F17" font-size="9">buffer</text>
+  <rect x="530" y="124" width="50" height="24" rx="2" fill="#FFE082" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="555" y="140" text-anchor="middle" fill="#F57F17" font-size="9">emit</text>
+  <rect x="650" y="124" width="60" height="24" rx="2" fill="#FFECB3" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="680" y="140" text-anchor="middle" fill="#F57F17" font-size="9">buffer</text>
+  <rect x="715" y="124" width="50" height="24" rx="2" fill="#FFE082" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="740" y="140" text-anchor="middle" fill="#F57F17" font-size="9">emit</text>
+
+  <!-- ====== LANE 3: TrainerGroup (y=160..208) ====== -->
+  <rect x="28" y="172" width="118" height="24" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1"/>
+  <text x="87" y="188" text-anchor="middle" fill="#2E7D32" font-size="10" font-weight="600">TrainerGroup</text>
+  <!--                     train 0: x=395..530       train 1: x=580..715 -->
+  <rect x="395" y="172" width="135" height="24" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="0.8"/>
+  <text x="462" y="188" text-anchor="middle" fill="#2E7D32" font-size="9.5">train step 0</text>
+  <rect x="580" y="172" width="135" height="24" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="0.8"/>
+  <text x="647" y="188" text-anchor="middle" fill="#2E7D32" font-size="9.5">train step 1</text>
+  <rect x="760" y="172" width="35" height="24" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="0.8" stroke-dasharray="4,2"/>
+  <text x="777" y="188" text-anchor="middle" fill="#2E7D32" font-size="9.5">…</text>
+
+  <!-- ====== LANE 4: Weight Sync (y=208..256) ====== -->
+  <rect x="28" y="220" width="118" height="24" rx="2" fill="#FFF" stroke="#A5D6A7" stroke-width="1"/>
+  <text x="87" y="236" text-anchor="middle" fill="#2E7D32" font-size="10" font-weight="600">Weight Sync</text>
+  <!--                     sync 0: x=530..560        sync 1: x=715..745 -->
+  <rect x="530" y="220" width="30" height="24" rx="2" fill="#A5D6A7" stroke="#66BB6A" stroke-width="0.8"/>
+  <text x="545" y="236" text-anchor="middle" fill="#FFF" font-size="9" font-weight="bold">↑</text>
+  <rect x="715" y="220" width="30" height="24" rx="2" fill="#A5D6A7" stroke="#66BB6A" stroke-width="0.8"/>
+  <text x="730" y="236" text-anchor="middle" fill="#FFF" font-size="9" font-weight="bold">↑</text>
+
+  <!-- ====== INTER-LANE ARROWS (ALL strictly vertical or horizontal) ====== -->
+
+  <!-- Rollout→DC: vertical at x=310 (batch 0 end area → buffer 0) -->
+  <line x1="310" y1="100" x2="310" y2="124" stroke="#42A5F5" stroke-width="1.1" marker-end="url(#arr-b)"/>
+  <!-- Rollout→DC: vertical at x=495 (batch 1 end area → buffer 1) -->
+  <line x1="495" y1="100" x2="495" y2="124" stroke="#42A5F5" stroke-width="1.1" marker-end="url(#arr-b)"/>
+  <!-- Rollout→DC: vertical at x=680 (batch 2 end area → buffer 2) -->
+  <line x1="680" y1="100" x2="680" y2="124" stroke="#42A5F5" stroke-width="1.1" marker-end="url(#arr-b)"/>
+
+  <!-- DC→Trainer: vertical at x=395 (emit 0 right edge = train 0 left edge) -->
+  <line x1="395" y1="148" x2="395" y2="172" stroke="#FFB300" stroke-width="1.1" marker-end="url(#arr-a)"/>
+  <!-- DC→Trainer: vertical at x=580 (emit 1 right edge = train 1 left edge) -->
+  <line x1="580" y1="148" x2="580" y2="172" stroke="#FFB300" stroke-width="1.1" marker-end="url(#arr-a)"/>
+
+  <!-- Trainer→Sync: orthogonal L from train end to sync start -->
+  <!-- train 0 end(530,184)→right(530,184) which is sync 0 x=530. Vertical down: -->
+  <line x1="530" y1="196" x2="530" y2="220" stroke="#66BB6A" stroke-width="1.1" marker-end="url(#arr-g)"/>
+  <!-- train 1 end(715,184)→sync 1 x=715 -->
+  <line x1="715" y1="196" x2="715" y2="220" stroke="#66BB6A" stroke-width="1.1" marker-end="url(#arr-g)"/>
+
+  <!-- Sync→Rollout: orthogonal route via right margin, avoiding sync 1 box and dashed block -->
+  <!-- sync 0: right(560,232)→down(560,252)→right(800,252)→up(800,64)→left(710,64)→down(710,76) -->
+  <path d="M 560 232 L 560 252 L 800 252 L 800 64 L 710 64 L 710 76" stroke="#66BB6A" stroke-width="1.2" fill="none" stroke-dasharray="4,3" marker-end="url(#arr-g)"/>
+  <text x="808" y="160" fill="#2E7D32" font-size="8.5" font-style="italic" transform="rotate(90,808,160)">push weights</text>
+
+  <!-- ====== KEY INSIGHT BOX (y=270..440) ====== -->
+  <rect x="30" y="270" width="780" height="170" rx="3" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="0.8"/>
+
+  <!-- Column 1: Async Rollout -->
+  <rect x="45" y="282" width="240" height="145" rx="2" fill="#E3F2FD" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="165" y="300" text-anchor="middle" fill="#1565C0" font-size="10.5" font-weight="bold">Asynchronous Rollout</text>
+  <text x="165" y="320" text-anchor="middle" fill="#424242" font-size="9.5">Rollout runs continuously</text>
+  <text x="165" y="335" text-anchor="middle" fill="#424242" font-size="9.5">without waiting for training.</text>
+  <text x="165" y="355" text-anchor="middle" fill="#424242" font-size="9.5">Maximizes GPU utilization</text>
+  <text x="165" y="370" text-anchor="middle" fill="#424242" font-size="9.5">on inference engines.</text>
+  <text x="165" y="395" text-anchor="middle" fill="#78909C" font-size="9" font-style="italic">off_policy_step controls</text>
+  <text x="165" y="410" text-anchor="middle" fill="#78909C" font-size="9" font-style="italic">staleness tolerance</text>
+
+  <!-- Column 2: Decoupled Buffering -->
+  <rect x="300" y="282" width="240" height="145" rx="2" fill="#FFF8E1" stroke="#FFE082" stroke-width="0.8"/>
+  <text x="420" y="300" text-anchor="middle" fill="#F57F17" font-size="10.5" font-weight="bold">Decoupled Buffering</text>
+  <text x="420" y="320" text-anchor="middle" fill="#424242" font-size="9.5">DataCoordinator buffers</text>
+  <text x="420" y="335" text-anchor="middle" fill="#424242" font-size="9.5">completed samples as</text>
+  <text x="420" y="355" text-anchor="middle" fill="#424242" font-size="9.5">Ray ObjectRefs. Training</text>
+  <text x="420" y="370" text-anchor="middle" fill="#424242" font-size="9.5">consumes at its own pace.</text>
+  <text x="420" y="395" text-anchor="middle" fill="#78909C" font-size="9" font-style="italic">SampleInfo metadata only,</text>
+  <text x="420" y="410" text-anchor="middle" fill="#78909C" font-size="9" font-style="italic">data stays in object store</text>
+
+  <!-- Column 3: Periodic Weight Sync -->
+  <rect x="555" y="282" width="240" height="145" rx="2" fill="#E8F5E9" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="675" y="300" text-anchor="middle" fill="#2E7D32" font-size="10.5" font-weight="bold">Periodic Weight Sync</text>
+  <text x="675" y="320" text-anchor="middle" fill="#424242" font-size="9.5">After each training step,</text>
+  <text x="675" y="335" text-anchor="middle" fill="#424242" font-size="9.5">updated actor weights are</text>
+  <text x="675" y="355" text-anchor="middle" fill="#424242" font-size="9.5">pushed to SGLang engines</text>
+  <text x="675" y="370" text-anchor="middle" fill="#424242" font-size="9.5">via param_sync module.</text>
+  <text x="675" y="395" text-anchor="middle" fill="#78909C" font-size="9" font-style="italic">Supports offload + colocate</text>
+  <text x="675" y="410" text-anchor="middle" fill="#78909C" font-size="9" font-style="italic">deployment modes</text>
+
+  <!-- Caption -->
+  <text x="420" y="482" text-anchor="middle" fill="#555" font-size="10">Figure 4: Async Pipeline Overlap</text>
+</svg>

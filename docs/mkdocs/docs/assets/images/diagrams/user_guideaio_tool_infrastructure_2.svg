@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 750 400" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="750" height="400" fill="#fff"/>
+  <rect x="20" y="10" width="710" height="340" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="710" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="375" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Tool Execution Sequence</text>
+
+  <!-- Participant boxes -->
+  <rect x="40" y="50" width="100" height="28" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="90" y="68" text-anchor="middle" fill="#1565C0" font-size="11" font-weight="600">LLM Agent</text>
+  <rect x="285" y="50" width="110" height="28" rx="2" fill="#FFF8E1" stroke="#FFD54F" stroke-width="1.2"/>
+  <text x="340" y="68" text-anchor="middle" fill="#F57F17" font-size="11" font-weight="600">AIO Proxy</text>
+  <rect x="535" y="50" width="110" height="28" rx="2" fill="#F3E5F5" stroke="#CE93D8" stroke-width="1.2"/>
+  <text x="590" y="68" text-anchor="middle" fill="#7B1FA2" font-size="11" font-weight="600">Tool Env</text>
+
+  <!-- Lifelines -->
+  <line x1="90" y1="78" x2="90" y2="320" stroke="#BDBDBD" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="340" y1="78" x2="340" y2="320" stroke="#BDBDBD" stroke-width="0.8" stroke-dasharray="4,4"/>
+  <line x1="590" y1="78" x2="590" y2="320" stroke="#BDBDBD" stroke-width="0.8" stroke-dasharray="4,4"/>
+
+  <!-- All arrows -->
+  <line x1="90" y1="110" x2="340" y2="110" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="340" y1="155" x2="590" y2="155" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="590" y1="236" x2="340" y2="236" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <line x1="340" y1="281" x2="90" y2="281" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Sandbox activity box -->
+  <rect x="560" y="176" width="120" height="28" rx="2" fill="#FFFDE7" stroke="#FDD835" stroke-width="0.8"/>
+  <text x="620" y="194" text-anchor="middle" fill="#6D4C00" font-size="10">Execute in sandbox</text>
+
+  <!-- All labels with white bg rects -->
+  <rect x="160" y="97" width="100" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="210" y="107" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">tool_call(name, args)</text>
+
+  <rect x="428" y="142" width="50" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="453" y="152" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">dispatch()</text>
+
+  <rect x="440" y="223" width="32" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="456" y="233" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">result</text>
+
+  <rect x="182" y="268" width="46" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="205" y="278" text-anchor="middle" fill="#607D8B" font-size="9" font-style="italic">response</text>
+
+  <!-- Caption -->
+  <text x="375" y="385" text-anchor="middle" fill="#555" font-size="10">Figure 2: How tool calls are processed</text>
+</svg>

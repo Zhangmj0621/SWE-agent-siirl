@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 700" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="500" height="700" fill="#fff"/>
+  <rect x="20" y="10" width="460" height="640" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="460" height="32" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="250" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">PPO Training Pipeline</text>
+
+  <!-- ====== Layer 1: All containers and boxes ====== -->
+
+  <!-- Rollout Phase container -->
+  <rect x="30" y="55" width="440" height="140" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="30" y="55" width="440" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="250" y="73" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Rollout Phase</text>
+
+  <!-- Forward Pass container -->
+  <rect x="30" y="220" width="440" height="160" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2"/>
+  <rect x="30" y="220" width="440" height="26" rx="2" fill="#EEEEEE" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="250" y="238" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Forward Pass (3 Models)</text>
+
+  <!-- Policy & Value Update container -->
+  <rect x="30" y="400" width="440" height="160" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <rect x="30" y="400" width="440" height="26" rx="2" fill="#C8E6C9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="250" y="418" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">Policy &amp; Value Update</text>
+
+  <!-- Rollout Phase sub-components -->
+  <rect x="50" y="100" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="120" y="119" text-anchor="middle" fill="#424242" font-size="12">RolloutManager</text>
+
+  <rect x="220" y="100" width="160" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="300" y="119" text-anchor="middle" fill="#424242" font-size="12">Completed Samples</text>
+
+  <!-- Forward Pass sub-components: 3 boxes evenly distributed
+       Container inner: x=50..450, span=400, 3 boxes w=120, gap=(400-360)/2=20 -->
+  <rect x="50" y="265" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="110" y="284" text-anchor="middle" fill="#424242" font-size="12">Actor Forward</text>
+
+  <rect x="190" y="265" width="110" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="245" y="284" text-anchor="middle" fill="#424242" font-size="12">Ref Forward</text>
+
+  <rect x="320" y="265" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="380" y="284" text-anchor="middle" fill="#424242" font-size="12">Critic Forward</text>
+
+  <!-- GAE Computation -->
+  <rect x="150" y="320" width="150" height="30" rx="1" fill="#FFFFFF" stroke="#81C784" stroke-width="0.8"/>
+  <text x="225" y="339" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">GAE Computation</text>
+
+  <!-- Policy Update sub-components: 3 boxes evenly distributed
+       Container inner: x=50..450, span=400, 3 boxes w=120, gap=(400-360)/2=20
+       Positions: 50, 190, 330 -->
+  <rect x="50" y="445" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="110" y="464" text-anchor="middle" fill="#424242" font-size="12">Actor Loss</text>
+
+  <rect x="190" y="445" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="250" y="464" text-anchor="middle" fill="#424242" font-size="12">Critic Loss</text>
+
+  <rect x="330" y="445" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="390" y="464" text-anchor="middle" fill="#424242" font-size="12">Backward</text>
+
+  <!-- Param Sync -->
+  <rect x="150" y="510" width="150" height="30" rx="1" fill="#FFFFFF" stroke="#FFB74D" stroke-width="0.8"/>
+  <text x="225" y="529" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Param Sync</text>
+
+  <!-- ====== Layer 2: All arrows (strictly orthogonal) ====== -->
+
+  <!-- RolloutManager -> Completed Samples -->
+  <line x1="190" y1="115" x2="220" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Completed Samples -> Actor Forward: L-shape down then left -->
+  <path d="M 300 130 L 300 250 L 110 250 L 110 265" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Actor Forward -> GAE: down then right -->
+  <path d="M 110 295 L 110 335 L 150 335" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Ref Forward -> GAE: straight down -->
+  <path d="M 245 295 L 245 335 L 300 335" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Critic Forward -> GAE: down then left -->
+  <path d="M 380 295 L 380 335 L 300 335" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- GAE -> Actor Loss: down then left -->
+  <path d="M 175 350 L 175 430 L 110 430 L 110 445" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- GAE -> Critic Loss: down then right -->
+  <path d="M 275 350 L 275 430 L 250 430 L 250 445" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Actor Loss -> Backward -->
+  <line x1="170" y1="460" x2="330" y2="460" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Critic Loss -> Backward (overlaps above arrow, acceptable) -->
+  <line x1="310" y1="460" x2="330" y2="460" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Backward -> Param Sync: down then left -->
+  <path d="M 390 475 L 390 495 L 225 495 L 225 510" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="250" y="685" text-anchor="middle" fill="#555" font-size="10">Figure 1: Proximal Policy Optimization workflow</text>
+</svg>

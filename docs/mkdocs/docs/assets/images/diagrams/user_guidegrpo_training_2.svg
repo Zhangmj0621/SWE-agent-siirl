@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 280" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="700" height="280" fill="#fff"/>
+  <rect x="20" y="10" width="660" height="220" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="660" height="32" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="350" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">GRPO Advantage Calculation</text>
+
+  <!-- ====== Layer 1: All component boxes ====== -->
+  <!-- Evenly distribute 4 boxes across inner width (x=40..660, available=620)
+       All boxes w=125, total=500
+       Gaps: (620 - 500) / 3 = 40px
+       Positions: 40, 205, 370, 535 -->
+  <rect x="40" y="100" width="125" height="30" rx="1" fill="#FFFFFF" stroke="#FFD54F" stroke-width="0.8"/>
+  <text x="102.5" y="119" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">Group Rewards</text>
+
+  <rect x="205" y="100" width="125" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="267.5" y="119" text-anchor="middle" fill="#424242" font-size="12">Mean (u)</text>
+
+  <rect x="370" y="100" width="125" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="432.5" y="119" text-anchor="middle" fill="#424242" font-size="12">Std (s)</text>
+
+  <rect x="535" y="100" width="125" height="30" rx="1" fill="#FFFFFF" stroke="#FFB74D" stroke-width="0.8"/>
+  <text x="597.5" y="119" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">A_i = (r_i - u) / s</text>
+
+  <!-- ====== Layer 2: All arrows + labels ====== -->
+  <!-- Group Rewards -> Mean -->
+  <line x1="165" y1="115" x2="205" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Group Rewards -> Std (overlaps Mean box; use L-shape to go above) -->
+  <path d="M 165 105 L 165 85 L 432.5 85 L 432.5 100" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+
+  <!-- Mean -> A_i formula -->
+  <line x1="330" y1="115" x2="535" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Std -> A_i formula -->
+  <line x1="495" y1="115" x2="535" y2="115" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Caption -->
+  <text x="350" y="265" text-anchor="middle" fill="#555" font-size="10">Figure 2: How group-relative advantages are computed</text>
+</svg>

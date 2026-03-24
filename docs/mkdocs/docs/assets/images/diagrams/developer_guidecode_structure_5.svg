@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 991 420" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="991" height="420" fill="#fff"/>
+  <rect x="20" y="10" width="951" height="360" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="951" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="496" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Developer Guide > Code Structure (Fig. 5)</text>
+
+  <!-- Layer 1: All boxes -->
+  <!-- Extension Points container with header bar (top row) -->
+  <rect x="24" y="48" width="903" height="100" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="24" y="48" width="903" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="476" y="66" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">Extension Points</text>
+
+  <!-- 5 extension boxes evenly distributed: container inner=44..907, span=863, 5 boxes w=148, gap=(863-740)/4=30.75 -->
+  <rect x="44" y="90" width="148" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="118" y="109" text-anchor="middle" fill="#424242" font-size="12">New AgentFlow</text>
+  <rect x="222" y="90" width="148" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="296" y="109" text-anchor="middle" fill="#424242" font-size="12">New ToolEnv</text>
+  <rect x="401" y="90" width="148" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="475" y="109" text-anchor="middle" fill="#424242" font-size="12">New Reward Fn</text>
+  <rect x="579" y="90" width="148" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="653" y="109" text-anchor="middle" fill="#424242" font-size="12">New ToolParser</text>
+  <rect x="758" y="90" width="148" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="832" y="109" text-anchor="middle" fill="#424242" font-size="12">New Algorithm</text>
+
+  <!-- siirl-agentic Core container with header bar (bottom row) -->
+  <rect x="24" y="195" width="500" height="100" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="24" y="195" width="500" height="26" rx="2" fill="#BBDEFB" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="274" y="213" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">siirl-agentic Core</text>
+
+  <!-- 3 core boxes (header bottom=221, 221+15=236, was 235 -> shift to 236) -->
+  <rect x="44" y="236" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="114" y="255" text-anchor="middle" fill="#424242" font-size="12">DataCoordinator</text>
+  <rect x="204" y="236" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="274" y="255" text-anchor="middle" fill="#424242" font-size="12">RolloutManager</text>
+  <rect x="364" y="236" width="140" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="434" y="255" text-anchor="middle" fill="#424242" font-size="12">TrainerGroup</text>
+
+  <!-- Layer 2: All arrows + labels (orthogonal L-shape paths) -->
+  <!-- New AgentFlow → RolloutManager -->
+  <rect x="102" y="155" width="46" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 118 120 L 118 170 L 274 170 L 274 236" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="125" y="165" fill="#607D8B" font-size="9" font-style="italic">plugs into</text>
+
+  <!-- New ToolEnv → RolloutManager -->
+  <rect x="270" y="155" width="46" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 296 120 L 296 170 L 274 170 L 274 236" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="293" y="165" fill="#607D8B" font-size="9" font-style="italic">plugs into</text>
+
+  <!-- New Reward Fn → RolloutManager -->
+  <rect x="372" y="155" width="46" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 475 120 L 475 170 L 274 170 L 274 236" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="395" y="165" fill="#607D8B" font-size="9" font-style="italic">plugs into</text>
+
+  <!-- New ToolParser → RolloutManager -->
+  <rect x="554" y="155" width="46" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 653 120 L 653 170 L 274 170 L 274 236" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="577" y="165" fill="#607D8B" font-size="9" font-style="italic">plugs into</text>
+
+  <!-- New Algorithm → TrainerGroup -->
+  <rect x="744" y="155" width="46" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 832 120 L 832 170 L 434 170 L 434 236" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="767" y="165" fill="#607D8B" font-size="9" font-style="italic">plugs into</text>
+
+  <!-- Caption -->
+  <text x="496" y="405" text-anchor="middle" fill="#555" font-size="10">Figure 5: Extension Points and Core Component Mapping</text>
+</svg>

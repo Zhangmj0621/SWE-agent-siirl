@@ -63,7 +63,7 @@ class TrainingArguments:
     max_critic_ckpt_to_keep: int = field(default=100, metadata={"help": "Maximum number of critic ckpts."})
     validation_data_dir: str | None = field(default=None, metadata={"help": "Validation data directory."})
     device: str | None = field(default="cuda", metadata={"help": "Training device."})
-    async_factor: int = field(default=1, metadata={"help": "Control async speed"})
+    async_factor: float = field(default=1, metadata={"help": "Control async speed"})
     param_sync_buffer_size: int = field(
         default=512 * 1024**2,
         metadata={
@@ -86,11 +86,33 @@ class TrainingArguments:
     )
 
     # === Resource Allocation Configuration ===
-    actor_gpus: int = field(default=2, metadata={"help": "Number of GPUs for training (Actor/Ref/Critic)"})
-    rollout_gpus: int = field(default=6, metadata={"help": "Number of GPUs for rollout/inference"})
+    actor_gpus: int = field(
+        default=2,
+        metadata={"help": "Separated mode only. GPUs for training (Actor/Ref/Critic); ignored when trainer.colocate=True"},
+    )
+    rollout_gpus: int = field(
+        default=6,
+        metadata={"help": "Separated mode only. GPUs for rollout/inference; ignored when trainer.colocate=True"},
+    )
     colocate: bool = field(
         default=False,
         metadata={"help": "Share GPUs between training and rollout (colocated mode)"},
+    )
+    validate_reuse_train_gpus: bool = field(
+        default=False,
+        metadata={"help": "Reuse training GPUs to scale validation in separated mode"},
+    )
+    validate_reuse_begin_timeout_s: int = field(
+        default=30,
+        metadata={"help": "Timeout in seconds for trainer ranks to rendezvous before validate-reuse sync"},
+    )
+    param_sync_rpc_timeout_s: int = field(
+        default=120,
+        metadata={"help": "Timeout in seconds for param sync RPC calls to rollout workers"},
+    )
+    colocate_timeout_s: int = field(
+        default=60,
+        metadata={"help": "Ray-level timeout for colocated offload/resume lifecycle operations"},
     )
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
     pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
@@ -99,6 +121,12 @@ class TrainingArguments:
     expert_tensor_parallel_size: int = field(default=1, metadata={"help": "Expert tensor parallelism size"})
     virtual_pipeline_model_parallel_size: int | None = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
     sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
+
+    # === Colocated Param Sync Configuration ===
+    colocate_flattened_fail_fast: bool = field(
+        default=True,
+        metadata={"help": "Fail fast when flattened_bucket sync fails in colocated mode (no auto fallback to tensor)"},
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

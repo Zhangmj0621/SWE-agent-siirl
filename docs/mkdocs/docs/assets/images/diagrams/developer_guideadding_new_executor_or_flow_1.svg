@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 600" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="780" height="600" fill="#fff"/>
+  <rect x="20" y="10" width="740" height="540" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="740" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="390" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Developer Guide > Adding New Executor Or Flow (Fig. 1)</text>
+
+  <!-- Layer 1: All class boxes -->
+
+  <!-- AgentFlow box -->
+  <rect x="40" y="60" width="200" height="102" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="40" y="60" width="200" height="24" rx="2" fill="#64B5F6" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="140" y="76" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="bold">AgentFlow</text>
+  <text x="50" y="90" fill="#424242" font-size="10.5">&lt;&lt;Protocol&gt;&gt;</text>
+  <line x1="40" y1="104" x2="240" y2="104" stroke="#90CAF9" stroke-width="0.5"/>
+  <text x="50" y="112" fill="#424242" font-size="10.5">preprocess(sample: dict) Sample</text>
+  <text x="50" y="130" fill="#424242" font-size="10.5">generate(sample: Sample)*</text>
+  <text x="50" y="148" fill="#424242" font-size="10.5">reward(sample: Sample)*</text>
+
+  <!-- Sample box -->
+  <rect x="280" y="60" width="200" height="198" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="280" y="60" width="200" height="24" rx="2" fill="#64B5F6" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="380" y="76" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="bold">Sample</text>
+  <text x="290" y="90" fill="#424242" font-size="10.5">m: AgentMeta</text>
+  <text x="290" y="108" fill="#424242" font-size="10.5">model: Model</text>
+  <text x="290" y="126" fill="#424242" font-size="10.5">status: Status</text>
+  <text x="290" y="144" fill="#424242" font-size="10.5">tokens: list~int~</text>
+  <text x="290" y="162" fill="#424242" font-size="10.5">loss_mask: list~int~</text>
+  <text x="290" y="180" fill="#424242" font-size="10.5">rollout_log_probs: list~float~</text>
+  <text x="290" y="198" fill="#424242" font-size="10.5">conversations: list~dict~</text>
+  <text x="290" y="216" fill="#424242" font-size="10.5">reward: float | None</text>
+  <line x1="280" y1="230" x2="480" y2="230" stroke="#90CAF9" stroke-width="0.5"/>
+  <text x="290" y="238" fill="#424242" font-size="10.5">append_input_tokens(tokens)</text>
+  <text x="290" y="256" fill="#424242" font-size="10.5">add_message(role, content)</text>
+
+  <!-- Model box -->
+  <rect x="520" y="60" width="200" height="70" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="520" y="60" width="200" height="24" rx="2" fill="#64B5F6" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="620" y="76" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="bold">Model</text>
+  <text x="530" y="90" fill="#424242" font-size="10.5">tokenizer: Tokenizer</text>
+  <line x1="520" y1="104" x2="720" y2="104" stroke="#90CAF9" stroke-width="0.5"/>
+  <text x="530" y="112" fill="#424242" font-size="10.5">query(input_tokens, messages) ModelResponse</text>
+
+  <!-- Status box -->
+  <rect x="40" y="300" width="200" height="150" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <rect x="40" y="300" width="200" height="24" rx="2" fill="#64B5F6" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="140" y="316" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="bold">Status</text>
+  <text x="50" y="330" fill="#424242" font-size="10.5">&lt;&lt;enumeration&gt;&gt;</text>
+  <text x="50" y="348" fill="#424242" font-size="10.5">PENDING</text>
+  <text x="50" y="366" fill="#424242" font-size="10.5">ROLLEDOUT</text>
+  <text x="50" y="384" fill="#424242" font-size="10.5">COMPLETED</text>
+  <text x="50" y="402" fill="#424242" font-size="10.5">TRUNCATED</text>
+  <text x="50" y="420" fill="#424242" font-size="10.5">ABORTED</text>
+  <text x="50" y="438" fill="#424242" font-size="10.5">FAILED</text>
+
+  <!-- Layer 2: All arrows + labels (orthogonal paths, with bg rects) -->
+
+  <!-- AgentFlow -> Sample: "produces & consumes" (L-path: right from AgentFlow bottom, then up to Sample top) -->
+  <path d="M 240 120 L 260 120 L 260 72 L 280 72" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="233" y="88" width="110" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="260" y="98" fill="#607D8B" font-size="10" font-style="italic">produces &amp; consumes</text>
+
+  <!-- AgentFlow -> Model: "uses for inference" (L-path: right from AgentFlow, then up to Model) -->
+  <path d="M 240 140 L 500 140 L 500 72 L 520 72" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="330" y="131" width="96" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="378" y="141" text-anchor="middle" fill="#607D8B" font-size="10" font-style="italic">uses for inference</text>
+
+  <!-- Sample -> Status: "tracks lifecycle" (vertical down from Sample to Status) -->
+  <path d="M 280 258 L 260 258 L 260 320 L 240 320" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="232" y="278" width="80" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="260" y="288" fill="#607D8B" font-size="10" font-style="italic">tracks lifecycle</text>
+
+  <!-- Sample -> Model: "holds reference" (horizontal right from Sample, then up) -->
+  <path d="M 480 120 L 500 120 L 500 90 L 520 90" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <rect x="480" y="96" width="80" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <text x="500" y="106" fill="#607D8B" font-size="10" font-style="italic">holds reference</text>
+
+  <!-- Caption -->
+  <text x="390" y="585" text-anchor="middle" fill="#555" font-size="10">Figure 1: AgentFlow Protocol and Core Data Classes</text>
+</svg>

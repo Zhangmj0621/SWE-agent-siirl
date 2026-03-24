@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+    <marker id="arr-dash" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#90A4AE"/>
+    </marker>
+    <marker id="seq-arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="900" height="420" fill="#fff"/>
+  <rect x="20" y="10" width="860" height="360" rx="0" fill="none" stroke="#333333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="860" height="32" rx="0" fill="#F8F9FA" stroke="#333333" stroke-width="1.5"/>
+  <text x="450.0" y="31" text-anchor="middle" fill="#222" font-size="14" font-weight="bold" letter-spacing="0.3">Configuration Parsing Pipeline</text>
+  <rect x="40" y="52" width="200" height="80" rx="2" fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1.2"/>
+  <text x="140.0" y="68" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">CLI Input</text>
+  <rect x="290" y="52" width="260" height="120" rx="2" fill="#E3F2FD" stroke="#64B5F6" stroke-width="1.2"/>
+  <text x="420.0" y="68" text-anchor="middle" fill="#1565C0" font-size="13" font-weight="bold">Config Parsing</text>
+  <rect x="600" y="52" width="270" height="320" rx="2" fill="#E8F5E9" stroke="#81C784" stroke-width="1.2"/>
+  <text x="735.0" y="68" text-anchor="middle" fill="#2E7D32" font-size="13" font-weight="bold">SiiRLArguments</text>
+  <rect x="56" y="94" width="168" height="30" rx="1" fill="#FFFFFF" stroke="#BDBDBD" stroke-width="0.8"/>
+  <text x="140.0" y="113.0" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">CLI args (dot-notation)</text>
+  <rect x="306" y="94" width="228" height="30" rx="1" fill="#FFFFFF" stroke="#64B5F6" stroke-width="0.8"/>
+  <text x="420.0" y="113.0" text-anchor="middle" fill="#424242" font-size="12.5" font-weight="600">parser.py</text>
+  <rect x="306" y="134" width="228" height="30" rx="1" fill="#FFFFFF" stroke="#90CAF9" stroke-width="0.8"/>
+  <text x="420.0" y="153.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">argparse + OmegaConf.from_cli()</text>
+  <rect x="616" y="94" width="238" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="735.0" y="113.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">.data: DataArguments</text>
+  <rect x="616" y="134" width="238" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="735.0" y="153.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">.actor_ref: ActorRefArguments</text>
+  <rect x="616" y="174" width="238" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="735.0" y="193.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">.rollout: RolloutArguments</text>
+  <rect x="616" y="214" width="238" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="735.0" y="233.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">.critic: CriticArguments</text>
+  <rect x="616" y="254" width="238" height="30" rx="1" fill="#FFFFFF" stroke="#A5D6A7" stroke-width="0.8"/>
+  <text x="735.0" y="273.0" text-anchor="middle" fill="#424242" font-size="12" font-weight="normal">.trainer: TrainingArguments</text>
+  <line x1="224" y1="109.0" x2="306" y2="109.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="265.0" y="103.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">key=value pairs</text>
+  <line x1="420.0" y1="124" x2="420.0" y2="134" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="420.0" y="123.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">parse &amp; merge</text>
+  <line x1="534" y1="149.0" x2="616" y2="109.0" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="575.0" y="123.0" text-anchor="middle" fill="#607D8B" font-size="10.5" font-style="italic">recursive dataclass</text>
+  <path d="M534,149.0 L580,148 L616,149.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M534,149.0 L580,188 L616,189.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M534,149.0 L580,228 L616,229.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <path d="M534,149.0 L580,268 L616,269.0" fill="none" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="450.0" y="405" text-anchor="middle" fill="#555" font-size="10">Figure 4: Config Parsing Pipeline</text>
+</svg>

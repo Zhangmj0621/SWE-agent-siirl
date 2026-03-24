@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 1145" font-family="Helvetica, 'Helvetica Neue', Arial, sans-serif" text-rendering="optimizeLegibility">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0.8, 7 3, 0 5.2" fill="#78909C"/>
+    </marker>
+  </defs>
+  <rect width="480" height="1145" fill="#fff"/>
+  <rect x="20" y="10" width="440" height="1085" rx="0" fill="none" stroke="#333" stroke-width="1.5"/>
+  <rect x="20" y="10" width="440" height="28" rx="0" fill="#F8F9FA" stroke="#333" stroke-width="1.5"/>
+  <text x="240" y="29" text-anchor="middle" fill="#222" font-size="13" font-weight="bold" letter-spacing="0.3">Developer Guide > Contributing (Fig. 1)</text>
+
+  <!-- Layer 1: All containers and boxes -->
+  <!-- Phase 1: Prepare with header bar -->
+  <rect x="24" y="48" width="314" height="172" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="24" y="48" width="314" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="181" y="66" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">1. Prepare</text>
+  <!-- header bottom=74, 74+15=89, was 85 -> shift to 89 -->
+  <rect x="40" y="89" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="108" text-anchor="middle" fill="#424242" font-size="12">Fork repository</text>
+  <rect x="40" y="139" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="158" text-anchor="middle" fill="#424242" font-size="12">Create feature branch from master</text>
+  <rect x="40" y="189" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="208" text-anchor="middle" fill="#424242" font-size="12">Implement changes</text>
+
+  <!-- Phase 2: Validate with header bar -->
+  <rect x="24" y="248" width="314" height="192" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="24" y="248" width="314" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="181" y="266" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">2. Validate</text>
+  <!-- header bottom=274, 274+15=289 -->
+  <rect x="40" y="289" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="308" text-anchor="middle" fill="#424242" font-size="12">Run pre-commit hooks</text>
+  <rect x="40" y="339" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="358" text-anchor="middle" fill="#424242" font-size="12">Run pytest</text>
+  <rect x="40" y="389" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="408" text-anchor="middle" fill="#424242" font-size="12">Update documentation</text>
+
+  <!-- Phase 3: Submit with header bar -->
+  <rect x="24" y="468" width="314" height="192" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="24" y="468" width="314" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="181" y="486" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">3. Submit</text>
+  <!-- header bottom=494, 494+15=509 -->
+  <rect x="40" y="509" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="528" text-anchor="middle" fill="#424242" font-size="12">Write clear commit message</text>
+  <rect x="40" y="559" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="578" text-anchor="middle" fill="#424242" font-size="12">Push to fork</text>
+  <rect x="40" y="609" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="628" text-anchor="middle" fill="#424242" font-size="12">Open Pull Request</text>
+
+  <!-- Phase 4: Review with header bar -->
+  <rect x="24" y="668" width="392" height="380" rx="2" fill="#FAFAFA" stroke="#E0E0E0" stroke-width="1.2"/>
+  <rect x="24" y="668" width="392" height="26" rx="2" fill="#F0F0F0" stroke="#E0E0E0" stroke-width="1.2"/>
+  <text x="220" y="686" text-anchor="middle" fill="#616161" font-size="13" font-weight="bold">4. Review</text>
+  <!-- header bottom=694, 694+15=709 -->
+  <rect x="40" y="709" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="728" text-anchor="middle" fill="#424242" font-size="12">Automated checks pass</text>
+  <rect x="40" y="759" width="282" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="181" y="778" text-anchor="middle" fill="#424242" font-size="12">Code review by maintainer</text>
+
+  <!-- Decision diamond -->
+  <polygon points="181,824 266,884 181,944 96,884" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="1"/>
+  <text x="181" y="888" text-anchor="middle" fill="#424242" font-size="10.5">Changes requested?</text>
+
+  <rect x="280" y="964" width="120" height="30" rx="1" fill="#FFFFFF" stroke="#E0E0E0" stroke-width="0.8"/>
+  <text x="340" y="983" text-anchor="middle" fill="#424242" font-size="12">Merge to master</text>
+
+  <!-- Layer 2: All arrows + labels (all strictly vertical) -->
+  <!-- Fork → Branch -->
+  <rect x="162" y="120" width="40" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="181" y1="119" x2="181" y2="139" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="182" y="130" fill="#607D8B" font-size="8.5" font-style="italic">git fork</text>
+
+  <!-- Branch → Implement -->
+  <line x1="181" y1="169" x2="181" y2="189" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Implement → pre-commit -->
+  <rect x="155" y="227" width="52" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="181" y1="219" x2="181" y2="289" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="181" y="237" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">code ready</text>
+
+  <!-- pre-commit → pytest -->
+  <rect x="157" y="323" width="46" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="181" y1="319" x2="181" y2="339" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="180" y="333" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">all pass</text>
+
+  <!-- pytest → docs -->
+  <rect x="155" y="373" width="52" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="181" y1="369" x2="181" y2="389" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="181" y="383" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">tests pass</text>
+
+  <!-- docs → commit msg -->
+  <rect x="149" y="449" width="64" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="181" y1="419" x2="181" y2="509" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="181" y="459" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">docs updated</text>
+
+  <!-- commit msg → push -->
+  <line x1="181" y1="539" x2="181" y2="559" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- push → PR -->
+  <line x1="181" y1="589" x2="181" y2="609" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- PR → checks -->
+  <rect x="155" y="649" width="52" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <line x1="181" y1="639" x2="181" y2="709" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="181" y="659" text-anchor="middle" fill="#607D8B" font-size="8.5" font-style="italic">PR created</text>
+
+  <!-- checks → review -->
+  <line x1="181" y1="739" x2="181" y2="759" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- review → decision -->
+  <line x1="181" y1="789" x2="181" y2="824" stroke="#78909C" stroke-width="1.2" marker-end="url(#arr)"/>
+
+  <!-- Decision: Yes (changes requested) → loop back to Implement -->
+  <rect x="62" y="944" width="20" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 96 884 L 60 884 L 60 208 L 40 208" stroke="#78909C" stroke-width="1.2" fill="none" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+  <text x="72" y="954" fill="#607D8B" font-size="9" font-style="italic">Yes</text>
+
+  <!-- Decision: No → Merge -->
+  <rect x="230" y="954" width="50" height="13" rx="1" fill="#fff" fill-opacity="0.9"/>
+  <path d="M 266 884 L 340 884 L 340 964" stroke="#78909C" stroke-width="1.2" fill="none" marker-end="url(#arr)"/>
+  <text x="255" y="964" fill="#607D8B" font-size="9" font-style="italic">No: approved</text>
+
+  <!-- Caption -->
+  <text x="240" y="1130" text-anchor="middle" fill="#555" font-size="10">Figure 1: Contributing Workflow</text>
+</svg>

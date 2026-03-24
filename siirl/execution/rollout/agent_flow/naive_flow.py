@@ -59,7 +59,13 @@ class NaiveFlow:
                 self.env.tool_parser = ToolParser.get_tool_parser(tool_format, self.engine.tokenizer)
                 self.env.tool_parser_name = tool_format
 
-    async def __call__(self, sample: Sample, reward_fn=None, is_validate=False):
+    async def __call__(
+        self,
+        sample: Sample,
+        reward_fn=None,
+        is_validate=False,
+        request_seed: int | None = None,
+    ):
         """
         Naive rollout flow implementation for single-turn text generation and reward calculation.
         Generates response from prompt using inference engine, creates response mask, and computes reward score.
@@ -79,13 +85,17 @@ class NaiveFlow:
 
         # Generate response and log probabilities from prompt using inference engine
         loop = asyncio.get_event_loop()
-        agent_data = AgentData(raw_prompt=sample.raw_prompt.tolist())
+        agent_data = AgentData(raw_prompt=sample.raw_prompt.tolist(), ground_truth=sample.reward_model["ground_truth"])
         while agent_data.state != AgentState.TERMINATED:
             if agent_data.state == AgentState.PENDING:
                 agent_data.state = await self._handle_pending_state(agent_data, loop)
             elif agent_data.state == AgentState.GENERATING:
                 gen_start = time.time()
-                agent_data.state = await self._handle_generating_state(agent_data, is_validate)
+                agent_data.state = await self._handle_generating_state(
+                    agent_data,
+                    is_validate,
+                    request_seed=request_seed,
+                )
                 generation_duration += time.time() - gen_start
             elif agent_data.state == AgentState.PROCESSING_ENV:
                 agent_data.state = await self._handle_processing_envs_state(agent_data, loop)
@@ -138,7 +148,7 @@ class NaiveFlow:
         reward_start = time.time()
 
         if agent_data.env_rewards:
-            sample.rewards = sum(agent_data.env_rewards)
+            sample.rewards = agent_data.env_rewards[-1]
         else:
             # Extract metadata for reward calculation
             data_source = sample.data_source  # Source/type of the sample data
@@ -231,7 +241,7 @@ class NaiveFlow:
             tool_args = json.loads(tool_call.arguments)
             tool = self.env.env_name[tool_name]
             kwargs = tools_kwargs.get(tool_name, {})
-            instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}))
+            instance_id, _ = await tool.create(create_kwargs=kwargs.get("create_kwargs", {}), ground_truth=tools_kwargs.get("ground_truth"))
             action = {"instance_id": instance_id, **tool_args}
             env_response: EnvResponse = await tool.step(action)
         except Exception as e:
@@ -256,9 +266,17 @@ class NaiveFlow:
         env_response.text = env_response_text
         return env_response
 
-    async def _handle_generating_state(self, agent_data: AgentData, is_validate=False):
+    async def _handle_generating_state(
+        self,
+        agent_data: AgentData,
+        is_validate=False,
+        request_seed: int | None = None,
+    ):
         _, response_ids, rollout_log_prob, routed_experts = await self.engine.generate(
-            agent_data.prompts_ids, is_validate, use_router=self.use_router,
+            agent_data.prompts_ids,
+            is_validate,
+            use_router=self.use_router,
+            request_seed=request_seed,
             return_routed_experts=self._return_routed_experts,
         )
         agent_data.response_ids = response_ids
@@ -275,7 +293,6 @@ class NaiveFlow:
             return AgentState.TERMINATED
         if self.max_env_turns and agent_data.env_turns >= self.max_env_turns:
             return AgentState.TERMINATED
-
         if self.multiturn_config.env_type == "tool_env" and self.env:
             _, agent_data.env_calls = await self.env.tool_parser.extract_tool_calls(agent_data.response_ids)
             if agent_data.env_calls:
