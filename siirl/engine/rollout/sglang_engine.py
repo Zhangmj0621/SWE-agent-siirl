@@ -306,17 +306,6 @@ class SglangEngine:
         )
         return int(limits["effective"])
 
-    def _resolve_batch_concurrency(self, use_router: bool) -> int:
-        limits = resolve_rollout_concurrency(self.config, phase="validate", use_router=use_router)
-        logger.debug(
-            "Batch concurrency: "
-            f"phase={limits['phase']}, use_router={bool(limits['use_router'])}, "
-            f"base_key={limits['base_key']}, base={limits['base']}, "
-            f"num_engines={limits['num_engines']}, resolved={limits['resolved']}, "
-            f"max_num_seqs={limits['max_num_seqs']}, effective={limits['effective']}"
-        )
-        return int(limits["effective"])
-
     async def generate_batch(
         self,
         batch_input_ids: list[list[int]],
