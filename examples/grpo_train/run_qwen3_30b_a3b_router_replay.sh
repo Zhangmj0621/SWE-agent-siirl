@@ -14,32 +14,22 @@ export MODEL_NAME=qwen3_30b_a3b
 
 # --- Path Definitions ---
 # Modify these paths according to your environment
-# export HOME_DIR=${HOME_DIR:-{your-home-dir}}
-# export TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/train.parquet}
-# export TEST_DATA_PATH=${TEST_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/test.parquet}
-# export MODEL_PATH=${MODEL_PATH:-$HOME_DIR/data/models/Qwen3-8B}
-
-export TRAIN_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/train.parquet
-export TEST_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/deepscaler/test.parquet
-export MODEL_PATH=/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-30B-A3B
-
-export WANDB_BASE_URL=https://wandb1.sii.edu.cn/
-export WANDB_API_KEY=local-6a4cc4c8b917355ce21530f9c9be52014cc55ee2
+export HOME_DIR=${HOME_DIR:-{your-home-dir}}
+export TRAIN_DATA_PATH=${TRAIN_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/train.parquet}
+export TEST_DATA_PATH=${TEST_DATA_PATH:-$HOME_DIR/data/datasets/$DATASET/test.parquet}
+export MODEL_PATH=${MODEL_PATH:-$HOME_DIR/data/models/Qwen3-30B-A3B}
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
 export BASE_TENSORBOARD_PATH=tensorboard
 
 # --- Key Training Hyperparameters ---
-# export TRAIN_BATCH_SIZE=512
-# export PPO_MINI_BATCH_SIZE=256
 export TRAIN_BATCH_SIZE=512
 export PPO_MINI_BATCH_SIZE=256
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
 export MAX_PROMPT_LENGTH=2048
 export MAX_RESPONSE_LENGTH=4096
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.7
-export SIIRL_ROUTING_REPLAY_TOKEN_LAYOUT=batch_seq
 
 export ROLLOUT_TP=4                    # Tensor parallelism for rollout
 export ROLLOUT_N=8                     # Number of samples per prompt
@@ -71,9 +61,8 @@ export ACTOR_EP=8
 # --- Output Paths and Experiment Naming ---
 timestamp=$(date +"%Y%m%d_%H%M%S")
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}node_${ACTOR_GPUS}actor_${ROLLOUT_GPUS}rollout
-export PROJECT_NAME=zp_${DATASET}_${ALG}_router_replay
-# export EXPERIMENT_NAME=${MODEL_NAME}_wo_router_replay_baseline
-export EXPERIMENT_NAME=${MODEL_NAME}_noreplay_regression
+export PROJECT_NAME=siirl_${DATASET}_${ALG}
+export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_experiment
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_tensorboard_$timestamp
 
 # --- Define the Training Command and its Arguments ---
@@ -108,7 +97,9 @@ TRAINING_CMD=(
     actor_ref.actor.clip_ratio=0.2
     actor_ref.actor.kl_loss_coef=0.01
     actor_ref.actor.kl_loss_type=low_var_kl
-    # actor_ref.actor.enable_routing_replay=True
+    # === Router Replay: R2 ===
+    actor_ref.actor.enable_routing_replay=True
+    # === Router Replay: R3 ===
     # actor_ref.actor.enable_rollout_routing_replay=True
     actor_ref.actor.megatron.param_offload=True
     actor_ref.actor.megatron.optimizer_offload=True
