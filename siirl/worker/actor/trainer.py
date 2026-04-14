@@ -815,26 +815,26 @@ class Trainer:
                     lam=lam,
                 )
 
-                # --- Stage 3: update_actor (forward+backward) ---
-                # REPLAY_BACKWARD: replay cached routing for gradient consistency
-                if rr_mgr:
-                    # Reset all indices before replay to ensure alignment.
-                    # After RECORD: indices are already at 0 (record() only appends).
-                    # After REPLAY_FORWARD + reset_all_forward: forward_idx=0, backward_idx=0.
-                    # This reset is a safety measure for robustness.
-                    rr_mgr.reset_all_indices()
-                    rr_mgr.set_stage(RoutingReplayStage.REPLAY_BACKWARD)
+            # --- Stage 3: update_actor (forward+backward) ---
+            # REPLAY_BACKWARD: replay cached routing for gradient consistency
+            if rr_mgr:
+                # Reset all indices before replay to ensure alignment.
+                # After RECORD: indices are already at 0 (record() only appends).
+                # After REPLAY_FORWARD + reset_all_forward: forward_idx=0, backward_idx=0.
+                # This reset is a safety measure for robustness.
+                rr_mgr.reset_all_indices()
+                rr_mgr.set_stage(RoutingReplayStage.REPLAY_BACKWARD)
 
-                try:
-                    with timers["update_actor"]:
-                        actor_result = self.actor_worker.update_actor(data_for_update)
-                finally:
-                    # --- Cleanup: clear routing replay caches ---
-                    # Always clean up even if update_actor fails, to avoid stale cache
-                    # entries corrupting the next training step.
-                    if rr_mgr:
-                        rr_mgr.set_stage(RoutingReplayStage.DISABLED)
-                        rr_mgr.clear_all()
+            try:
+                with timers["update_actor"]:
+                    actor_result = self.actor_worker.update_actor(data_for_update)
+            finally:
+                # --- Cleanup: clear routing replay caches ---
+                # Always clean up even if update_actor fails, to avoid stale cache
+                # entries corrupting the next training step.
+                if rr_mgr:
+                    rr_mgr.set_stage(RoutingReplayStage.DISABLED)
+                    rr_mgr.clear_all()
 
             # Extract metrics from TensorDict (stored in data["metrics"] by update_actor)
             actor_metrics = actor_result.get("metrics", {})

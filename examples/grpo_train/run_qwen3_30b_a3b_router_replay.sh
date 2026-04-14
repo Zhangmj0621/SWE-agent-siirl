@@ -44,8 +44,8 @@ export NNODES=${PET_NNODES:-1}
 export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-29500}
-export ACTOR_GPUS=8                    # 2 GPUs for training (Actor/Ref)
-export ROLLOUT_GPUS=8                  # 6 GPUs for inference (SGLang)
+export ACTOR_GPUS=8                    # 8 GPUs for training (Actor/Ref)
+export ROLLOUT_GPUS=8                  # 8 GPUs for inference (SGLang)
 
 # --- Actor Parallelism Configuration ---
 # TP (Tensor Parallel): Model sharding across GPUs within a group
@@ -56,7 +56,6 @@ export ACTOR_TP=4                      # Actor tensor parallelism (default: 1)
 export ACTOR_PP=1                      # Actor pipeline parallelism (default: 1)
 export ACTOR_CP=1                      # Actor context parallelism (default: 1)
 export ACTOR_EP=8
-# With ACTOR_GPUS=2, TP=1, PP=1, CP=1 -> DP=2 (2 data parallel trainers)
 
 # --- Output Paths and Experiment Naming ---
 timestamp=$(date +"%Y%m%d_%H%M%S")
