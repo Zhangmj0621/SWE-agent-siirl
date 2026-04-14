@@ -132,7 +132,11 @@ def Dict2Samples(data: TensorDict, async_mode: bool = False) -> list[Sample] | a
         local_sample.old_log_probs = data["old_log_probs"][index].numpy() if "old_log_probs" in data else None
         local_sample.ref_log_prob = data["ref_log_prob"][index].numpy() if "ref_log_prob" in data else None
         local_sample.extra_info = data["extra_info"][index] if "extra_info" in data else None
-        local_sample.rollout_routed_experts = data["rollout_routed_experts"][index].numpy() if ("rollout_routed_experts" in data and isinstance(data["rollout_routed_experts"][index], torch.Tensor)) else (data["rollout_routed_experts"][index] if "rollout_routed_experts" in data else None)
+        local_sample.rollout_routed_experts = (
+            data["rollout_routed_experts"][index].numpy()
+            if ("rollout_routed_experts" in data and isinstance(data["rollout_routed_experts"][index], torch.Tensor))
+            else (data["rollout_routed_experts"][index] if "rollout_routed_experts" in data else None)
+        )
         if "multi_modal_inputs" in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
         local_sample.uid = data["uid"][index].item() if isinstance(data["uid"][index], torch.Tensor) else data["uid"][index]

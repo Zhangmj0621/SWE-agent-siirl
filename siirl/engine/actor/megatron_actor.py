@@ -43,6 +43,7 @@ class DictWithDevice(dict):
                 return v.device
         return torch.device("cpu")
 
+
 class ActorWorker:
     def __init__(self, config: SiiRLArguments):
         assert isinstance(config, SiiRLArguments)
@@ -1212,7 +1213,7 @@ class MegatronPPOActor:
             if isinstance(output, dict):
                 if not hasattr(output, "device"):
                     output = DictWithDevice(output)
-                
+
                 _payload_channel.append(output)
                 output_tensor = output["log_probs"]
             else:

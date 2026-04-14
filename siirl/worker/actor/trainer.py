@@ -724,146 +724,141 @@ class Trainer:
         use_rollout_rr = getattr(self.config.actor_ref.actor, "enable_rollout_routing_replay", False)
         rollout_rr_filled = False  # Whether rollout routing data was successfully loaded
 
-        with timers["step"]:
-            with contextlib.ExitStack() as _rr_stack:
-                if rr_mgr:
-                    from siirl.utils.routing_replay import RoutingReplayStage
+        with timers["step"], contextlib.ExitStack() as _rr_stack:
+            if rr_mgr:
+                from siirl.utils.routing_replay import RoutingReplayStage
 
-                    def _cleanup_rr():
+                def _cleanup_rr():
+                    rr_mgr.set_stage(RoutingReplayStage.DISABLED)
+                    rr_mgr.clear_all()
+
+                _rr_stack.callback(_cleanup_rr)
+
+            # --- Routing replay: fill caches from rollout data if available ---
+            if rr_mgr and use_rollout_rr and "rollout_routed_experts" in batch_data:
+                rollout_experts = batch_data["rollout_routed_experts"]
+                if hasattr(rollout_experts, "data"):
+                    rollout_experts = rollout_experts.data
+
+                attn_mask = batch_data.get("attention_mask", None)
+                if hasattr(attn_mask, "data"):
+                    attn_mask = attn_mask.data
+
+                # Get micro_batch_size and num_experts from actor config
+                micro_batch_size = self.config.actor_ref.actor.ppo_micro_batch_size_per_gpu
+                model_config = self.actor_worker.actor_model_config
+                num_experts = getattr(model_config, "num_moe_experts", 0)
+                rr_mgr.fill_from_rollout(
+                    rollout_routed_experts=rollout_experts,
+                    micro_batch_size=micro_batch_size,
+                    num_experts=num_experts,
+                    sequence_parallel=self.config.trainer.sequence_parallel,
+                    attention_mask=attn_mask,
+                )
+                rollout_rr_filled = True
+
+            # --- Stage 1: compute_log_prob (actor forward-only) ---
+            # REPLAY_FORWARD: replay routing from rollout-captured data (R3)
+            # RECORD: compute routing from scratch and cache for replay (R2)
+            if rr_mgr:
+                log_prob_stage = RoutingReplayStage.REPLAY_FORWARD if rollout_rr_filled else RoutingReplayStage.RECORD
+                rr_mgr.set_stage(log_prob_stage)
+
+            data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
+
+            if rr_mgr and rollout_rr_filled:
+                # Reset forward indices so backward pass can re-read the same cached data
+                rr_mgr.reset_all_forward()
+
+            # Compute entropy from log probs
+            entropy_loss = None
+            if "entropys" in data_with_logprobs and "response_mask" in data_with_logprobs:
+                from siirl.algorithm.loss import agg_loss
+
+                entropys = data_with_logprobs["entropys"]
+                response_mask = data_with_logprobs["response_mask"]
+                loss_agg_mode = self.config.actor_ref.actor.loss_agg_mode
+                entropy_loss = agg_loss(entropys, response_mask.to(entropys.device), loss_agg_mode)
+
+            # Memory optimization: offload actor before ref inference to avoid peak memory
+            # when both actor and ref models are on GPU simultaneously
+            if self.actor_worker._is_offload_param:
+                offload_megatron_model_to_cpu(self.actor_worker.actor_module)
+                get_torch_device().empty_cache()
+
+            # --- Stage 2: compute_ref_log_prob (ref forward-only) ---
+            # FALLTHROUGH: ref model uses its own routing, no replay
+            if rr_mgr:
+                rr_mgr.set_stage(RoutingReplayStage.FALLTHROUGH)
+
+            with timers["ref"]:
+                data_with_ref = self.ref_worker.compute_ref_log_prob(data_with_logprobs)
+
+            # --- Stage 2b: compute_values (critic forward-only) ---
+            # FALLTHROUGH: critic uses its own routing, no replay
+            if self.use_critic:
+                with timers["values"]:
+                    data_with_values = self.critic_worker.compute_values(data_with_ref)
+            else:
+                data_with_values = data_with_ref
+
+            algo_config = self.config.actor_ref.algorithm
+            adv_estimator = algo_config.adv_estimator
+            gamma = algo_config.gamma
+            lam = algo_config.lam
+
+            with timers["adv"]:
+                data_for_update = compute_advantage(
+                    data=data_with_values,
+                    adv_estimator=adv_estimator,
+                    gamma=gamma,
+                    lam=lam,
+                )
+
+                # --- Stage 3: update_actor (forward+backward) ---
+                # REPLAY_BACKWARD: replay cached routing for gradient consistency
+                if rr_mgr:
+                    # Reset all indices before replay to ensure alignment.
+                    # After RECORD: indices are already at 0 (record() only appends).
+                    # After REPLAY_FORWARD + reset_all_forward: forward_idx=0, backward_idx=0.
+                    # This reset is a safety measure for robustness.
+                    rr_mgr.reset_all_indices()
+                    rr_mgr.set_stage(RoutingReplayStage.REPLAY_BACKWARD)
+
+                try:
+                    with timers["update_actor"]:
+                        actor_result = self.actor_worker.update_actor(data_for_update)
+                finally:
+                    # --- Cleanup: clear routing replay caches ---
+                    # Always clean up even if update_actor fails, to avoid stale cache
+                    # entries corrupting the next training step.
+                    if rr_mgr:
                         rr_mgr.set_stage(RoutingReplayStage.DISABLED)
                         rr_mgr.clear_all()
 
-                    _rr_stack.callback(_cleanup_rr)
+            # Extract metrics from TensorDict (stored in data["metrics"] by update_actor)
+            actor_metrics = actor_result.get("metrics", {})
+            if hasattr(actor_metrics, "data"):  # NonTensorData wrapper
+                actor_metrics = actor_metrics.data
 
-                # --- Routing replay: fill caches from rollout data if available ---
-                if rr_mgr and use_rollout_rr and "rollout_routed_experts" in batch_data:
-                    rollout_experts = batch_data["rollout_routed_experts"]
-                    if hasattr(rollout_experts, "data"):
-                        rollout_experts = rollout_experts.data
+            # Keep forward-only entropy for debugging and backfill actor/entropy_loss
+            # when the training path does not compute entropy (e.g., entropy_coeff=0).
+            if entropy_loss is not None:
+                actor_metrics.setdefault("actor/entropy_loss", entropy_loss.item())
+                actor_metrics["actor/entropy_loss_forward_only"] = entropy_loss.item()
 
-                    attn_mask = batch_data.get("attention_mask", None)
-                    if hasattr(attn_mask, "data"):
-                        attn_mask = attn_mask.data
+            if self.use_critic:
+                with timers["update_critic"]:
+                    critic_result = self.critic_worker.update_critic(data_for_update)
 
-                    # Get micro_batch_size and num_experts from actor config
-                    micro_batch_size = self.config.actor_ref.actor.ppo_micro_batch_size_per_gpu
-                    model_config = self.actor_worker.actor_model_config
-                    num_experts = getattr(model_config, "num_moe_experts", 0)
-                    rr_mgr.fill_from_rollout(
-                        rollout_routed_experts=rollout_experts,
-                        micro_batch_size=micro_batch_size,
-                        num_experts=num_experts,
-                        sequence_parallel=self.config.trainer.sequence_parallel,
-                        attention_mask=attn_mask,
-                    )
-                    rollout_rr_filled = True
+                # Extract critic metrics
+                critic_metrics = critic_result.get("metrics", {})
+                if hasattr(critic_metrics, "data"):
+                    critic_metrics = critic_metrics.data
 
-                # --- Stage 1: compute_log_prob (actor forward-only) ---
-                # REPLAY_FORWARD: replay routing from rollout-captured data (R3)
-                # RECORD: compute routing from scratch and cache for replay (R2)
-                if rr_mgr:
-                    log_prob_stage = (
-                        RoutingReplayStage.REPLAY_FORWARD
-                        if rollout_rr_filled
-                        else RoutingReplayStage.RECORD
-                    )
-                    rr_mgr.set_stage(log_prob_stage)
-
-                data_with_logprobs = self.actor_worker.compute_log_prob(batch_data)
-
-                if rr_mgr and rollout_rr_filled:
-                    # Reset forward indices so backward pass can re-read the same cached data
-                    rr_mgr.reset_all_forward()
-
-                # Compute entropy from log probs
-                entropy_loss = None
-                if "entropys" in data_with_logprobs and "response_mask" in data_with_logprobs:
-                    from siirl.algorithm.loss import agg_loss
-
-                    entropys = data_with_logprobs["entropys"]
-                    response_mask = data_with_logprobs["response_mask"]
-                    loss_agg_mode = self.config.actor_ref.actor.loss_agg_mode
-                    entropy_loss = agg_loss(entropys, response_mask.to(entropys.device), loss_agg_mode)
-
-                # Memory optimization: offload actor before ref inference to avoid peak memory
-                # when both actor and ref models are on GPU simultaneously
-                if self.actor_worker._is_offload_param:
-                    offload_megatron_model_to_cpu(self.actor_worker.actor_module)
-                    get_torch_device().empty_cache()
-
-                # --- Stage 2: compute_ref_log_prob (ref forward-only) ---
-                # FALLTHROUGH: ref model uses its own routing, no replay
-                if rr_mgr:
-                    rr_mgr.set_stage(RoutingReplayStage.FALLTHROUGH)
-
-                with timers["ref"]:
-                    data_with_ref = self.ref_worker.compute_ref_log_prob(data_with_logprobs)
-
-                # --- Stage 2b: compute_values (critic forward-only) ---
-                # FALLTHROUGH: critic uses its own routing, no replay
-                if self.use_critic:
-                    with timers["values"]:
-                        data_with_values = self.critic_worker.compute_values(data_with_ref)
-                else:
-                    data_with_values = data_with_ref
-
-                algo_config = self.config.actor_ref.algorithm
-                adv_estimator = algo_config.adv_estimator
-                gamma = algo_config.gamma
-                lam = algo_config.lam
-
-                with timers["adv"]:
-                    data_for_update = compute_advantage(
-                        data=data_with_values,
-                        adv_estimator=adv_estimator,
-                        gamma=gamma,
-                        lam=lam,
-                    )
-
-                    # --- Stage 3: update_actor (forward+backward) ---
-                    # REPLAY_BACKWARD: replay cached routing for gradient consistency
-                    if rr_mgr:
-                        # Reset all indices before replay to ensure alignment.
-                        # After RECORD: indices are already at 0 (record() only appends).
-                        # After REPLAY_FORWARD + reset_all_forward: forward_idx=0, backward_idx=0.
-                        # This reset is a safety measure for robustness.
-                        rr_mgr.reset_all_indices()
-                        rr_mgr.set_stage(RoutingReplayStage.REPLAY_BACKWARD)
-
-                    try:
-                        with timers["update_actor"]:
-                            actor_result = self.actor_worker.update_actor(data_for_update)
-                    finally:
-                        # --- Cleanup: clear routing replay caches ---
-                        # Always clean up even if update_actor fails, to avoid stale cache
-                        # entries corrupting the next training step.
-                        if rr_mgr:
-                            rr_mgr.set_stage(RoutingReplayStage.DISABLED)
-                            rr_mgr.clear_all()
-
-                # Extract metrics from TensorDict (stored in data["metrics"] by update_actor)
-                actor_metrics = actor_result.get("metrics", {})
-                if hasattr(actor_metrics, "data"):  # NonTensorData wrapper
-                    actor_metrics = actor_metrics.data
-
-                # Keep forward-only entropy for debugging and backfill actor/entropy_loss
-                # when the training path does not compute entropy (e.g., entropy_coeff=0).
-                if entropy_loss is not None:
-                    actor_metrics.setdefault("actor/entropy_loss", entropy_loss.item())
-                    actor_metrics["actor/entropy_loss_forward_only"] = entropy_loss.item()
-
-                if self.use_critic:
-                    with timers["update_critic"]:
-                        critic_result = self.critic_worker.update_critic(data_for_update)
-
-                    # Extract critic metrics
-                    critic_metrics = critic_result.get("metrics", {})
-                    if hasattr(critic_metrics, "data"):
-                        critic_metrics = critic_metrics.data
-
-                    metrics = {"actor": actor_metrics, "critic": critic_metrics}
-                else:
-                    metrics = {"actor": actor_metrics}
+                metrics = {"actor": actor_metrics, "critic": critic_metrics}
+            else:
+                metrics = {"actor": actor_metrics}
 
         timing_raw = timers.to_dict()
 

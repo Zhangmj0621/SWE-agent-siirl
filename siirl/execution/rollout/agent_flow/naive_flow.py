@@ -136,9 +136,7 @@ class NaiveFlow:
                 # Use -1 sentinel for prompt tokens so training can avoid routing them all to expert 0.
                 n_prompt = n_real_tokens - n_response
                 if n_prompt < 0:
-                    raise RuntimeError(
-                        f"[RoutingReplay] response tokens ({n_response}) > total tokens ({n_real_tokens})"
-                    )
+                    raise RuntimeError(f"[RoutingReplay] response tokens ({n_response}) > total tokens ({n_real_tokens})")
                 sample.rollout_routed_experts = np.concatenate(
                     [np.full((n_prompt, moe_dim), -1, dtype=np.int32), routing],
                     axis=0,

@@ -249,8 +249,8 @@ class NaiveExecutor:
             max_prompt_len = self.config.data.max_prompt_length
             max_response_len = self.config.data.max_response_length
             max_seq_len = max_prompt_len + max_response_len
-            actual_prompt_len = len(sample.prompts) if hasattr(sample.prompts, '__len__') else 0
-            actual_response_len = len(sample.responses) if hasattr(sample.responses, '__len__') else 0
+            actual_prompt_len = len(sample.prompts) if hasattr(sample.prompts, "__len__") else 0
+            actual_response_len = len(sample.responses) if hasattr(sample.responses, "__len__") else 0
             routing_data = sample.rollout_routed_experts  # [n_real_tokens, moe_dim]
             if routing_data.ndim == 2:
                 moe_dim = routing_data.shape[1]

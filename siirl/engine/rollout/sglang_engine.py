@@ -266,7 +266,7 @@ class SglangEngine:
         self,
         input_ids: list[int],
         is_validate: bool,
-        use_router: bool = False, 
+        use_router: bool = False,
         return_routed_experts: bool = False,
         request_seed: int | None = None,
     ):
@@ -290,9 +290,7 @@ class SglangEngine:
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
         routed_experts = None
         if return_routed_experts and "routed_experts" in output["meta_info"]:
-            routed_experts = np.frombuffer(
-                pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")), dtype=np.int32
-            )
+            routed_experts = np.frombuffer(pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")), dtype=np.int32)
         return output["text"], responses, rollout_log_prob, routed_experts
 
     def _resolve_batch_concurrency(self, use_router: bool) -> int:
@@ -392,9 +390,7 @@ class SglangEngine:
             log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
             routed_experts = None
             if return_routed_experts and "routed_experts" in output["meta_info"]:
-                routed_experts = np.frombuffer(
-                    pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")), dtype=np.int32
-                )
+                routed_experts = np.frombuffer(pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")), dtype=np.int32)
             if progress_callback is not None:
                 progress_callback(1)
             return output["text"], responses, log_probs, routed_experts

@@ -1056,7 +1056,9 @@ class RolloutManager:
                 self.staleness_sample_cnt += 1
                 putted_samples += 1
 
-    async def prepare_data(self,):
+    async def prepare_data(
+        self,
+    ):
         await self.data_coordinator.prepare_data.remote(self.config.data.train_batch_size)
         return
 
@@ -1109,7 +1111,9 @@ class RolloutManager:
 
                     if not self.config.trainer.colocate and not start_prefetch_task:
                         self.staleness_sample_cnt = 0
-                        total_remain_steps = (total_epochs - self.start_epoch) * self.num_train_batches - (self.global_steps % self.num_train_batches)
+                        total_remain_steps = (total_epochs - self.start_epoch) * self.num_train_batches - (
+                            self.global_steps % self.num_train_batches
+                        )
                         self.prefetch_task = asyncio.create_task(self.prefetch_data(total_remain_steps=total_remain_steps))
                         start_prefetch_task = True
 

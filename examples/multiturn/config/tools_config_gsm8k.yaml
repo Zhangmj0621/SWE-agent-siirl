@@ -1,6 +1,6 @@
 tools:
   - class_name: "siirl.environment.tool_env.gsm8k_env.Gsm8kToolEnv"
-    config: 
+    config:
       type: native
     tool_schema:
       type: "function"

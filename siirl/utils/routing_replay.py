@@ -63,7 +63,7 @@ import torch
 from loguru import logger
 
 if TYPE_CHECKING:
-    from torch import nn
+    pass
 
 
 class RoutingReplayStage(Enum):
@@ -318,11 +318,7 @@ class RoutingReplayManager:
             cache = manager.active_cache
 
             # Fast path: delegate to original
-            if (
-                stage == RoutingReplayStage.DISABLED
-                or stage == RoutingReplayStage.FALLTHROUGH
-                or cache is None
-            ):
+            if stage == RoutingReplayStage.DISABLED or stage == RoutingReplayStage.FALLTHROUGH or cache is None:
                 return original_routing(self_router, logits, **kwargs)
 
             if stage == RoutingReplayStage.RECORD:
@@ -339,10 +335,7 @@ class RoutingReplayManager:
                 # - Backward recompute runs inside torch.enable_grad() → pop_backward
                 # - Non-checkpointed forward has grad enabled → pop_backward (no recompute follows)
                 # Both indices advance in lockstep, returning the same entry[i] for micro-batch i.
-                if not torch.is_grad_enabled():
-                    routing_map = cache.pop_forward()
-                else:
-                    routing_map = cache.pop_backward()
+                routing_map = cache.pop_forward() if not torch.is_grad_enabled() else cache.pop_backward()
             else:
                 return original_routing(self_router, logits, **kwargs)
 
@@ -382,7 +375,7 @@ class RoutingReplayManager:
                     # Megatron selects top-k logits then applies softmax to
                     # normalize among them. We replicate this by masking
                     # non-selected positions to -inf before softmax.
-                    masked_logits = logits.masked_fill(~top_mask, float('-inf'))
+                    masked_logits = logits.masked_fill(~top_mask, float("-inf"))
                     scores = torch.softmax(masked_logits, dim=-1, dtype=torch.float32).type_as(orig_logits)
             elif score_function == "sigmoid":
                 scores = torch.sigmoid(logits).type_as(orig_logits)
@@ -402,7 +395,7 @@ class RoutingReplayManager:
             # Ensure routing_map is bool to match Megatron's convention.
             # fill_from_rollout now creates bool directly, but RECORD path
             # already returns bool from original_routing. This is defensive.
-            if not routing_map.dtype == torch.bool:
+            if routing_map.dtype != torch.bool:
                 routing_map = routing_map.bool()
 
             return scores, routing_map
@@ -452,9 +445,7 @@ class RoutingReplayManager:
 
         layout = (token_layout or self._token_layout).strip().lower()
         if layout not in ("seq_batch", "batch_seq"):
-            raise ValueError(
-                f"[RoutingReplay] Invalid token_layout={layout!r}. Expected 'seq_batch' or 'batch_seq'."
-            )
+            raise ValueError(f"[RoutingReplay] Invalid token_layout={layout!r}. Expected 'seq_batch' or 'batch_seq'.")
 
         num_moe_layers = len(self._caches)
         if num_moe_layers == 0:
@@ -491,7 +482,6 @@ class RoutingReplayManager:
             mb_end = min(mb_start + micro_batch_size, batch_size)
             # [mb_size, max_seq_len, num_moe_layers, topk]
             mb_routing = routing_4d[mb_start:mb_end]
-            mb_size = mb_routing.shape[0]
             mb_attn = attention_mask[mb_start:mb_end] if attention_mask is not None else None
 
             for layer_idx in range(num_moe_layers):
@@ -500,18 +490,12 @@ class RoutingReplayManager:
 
                 # Handle sequence parallel: slice along sequence dimension per sample
                 if sequence_parallel and tp_size > 1:
-                    assert max_seq_len % tp_size == 0, (
-                        f"max_seq_len {max_seq_len} not divisible by tp_size {tp_size}"
-                    )
+                    assert max_seq_len % tp_size == 0, f"max_seq_len {max_seq_len} not divisible by tp_size {tp_size}"
                     chunk = max_seq_len // tp_size
                     layer_indices = layer_indices[:, tp_rank * chunk : (tp_rank + 1) * chunk, :]
-                    layer_valid = (
-                        mb_attn[:, tp_rank * chunk : (tp_rank + 1) * chunk] if mb_attn is not None else None
-                    )
-                    tokens_per_sample = chunk
+                    layer_valid = mb_attn[:, tp_rank * chunk : (tp_rank + 1) * chunk] if mb_attn is not None else None
                 else:
                     layer_valid = mb_attn
-                    tokens_per_sample = max_seq_len
 
                 # Flatten to [n_tokens, topk] using the same token order as training-time routing.
                 # Rollout data is [batch, seq, ...]; many Megatron MoE routers flatten [seq, batch, ...].
