@@ -28,6 +28,7 @@ class AgentData:
         self.state = AgentState.PENDING
         self.env_kwargs = {}
         self.env_rewards = []
+        self.routed_experts = None  # Raw flat np.int32 array from SGLang MoE routing
         if ground_truth:
             self.env_kwargs["ground_truth"] = ground_truth
 

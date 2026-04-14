@@ -38,14 +38,14 @@ class SglangModel:
             sampling_params["max_new_tokens"]
         task = self.engine.generate(input_tokens, {"max_new_tokens": max_tokens})
         if timeout is None:
-            text, responses, rollout_log_prob = await task
+            text, responses, rollout_log_prob, routed_experts = await task
         else:
-            text, responses, rollout_log_prob = await asyncio.wait_for(task, timeout)
+            text, responses, rollout_log_prob, routed_experts = await asyncio.wait_for(task, timeout)
         return ModelResponse(
             output=text,
             output_tokens=responses,
             log_probs=rollout_log_prob,
-            experts=None,
+            experts=routed_experts,
             raw={},
         )
 

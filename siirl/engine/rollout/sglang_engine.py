@@ -19,6 +19,8 @@ import os
 import time
 from collections.abc import Callable
 
+import numpy as np
+import pybase64
 import requests
 from loguru import logger
 from sglang.srt.entrypoints.http_server import launch_server
@@ -265,6 +267,7 @@ class SglangEngine:
         input_ids: list[int],
         is_validate: bool,
         use_router: bool = False,
+        return_routed_experts: bool = False,
         request_seed: int | None = None,
     ):
         """Single sample generation with optional router load balancing."""
@@ -280,10 +283,15 @@ class SglangEngine:
             "sampling_params": sampling_params,
             "return_logprob": True,
         }
+        if return_routed_experts:
+            payload["return_routed_experts"] = True
         output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
         responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
         rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-        return output["text"], responses, rollout_log_prob
+        routed_experts = None
+        if return_routed_experts and "routed_experts" in output["meta_info"]:
+            routed_experts = np.frombuffer(pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")), dtype=np.int32)
+        return output["text"], responses, rollout_log_prob, routed_experts
 
     def _resolve_batch_concurrency(self, use_router: bool) -> int:
         limits = resolve_rollout_concurrency(self.config, phase="validate", use_router=use_router)
@@ -304,9 +312,10 @@ class SglangEngine:
         show_progress: bool = True,
         progress_desc: str = "Validate",
         sort_by_length: bool = True,
+        return_routed_experts: bool = False,
         request_seeds: list[int] | None = None,
         progress_callback: Callable[[int], None] | None = None,
-    ) -> list[tuple[str, list[int], list[float]]]:
+    ) -> list[tuple[str, list[int], list[float], np.ndarray | None]]:
         """
         Batch generation for single-turn scenarios (no multi-turn/tool calls).
         Uses router for load balancing across multiple engines.
@@ -322,7 +331,7 @@ class SglangEngine:
             sort_by_length: If True, sort requests by prompt length to optimize batching.
 
         Returns:
-            List of (text, response_ids, log_probs) tuples for each input.
+            List of (text, response_ids, log_probs, routed_experts_or_None) tuples for each input.
         """
         if not batch_input_ids:
             return []
@@ -374,12 +383,17 @@ class SglangEngine:
                     "sampling_params": sampling_params,
                     "return_logprob": True,
                 }
+                if return_routed_experts:
+                    payload["return_routed_experts"] = True
                 output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
             responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
             log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
+            routed_experts = None
+            if return_routed_experts and "routed_experts" in output["meta_info"]:
+                routed_experts = np.frombuffer(pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")), dtype=np.int32)
             if progress_callback is not None:
                 progress_callback(1)
-            return output["text"], responses, log_probs
+            return output["text"], responses, log_probs, routed_experts
 
         # SGLang handles continuous batching internally
         tasks = [_generate_one(ids, request_seed=seed) for ids, seed in zip(sorted_input_ids, sorted_request_seeds, strict=False)]

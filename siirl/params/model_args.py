@@ -135,6 +135,28 @@ class ActorArguments:
     )
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
 
+    # Routing replay for MoE models
+    enable_routing_replay: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable routing replay for MoE models. Records expert routing "
+            "decisions during compute_log_prob and replays them during update_actor "
+            "to ensure consistent routing across forward/backward passes."
+        },
+    )
+    enable_rollout_routing_replay: bool = field(
+        default=False,
+        metadata={
+            "help": "Use routing decisions captured during rollout inference. "
+            "Requires SGLang to return routed_experts. Implies enable_routing_replay=True."
+        },
+    )
+
+    def __post_init__(self):
+        # rollout routing replay implies routing replay
+        if self.enable_rollout_routing_replay:
+            self.enable_routing_replay = True
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

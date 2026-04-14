@@ -282,8 +282,7 @@ class DataLoaderNode:
         Create a continuous data iterator across epoch
         """
         iterator = iter(self.val_dataloader)
-        for batch_dict in iterator:
-            yield batch_dict
+        yield from iterator
 
     def run_single_sample(
         self,
@@ -341,13 +340,13 @@ class DataLoaderNode:
 
                 try:
                     epoch, batch = next(self._current_train_iter)
-                    logger.debug(f"Yielding training batch.")
+                    logger.debug("Yielding training batch.")
                 except StopIteration:
                     # This means the current epoch's data is exhausted.
                     # The DAG scheduler should ideally handle this by moving to the next epoch
                     # or terminating if all epochs are done.
                     # For this node, it signals completion for this particular call if data is expected.
-                    error_msg = f"Training dataloader exhausted. This might be expected at the training end."
+                    error_msg = "Training dataloader exhausted. This might be expected at the training end."
                     logger.info(f"{error_msg}")
                     # We might not want to mark FAILED here, as it's a natural end of an iterator.
                     # The caller (DAG executor) should decide if more data was expected.

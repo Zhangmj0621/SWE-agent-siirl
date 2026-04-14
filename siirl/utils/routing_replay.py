@@ -1,0 +1,543 @@
+# Copyright 2026, Infrawaves. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Routing Replay for MoE models during RL training.
+
+In Mixture-of-Experts (MoE) models, router networks select which experts process
+each token. During RL training (PPO/GRPO), multiple forward/backward passes over
+the same batch require consistent routing decisions:
+
+  1. compute_log_prob (forward-only): Record routing decisions OR replay from rollout
+  2. update_actor (forward+backward): Replay the recorded routing decisions
+
+Without routing replay, different routing decisions across passes cause gradient
+inconsistency and training instability, because the loss computed in the forward
+pass targets different expert outputs than those used during backpropagation.
+
+Architecture:
+  - RoutingReplayStage: Enum controlling the current routing behavior
+  - RoutingReplayCache: Per-router cache storing expert indices in CPU pinned memory
+  - RoutingReplayManager: Singleton managing global state and Megatron patching
+  - stage(): Context manager for safe stage transitions
+
+Usage in the training loop:
+    manager = RoutingReplayManager.get()
+    manager.install()  # Patches Megatron's TopKRouter and compute_topk
+
+    # During compute_log_prob:
+    with manager.stage(RoutingReplayStage.RECORD):
+        actor_worker.compute_log_prob(batch)
+
+    # During ref forward (different model, don't replay):
+    with manager.stage(RoutingReplayStage.FALLTHROUGH):
+        ref_worker.compute_ref_log_prob(batch)
+
+    # During update_actor backward:
+    with manager.stage(RoutingReplayStage.REPLAY_BACKWARD):
+        actor_worker.update_actor(batch)
+
+    manager.clear_all()
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+from contextlib import contextmanager
+from enum import Enum
+from typing import TYPE_CHECKING
+
+import torch
+from loguru import logger
+
+if TYPE_CHECKING:
+    pass
+
+
+class RoutingReplayStage(Enum):
+    """Stage controlling how MoE routing decisions are handled."""
+
+    DISABLED = "disabled"  # Routing replay not active, use original compute_topk
+    RECORD = "record"  # Record routing decisions from this forward pass
+    REPLAY_FORWARD = "replay_forward"  # Replay recorded decisions (forward-only)
+    REPLAY_BACKWARD = "replay_backward"  # Replay recorded decisions (forward+backward)
+    FALLTHROUGH = "fallthrough"  # Temporarily bypass replay (e.g., for ref model)
+
+
+class RoutingReplayCache:
+    """
+    Per-router cache for MoE expert routing indices.
+
+    Stores top_indices from compute_topk in CPU pinned memory to minimize
+    GPU memory overhead while maintaining fast H2D transfer for replay.
+
+    Each MoE layer's TopKRouter gets its own RoutingReplayCache instance,
+    registered via a forward pre-hook that sets the active cache before
+    each router's forward pass.
+    """
+
+    def __init__(self, layer_id: int = -1):
+        self.layer_id = layer_id
+        self._forward_idx: int = 0
+        self._backward_idx: int = 0
+        self._entries: list[torch.Tensor] = []
+
+    def record(self, top_indices: torch.Tensor) -> None:
+        """Store routing indices in CPU pinned memory."""
+        buf = torch.empty_like(top_indices, device="cpu", pin_memory=True)
+        buf.copy_(top_indices)
+        self._entries.append(buf)
+
+    def pop_forward(self) -> torch.Tensor:
+        """Retrieve next cached indices for forward replay."""
+        t = self._entries[self._forward_idx]
+        self._forward_idx += 1
+        return t.to(torch.cuda.current_device(), non_blocking=True)
+
+    def pop_backward(self) -> torch.Tensor:
+        """Retrieve next cached indices for backward replay."""
+        t = self._entries[self._backward_idx]
+        self._backward_idx += 1
+        return t.to(torch.cuda.current_device(), non_blocking=True)
+
+    def reset_forward(self) -> None:
+        """Reset forward replay index (for re-reading same data)."""
+        self._forward_idx = 0
+
+    def reset_backward(self) -> None:
+        """Reset backward replay index."""
+        self._backward_idx = 0
+
+    def clear(self) -> None:
+        """Release all cached entries and reset indices."""
+        self._forward_idx = 0
+        self._backward_idx = 0
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __repr__(self) -> str:
+        return (
+            f"RoutingReplayCache(layer={self.layer_id}, entries={len(self._entries)}, "
+            f"fwd_idx={self._forward_idx}, bwd_idx={self._backward_idx})"
+        )
+
+
+class RoutingReplayManager:
+    """
+    Singleton manager for MoE routing replay.
+
+    Coordinates stage transitions and manages all per-router caches.
+    Thread-safe for Ray actor processes (each process has its own singleton).
+
+    The manager patches Megatron's TopKRouter and compute_topk function at
+    install() time. This is done via runtime monkey-patching rather than
+    requiring external patch files, making deployment simpler.
+    """
+
+    _instance: RoutingReplayManager | None = None
+    _lock = threading.Lock()
+
+    def __init__(self) -> None:
+        self._stage = RoutingReplayStage.DISABLED
+        self._caches: list[RoutingReplayCache] = []
+        self._installed = False
+        # The currently active cache (set by per-router forward pre-hooks)
+        self._active_cache: RoutingReplayCache | None = None
+        # How tokens are flattened when building routing_map from [batch, seq, ...].
+        # In many Megatron codepaths, logits are [seq, batch, ...] and flattened via view(-1),
+        # which corresponds to "seq_batch" order. See fill_from_rollout().
+        self._token_layout = os.environ.get("SIIRL_ROUTING_REPLAY_TOKEN_LAYOUT", "seq_batch")
+
+    @classmethod
+    def get(cls) -> RoutingReplayManager:
+        """Get or create the process-local singleton."""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the singleton (for testing)."""
+        with cls._lock:
+            if cls._instance is not None:
+                cls._instance.clear_all()
+            cls._instance = None
+
+    # --- Stage management ---
+
+    @property
+    def current_stage(self) -> RoutingReplayStage:
+        return self._stage
+
+    def set_stage(self, stage: RoutingReplayStage) -> None:
+        self._stage = stage
+
+    @contextmanager
+    def stage(self, target: RoutingReplayStage):
+        """Context manager for temporary stage transition."""
+        prev = self._stage
+        self._stage = target
+        try:
+            yield
+        finally:
+            self._stage = prev
+
+    # --- Cache management ---
+
+    @property
+    def caches(self) -> list[RoutingReplayCache]:
+        return self._caches
+
+    def register_cache(self, cache: RoutingReplayCache) -> None:
+        self._caches.append(cache)
+
+    def set_active_cache(self, cache: RoutingReplayCache) -> None:
+        """Set the currently active cache (called by per-router pre-hook)."""
+        self._active_cache = cache
+
+    @property
+    def active_cache(self) -> RoutingReplayCache | None:
+        return self._active_cache
+
+    def clear_all(self) -> None:
+        """Clear all caches and reset to disabled."""
+        for cache in self._caches:
+            cache.clear()
+
+    def reset_all_forward(self) -> None:
+        """Reset forward indices on all caches (for re-reading cached routing)."""
+        for cache in self._caches:
+            cache.reset_forward()
+
+    def reset_all_backward(self) -> None:
+        """Reset backward indices on all caches."""
+        for cache in self._caches:
+            cache.reset_backward()
+
+    def reset_all_indices(self) -> None:
+        """Reset both forward and backward indices on all caches."""
+        for cache in self._caches:
+            cache.reset_forward()
+            cache.reset_backward()
+
+    # --- Megatron patching ---
+
+    def install(self) -> None:
+        """
+        Monkey-patch Megatron's MoE routing to support routing replay.
+
+        Patches TopKRouter:
+        1. __init__: Adds a RoutingReplayCache + forward pre-hook to each router instance
+        2. routing(): Wraps the routing method to intercept top_indices for record/replay
+
+        The routing() patch is version-adaptive: works regardless of whether Megatron
+        uses topk_routing_with_score_function or inline topk logic.
+
+        Safe to call multiple times (idempotent).
+        """
+        if self._installed:
+            return
+        self._patch_topk_router_init()
+        self._installed = True
+        logger.info("[RoutingReplay] Installed Megatron MoE patches")
+
+    def _patch_topk_router_init(self) -> None:
+        """
+        Patch TopKRouter to support routing replay.
+
+        Two patches per router instance:
+        1. __init__: Creates a RoutingReplayCache and registers a forward pre-hook
+           to set the active cache before each forward pass.
+        2. routing(): Wraps the routing method to intercept (scores, top_indices).
+           In RECORD mode, caches top_indices. In REPLAY mode, substitutes cached
+           top_indices and recomputes scores via gather.
+        """
+        try:
+            from megatron.core.transformer.moe.router import TopKRouter
+        except ImportError:
+            logger.warning("[RoutingReplay] megatron.core.transformer.moe.router not found, skipping")
+            return
+
+        original_init = TopKRouter.__init__
+        original_routing = TopKRouter.routing
+        manager = self
+
+        def patched_init(self_router, *args, **kwargs):
+            original_init(self_router, *args, **kwargs)
+            # Create and register a cache for this router instance
+            layer_id = len(manager.caches)
+            cache = RoutingReplayCache(layer_id=layer_id)
+            self_router._routing_replay_cache = cache
+            manager.register_cache(cache)
+
+            # Register forward pre-hook to set this cache as active before each forward
+            def _pre_hook(module, inputs):
+                manager.set_active_cache(module._routing_replay_cache)
+
+            self_router.register_forward_pre_hook(_pre_hook)
+
+        def patched_routing(self_router, logits, **kwargs):
+            """
+            Wraps TopKRouter.routing() to intercept expert routing decisions.
+
+            TopKRouter.routing() returns (scores, routing_map) where:
+            - scores: expert probabilities (may be 2D or 3D depending on Megatron version)
+            - routing_map: token-to-expert assignment (binary mask or index map)
+
+            We cache routing_map (the routing decision) and replay it to ensure
+            consistent expert assignment across forward/backward passes. Scores are
+            recomputed from current logits in replay mode to maintain gradient flow
+            through the router weights.
+
+            Gradient checkpointing compatibility:
+            With recompute_granularity="full", each layer's forward runs twice per
+            micro-batch during update_actor:
+              1. Checkpointed forward: inside torch.no_grad() → is_grad_enabled()=False
+              2. Backward recompute: inside torch.enable_grad() → is_grad_enabled()=True
+            Both calls must return the SAME cached entry. We use separate indices
+            (forward_idx for #1, backward_idx for #2) that advance in lockstep.
+            Without checkpointing, only the grad-enabled path (#2) is taken.
+            """
+            stage = manager.current_stage
+            cache = manager.active_cache
+
+            # Fast path: delegate to original
+            if stage == RoutingReplayStage.DISABLED or stage == RoutingReplayStage.FALLTHROUGH or cache is None:
+                return original_routing(self_router, logits, **kwargs)
+
+            if stage == RoutingReplayStage.RECORD:
+                scores, routing_map = original_routing(self_router, logits, **kwargs)
+                cache.record(routing_map)
+                return scores, routing_map
+
+            # REPLAY_FORWARD or REPLAY_BACKWARD: use cached routing_map
+            if stage == RoutingReplayStage.REPLAY_FORWARD:
+                routing_map = cache.pop_forward()
+            elif stage == RoutingReplayStage.REPLAY_BACKWARD:
+                # Distinguish checkpointed forward vs backward recompute:
+                # - Checkpointed forward runs inside torch.no_grad() → pop_forward
+                # - Backward recompute runs inside torch.enable_grad() → pop_backward
+                # - Non-checkpointed forward has grad enabled → pop_backward (no recompute follows)
+                # Both indices advance in lockstep, returning the same entry[i] for micro-batch i.
+                routing_map = cache.pop_forward() if not torch.is_grad_enabled() else cache.pop_backward()
+            else:
+                return original_routing(self_router, logits, **kwargs)
+
+            # Recompute scores from current logits for gradient flow.
+            # Must replicate the exact score computation that Megatron's
+            # topk_routing_with_score_function performs, so that expert outputs
+            # are weighted identically to the original (non-replay) forward pass.
+            score_function = getattr(self_router, "routing_score_function", None) or getattr(
+                self_router.config, "moe_router_score_function", "softmax"
+            )
+            use_pre_softmax = getattr(self_router.config, "moe_router_pre_softmax", False)
+
+            # Flatten logits to 2D [num_tokens, num_experts] to match routing_map shape.
+            orig_logits = logits
+            if logits.dim() == 3:
+                logits = logits.view(-1, logits.shape[-1])
+
+            if logits.shape[0] != routing_map.shape[0]:
+                raise RuntimeError(
+                    f"[RoutingReplay] Token count mismatch in layer {cache.layer_id}: "
+                    f"logits {logits.shape} vs routing_map {routing_map.shape}. "
+                    f"Stage={stage.value}, grad_enabled={torch.is_grad_enabled()}, "
+                    f"fwd_idx={cache._forward_idx}, bwd_idx={cache._backward_idx}, "
+                    f"entries={len(cache)}. This usually means micro-batch formation "
+                    f"differs between RECORD and REPLAY phases."
+                )
+
+            top_mask = routing_map.bool()
+
+            if score_function == "softmax":
+                if use_pre_softmax:
+                    # Pre-softmax: softmax over ALL experts, then mask to selected.
+                    scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(orig_logits)
+                    scores = scores * top_mask.to(scores.dtype)
+                else:
+                    # Post-softmax: softmax only among selected top-k experts.
+                    # Megatron selects top-k logits then applies softmax to
+                    # normalize among them. We replicate this by masking
+                    # non-selected positions to -inf before softmax.
+                    masked_logits = logits.masked_fill(~top_mask, float("-inf"))
+                    scores = torch.softmax(masked_logits, dim=-1, dtype=torch.float32).type_as(orig_logits)
+            elif score_function == "sigmoid":
+                scores = torch.sigmoid(logits).type_as(orig_logits)
+                scores = scores * top_mask.to(scores.dtype)
+                # Megatron normalizes sigmoid scores among selected experts.
+                score_sum = scores.sum(dim=-1, keepdim=True) + 1e-20
+                scores = scores / score_sum
+            else:
+                scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(orig_logits)
+                scores = scores * top_mask.to(scores.dtype)
+
+            # Apply optional scaling factor (e.g. DeepSeek-V3 style).
+            scaling_factor = getattr(self_router.config, "moe_router_topk_scaling_factor", None)
+            if scaling_factor:
+                scores = scores * scaling_factor
+
+            # Ensure routing_map is bool to match Megatron's convention.
+            # fill_from_rollout now creates bool directly, but RECORD path
+            # already returns bool from original_routing. This is defensive.
+            if routing_map.dtype != torch.bool:
+                routing_map = routing_map.bool()
+
+            return scores, routing_map
+
+        TopKRouter.__init__ = patched_init
+        TopKRouter.routing = patched_routing
+
+    # --- Rollout routing replay support ---
+
+    def fill_from_rollout(
+        self,
+        rollout_routed_experts: torch.Tensor,
+        micro_batch_size: int,
+        num_experts: int,
+        sequence_parallel: bool = False,
+        attention_mask: torch.Tensor | None = None,
+        token_layout: str | None = None,
+    ) -> None:
+        """
+        Fill routing caches from rollout-captured expert indices.
+
+        This is the "rollout routing replay" path: during inference, SGLang captures
+        which experts were routed for each token. These decisions are then replayed
+        during training to ensure exact consistency with the rollout.
+
+        Args:
+            rollout_routed_experts: Tensor of shape [batch_size, max_seq_len, moe_dim]
+                Expert indices captured during rollout inference (padded to max_seq_len).
+                moe_dim = num_moe_layers * topk (flattened).
+            micro_batch_size: Number of samples per micro-batch (for splitting).
+            num_experts: Total number of MoE experts (for routing_map construction).
+            sequence_parallel: Whether sequence parallel is enabled (requires TP slicing).
+            attention_mask: Optional attention mask of shape [batch_size, max_seq_len].
+                Used to detect padded tokens and avoid routing them to a single expert.
+            token_layout: Flattening order used by the training-time router.
+                - "seq_batch": tokens are ordered by sequence first, then batch
+                  (matches flattening [seq, batch, ...] via view(-1)).
+                - "batch_seq": tokens are ordered by batch first, then sequence
+                  (matches flattening [batch, seq, ...] via reshape(-1)).
+        """
+        from megatron.core import parallel_state as mpu
+
+        if micro_batch_size <= 0:
+            raise ValueError(f"[RoutingReplay] micro_batch_size must be > 0, got {micro_batch_size}")
+        if num_experts <= 0:
+            raise ValueError(f"[RoutingReplay] num_experts must be > 0, got {num_experts}")
+
+        layout = (token_layout or self._token_layout).strip().lower()
+        if layout not in ("seq_batch", "batch_seq"):
+            raise ValueError(f"[RoutingReplay] Invalid token_layout={layout!r}. Expected 'seq_batch' or 'batch_seq'.")
+
+        num_moe_layers = len(self._caches)
+        if num_moe_layers == 0:
+            logger.warning("[RoutingReplay] No MoE caches registered, skipping fill_from_rollout")
+            return
+
+        batch_size = rollout_routed_experts.shape[0]
+        max_seq_len = rollout_routed_experts.shape[1]
+        moe_dim = rollout_routed_experts.shape[2]
+        topk = moe_dim // num_moe_layers
+
+        if topk * num_moe_layers != moe_dim:
+            raise ValueError(
+                f"[RoutingReplay] moe_dim ({moe_dim}) is not divisible by "
+                f"num_moe_layers ({num_moe_layers}). topk would be {moe_dim / num_moe_layers}"
+            )
+
+        # Reshape to [batch_size, max_seq_len, num_moe_layers, topk]
+        routing_4d = rollout_routed_experts.reshape(batch_size, max_seq_len, num_moe_layers, topk)
+
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+
+        if attention_mask is not None:
+            if hasattr(attention_mask, "data"):
+                attention_mask = attention_mask.data
+            # Keep on CPU for cheap masking/scatter bookkeeping.
+            attention_mask = attention_mask.to(dtype=torch.bool, device="cpu", non_blocking=True)
+
+        # Split into micro-batches along batch dimension
+        n_micro_batches = (batch_size + micro_batch_size - 1) // micro_batch_size
+        for mb_idx in range(n_micro_batches):
+            mb_start = mb_idx * micro_batch_size
+            mb_end = min(mb_start + micro_batch_size, batch_size)
+            # [mb_size, max_seq_len, num_moe_layers, topk]
+            mb_routing = routing_4d[mb_start:mb_end]
+            mb_attn = attention_mask[mb_start:mb_end] if attention_mask is not None else None
+
+            for layer_idx in range(num_moe_layers):
+                # [mb_size, max_seq_len, topk]
+                layer_indices = mb_routing[:, :, layer_idx, :]
+
+                # Handle sequence parallel: slice along sequence dimension per sample
+                if sequence_parallel and tp_size > 1:
+                    assert max_seq_len % tp_size == 0, f"max_seq_len {max_seq_len} not divisible by tp_size {tp_size}"
+                    chunk = max_seq_len // tp_size
+                    layer_indices = layer_indices[:, tp_rank * chunk : (tp_rank + 1) * chunk, :]
+                    layer_valid = mb_attn[:, tp_rank * chunk : (tp_rank + 1) * chunk] if mb_attn is not None else None
+                else:
+                    layer_valid = mb_attn
+
+                # Flatten to [n_tokens, topk] using the same token order as training-time routing.
+                # Rollout data is [batch, seq, ...]; many Megatron MoE routers flatten [seq, batch, ...].
+                if layout == "seq_batch":
+                    layer_indices = layer_indices.permute(1, 0, 2)  # [seq, batch, topk]
+                    if layer_valid is not None:
+                        layer_valid = layer_valid.permute(1, 0)  # [seq, batch]
+
+                flat_indices = layer_indices.reshape(-1, topk).to(dtype=torch.int64, device="cpu")
+                flat_valid = layer_valid.reshape(-1).to(dtype=torch.bool, device="cpu") if layer_valid is not None else None
+
+                # Tokens with unknown routing (e.g. prompt fill or padding) should not all map to expert 0.
+                # We treat negative indices as "unknown" and assign them deterministically.
+                known = (flat_indices >= 0).all(dim=1)
+                unknown = ~known
+                if flat_valid is not None:
+                    unknown = unknown | (~flat_valid)
+
+                # Convert expert indices → routing_map [n_tokens, num_experts]
+                # Must be bool to match Megatron's TopKRouter output and satisfy
+                # MoEAlltoAllTokenDispatcher's dtype assertion.
+                n_tokens = flat_indices.shape[0]
+                routing_map = torch.zeros(n_tokens, num_experts, dtype=torch.bool, device="cpu")
+
+                if unknown.any():
+                    # Deterministic, reasonably balanced assignment for unknown tokens.
+                    # Use token row index so the assignment is stable across replays.
+                    unk_rows = torch.nonzero(unknown, as_tuple=False).squeeze(-1)
+                    base = unk_rows.to(dtype=torch.int64).unsqueeze(1)
+                    offsets = torch.arange(topk, dtype=torch.int64).unsqueeze(0)
+                    unk_idx = (base + offsets) % max(num_experts, 1)
+                    routing_map.scatter_(1, unk_idx, True)
+
+                if (~unknown).any():
+                    known_rows = torch.nonzero(~unknown, as_tuple=False).squeeze(-1)
+                    known_idx = flat_indices[known_rows].clamp(0, num_experts - 1)
+                    routing_map[known_rows].scatter_(1, known_idx, True)
+
+                self._caches[layer_idx].record(routing_map)
+
+        logger.debug(
+            f"[RoutingReplay] Filled {n_micro_batches} micro-batches × {num_moe_layers} layers "
+            f"from rollout data (batch={batch_size}, seq={max_seq_len}, topk={topk}, "
+            f"num_experts={num_experts}, layout={layout})"
+        )

@@ -33,6 +33,17 @@ from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, mask
 from siirl.utils.timer import Timer
 
 
+class DictWithDevice(dict):
+    """A dictionary that exposes a .device attribute from its values."""
+
+    @property
+    def device(self):
+        for v in self.values():
+            if isinstance(v, torch.Tensor):
+                return v.device
+        return torch.device("cpu")
+
+
 class ActorWorker:
     def __init__(self, config: SiiRLArguments):
         assert isinstance(config, SiiRLArguments)
@@ -185,6 +196,18 @@ class ActorWorker:
         )
 
     def init_model(self):
+        # Install routing replay patches BEFORE model construction so TopKRouter
+        # __init__ hooks are captured during make_megatron_module().
+        self._routing_replay_enabled = getattr(self.actor_ref_config.actor, "enable_routing_replay", False)
+        if self._routing_replay_enabled:
+            from siirl.utils.routing_replay import RoutingReplayManager
+
+            self._routing_replay_mgr = RoutingReplayManager.get()
+            self._routing_replay_mgr.install()
+            logger.info("[ActorWorker] Routing replay patches installed")
+        else:
+            self._routing_replay_mgr = None
+
         override_model_config = self.actor_ref_config.model.override_config
         override_transformer_config = self.actor_ref_config.actor.megatron.override_transformer_config or OmegaConf.create()
         override_ddp_config = self.actor_ref_config.actor.megatron.override_ddp_config or OmegaConf.create()
@@ -206,6 +229,10 @@ class ActorWorker:
             override_transformer_config=override_transformer_config,
             override_ddp_config=override_ddp_config,
         )
+
+        if self._routing_replay_enabled:
+            n_caches = len(self._routing_replay_mgr.caches)
+            logger.info(f"[ActorWorker] Routing replay: {n_caches} MoE router caches registered")
 
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
@@ -989,26 +1016,36 @@ class MegatronPPOActor:
         metric_weights = None
         global_info = None
         use_dynamic_batch = getattr(self.actor_config, "use_dynamic_batch", False)
+        routing_replay_enabled = getattr(self.actor_config, "enable_routing_replay", False)
         if use_dynamic_batch:
-            from siirl.engine.actor.dynamic_batch import rearrange_micro_batches
+            if routing_replay_enabled:
+                logger.warning(
+                    "[RoutingReplay] use_dynamic_batch is incompatible with routing replay: "
+                    "dynamic batching may produce different micro-batch compositions between "
+                    "RECORD and REPLAY phases. Falling back to static micro-batch splitting."
+                )
+                assert micro_batch_size is not None
+                micro_batches = mini_batch.split(micro_batch_size)
+            else:
+                from siirl.engine.actor.dynamic_batch import rearrange_micro_batches
 
-            max_token_len = int(self.actor_config.max_tokens_per_gpu)
-            # CP can be exposed differently by runtime groups vs configured topology.
-            # Use the largest visible CP size to avoid underestimating token budget.
-            runtime_cp_size = int(mpu.get_context_parallel_world_size())
-            trainer_cp_size = int(getattr(self.config.trainer, "context_parallel_size", 1))
-            tf_cp_size = int(getattr(self.tf_config, "context_parallel_size", 1))
-            cp_size = max(1, runtime_cp_size, trainer_cp_size, tf_cp_size)
-            max_token_len *= cp_size
+                max_token_len = int(self.actor_config.max_tokens_per_gpu)
+                # CP can be exposed differently by runtime groups vs configured topology.
+                # Use the largest visible CP size to avoid underestimating token budget.
+                runtime_cp_size = int(mpu.get_context_parallel_world_size())
+                trainer_cp_size = int(getattr(self.config.trainer, "context_parallel_size", 1))
+                tf_cp_size = int(getattr(self.tf_config, "context_parallel_size", 1))
+                cp_size = max(1, runtime_cp_size, trainer_cp_size, tf_cp_size)
+                max_token_len *= cp_size
 
-            micro_batches, partitions = rearrange_micro_batches(
-                batch=mini_batch,
-                max_token_len=max_token_len,
-                dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
-                vpp_size=len(self.actor_module),
-                sync_micro_num=True,
-                optimize_bubble=self.actor_config.use_workload_balance,
-            )
+                micro_batches, partitions = rearrange_micro_batches(
+                    batch=mini_batch,
+                    max_token_len=max_token_len,
+                    dp_group=mpu.get_data_parallel_group(with_context_parallel=True),
+                    vpp_size=len(self.actor_module),
+                    sync_micro_num=True,
+                    optimize_bubble=self.actor_config.use_workload_balance,
+                )
         else:
             assert micro_batch_size is not None
             micro_batches = mini_batch.split(micro_batch_size)
@@ -1174,6 +1211,9 @@ class MegatronPPOActor:
 
             # Return tensor for schedule hooks and queue dict payload for loss_func.
             if isinstance(output, dict):
+                if not hasattr(output, "device"):
+                    output = DictWithDevice(output)
+
                 _payload_channel.append(output)
                 output_tensor = output["log_probs"]
             else:

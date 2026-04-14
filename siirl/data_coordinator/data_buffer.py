@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import copy
 from collections import defaultdict, deque
 from collections.abc import Callable
 from typing import Any
@@ -22,7 +21,7 @@ import loguru
 import ray
 
 from siirl.data_coordinator.dataloader import DataLoaderNode
-from siirl.data_coordinator.sample import Dict2Samples, Sample, SampleInfo, preprocess_dataloader
+from siirl.data_coordinator.sample import Dict2Samples, SampleInfo, preprocess_dataloader
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.model_utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions
 
@@ -34,7 +33,7 @@ class DataCoordinator:
     and consumers (Trainers). It does not store the actual sample data, only the sample
     metadata (SampleInfo) and object references (ObjectRef). This allows it to implement
     complex global sampling strategies at a very low cost.
-    
+
     Important change!!!
     To ensure rollout worker not blocked by main loop, we expect to prefetch some sample from dataloader to pending_queue.
     Specifically, we prefetch global bsz samples to pending_queue.
@@ -445,12 +444,9 @@ class DataCoordinator:
     @ray.method(concurrency_group="dataloader")
     def val_info(self):
         return self.dataloader.num_val_batches, self.dataloader.val_batch_size
-    
+
     @ray.method(concurrency_group="dataloader")
-    async def prepare_data(
-        self,
-        train_batch_size
-    ):
+    async def prepare_data(self, train_batch_size):
         """
         Start or wake up background moving task.
         Keep at least ``train_batch_size`` samples in pending_queue.
@@ -507,7 +503,7 @@ class DataCoordinator:
                 await self.pending_queue.put(sample)
             self._prepare_data_event.set()
         return True
-                
+
     @ray.method(concurrency_group="dataloader")
     async def get_dataloader_size(self, train_batch_size):
         data_queue = self.dataloader_queue
