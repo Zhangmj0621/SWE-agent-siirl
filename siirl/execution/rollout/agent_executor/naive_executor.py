@@ -18,7 +18,6 @@ import hashlib
 import importlib
 import os
 import time
-from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -66,14 +65,11 @@ class NaiveExecutor:
         self._train_target_concurrency = target_concurrency
         self._train_concurrency_limits = train_limits
         self.tasks: set[asyncio.Task] = set()  # Track active generation tasks for cleanup
-        self.finish_group_samples: dict[str, list[Any]] = {}  # Save result of finish samples until reach n group
-        self.pending_queue = deque()
         # Partial-rollout (aborted by weight sync) samples live in a shared queue
         # on the DataCoordinator — see DataCoordinator.{put_partial,get_partial}.
         # Hoisting it off-worker lets idle workers help drain partials produced by
         # busier peers; safe because flush_cache during weight sync invalidates any
         # KV/prefix cache that would have tied a partial to its original worker.
-        self.rollout_n = config.rollout.n
         self._dispatch_paused = False
         self._dispatch_condition: asyncio.Condition | None = None
         self._dispatch_loop: asyncio.AbstractEventLoop | None = None
@@ -152,45 +148,28 @@ class NaiveExecutor:
 
     async def get_sample(self):
         """
-        Get new samples to replenish the batch.
+        Get one new sample to replenish the batch.
 
-        Priority: shared partial queue (DataCoordinator) > local pending_queue >
-        fresh pull from dataloader. Partial samples are pulled first so that
-        in-progress trajectories finish before fresh ones start (reduces
-        staleness span); since the partial queue is shared across workers, an
-        idle worker can pick up partials produced by a busy peer.
+        Returns at most one sample per call to keep load balanced across
+        rollout workers. Replicas of each prompt are pre-expanded in the
+        DataCoordinator (see run_dataloader), so a single prompt's rollout_n
+        replicas can land on different workers and long-tail prompts no
+        longer block a single worker.
+
+        Priority: shared partial queue (DataCoordinator) > fresh replica
+        from dataloader. Partial samples are pulled first so in-progress
+        trajectories finish before fresh ones start.
         """
-        # Calculate number of samples needed to reach target batch size
-        need_replenish = self.max_concurrency_size - len(self.tasks)
-        if need_replenish == 0:
+        if len(self.tasks) >= self.max_concurrency_size:
             return []
-        new_samples = []
 
-        # 1. Drain partials from the shared cancel queue first (any worker can take any partial)
-        partials = await self.data_coordinator.get_partial.remote(need_replenish)
+        # 1. Prefer a partial from the shared cancel queue (any worker can take any partial).
+        partials = await self.data_coordinator.get_partial.remote(1)
         if partials:
-            new_samples.extend(partials)
-            need_replenish -= len(partials)
+            return partials
 
-        if need_replenish == 0:
-            return new_samples
-
-        # 2. Then drain local pending queue (already-expanded fresh samples)
-        # 3. Finally pull fresh samples from dataloader
-        if len(self.pending_queue) < need_replenish:
-            # diff = need_replenish - len(self.pending_queue)
-            # pull_size = (diff + self.rollout_n - 1) // self.rollout_n
-
-            # Only get one sample each time to ensure load balancing among rollout workers
-            pull_samples = await self.data_coordinator.get_dataloader.remote(1)
-
-            for sample in pull_samples:
-                samples = [copy.deepcopy(sample) for _ in range(self.rollout_n)]
-                self.pending_queue.extend(samples)
-        for _ in range(need_replenish):
-            if len(self.pending_queue):
-                new_samples.append(self.pending_queue.popleft())
-        return new_samples
+        # 2. Pull one replica from the dataloader (already expanded to rollout_n copies).
+        return await self.data_coordinator.get_dataloader.remote(1)
 
     def _manual_pad(self, ids, max_length, padding_side="right"):
         """
@@ -372,20 +351,15 @@ class NaiveExecutor:
             prompt_length=getattr(sample, "prompt_length", 0),
             response_length=getattr(sample, "response_length", 0),
             uid=str(sample.uid),
+            replica_index=sample.replica_index,
             weight_version=self.engine._weight_version,
             dict_info={
                 "key": "Actor",
             },
         )
-        if sample.uid not in self.finish_group_samples:
-            self.finish_group_samples[sample.uid] = []
-        self.finish_group_samples[sample.uid].append((sample_info, sample_ref))
-        # Send processed sample to data coordinator
-        if len(self.finish_group_samples[sample.uid]) == self.rollout_n:
-            tuple_datas = self.finish_group_samples.pop(sample.uid)
-            sample_infos = [tuple_data[0] for tuple_data in tuple_datas]
-            sample_refs = [tuple_data[1] for tuple_data in tuple_datas]
-            await self.data_coordinator.put_batch.remote(sample_infos, sample_refs)
+        # DataCoordinator.put buffers replicas per uid and releases the full group
+        # to _sample_queue once all rollout_n replicas arrive.
+        await self.data_coordinator.put.remote(sample_info, sample_ref)
 
         return sample
 
@@ -768,7 +742,6 @@ class NaiveExecutor:
                     cancel_queue_size = -1
                 message = (
                     f"rank_{self._rank} active generate tasks: {current_status}, "
-                    f"{len(self.pending_queue)} left in pending_queue, "
                     f"{cancel_queue_size} left in shared cancel_queue, "
                     f"sem_limit={self.max_concurrency_size}, "
                     f"http_attempts={attempts}, http_timeouts={timeouts}, http_timeout_rate={timeout_rate:.3f}"
@@ -785,21 +758,9 @@ class NaiveExecutor:
         """
         Stop executor and clean up active tasks.
         Sets running flag to False and waits for all active generation tasks to complete.
-        Residual samples left in the local pending_queue (already-expanded fresh
-        samples that never got dispatched) are dropped with a warning. Partials
-        live on the shared DataCoordinator queue and survive across workers, so
-        they are NOT touched here.
+        Partials live on the shared DataCoordinator queue and survive across workers,
+        so they are NOT touched here.
         """
         self.running = False
         # Wait for all remaining tasks to finish before exiting
         await asyncio.gather(*self.tasks)
-
-        dropped_pending = len(self.pending_queue)
-        if dropped_pending:
-            logger.warning(
-                "[NaiveExecutor.stop] rank_{} dropping {} residual fresh samples from "
-                "local pending_queue (not dispatched before shutdown)",
-                self._rank,
-                dropped_pending,
-            )
-            self.pending_queue.clear()

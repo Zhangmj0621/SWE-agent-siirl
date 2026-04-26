@@ -1,8 +1,10 @@
 import asyncio
 import types
+from dataclasses import dataclass, field
 from typing import Any, Union, get_args, get_origin
 
 import numpy as np
+import ray
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
 from tensordict import TensorDict
@@ -16,6 +18,11 @@ class SampleInfo(BaseModel):
     dict_info: dict[str, Any] = Field(default_factory=dict)
     weight_version: int = Field()
     uid: str | None = Field(default=None)
+    replica_index: int | None = Field(
+        default=None,
+        metadata={"help": "Position of this replica within its group's rollout_n slots. "
+                  "Set by run_dataloader on dispatch and copied over from sample on put."},
+    )
 
 
 class Sample(BaseModel):
@@ -62,6 +69,12 @@ class Sample(BaseModel):
     seq_reward: float = Field(default=None, metadata={"help": "used in dapo"})
     multi_modal_inputs: dict[str, Any] | None = Field(default=None)
     uid: str | None = Field(default=None)
+    replica_index: int | None = Field(
+        default=None,
+        metadata={"help": "Position of this replica within its group's rollout_n slots "
+                  "(0..rollout_n-1). Assigned when run_dataloader expands a prompt into "
+                  "replicas and preserved across partial-rollout abort/resume."},
+    )
     temperature: float = Field(default=None, metadata={"help": "temperature"})
     timing_info: dict[str, Any] | None = Field(
         default=None,
@@ -83,6 +96,33 @@ class Sample(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+@dataclass
+class SampleGroup:
+    """Aggregation container for the rollout_n replicas of one prompt.
+
+    Patterned after the RolloutSample / agent_loop_output_list design in
+    recipe/fully_async_policy: replicas of a single prompt share a uid and
+    each is dispatched independently with its own ``replica_index``
+    (0..rollout_n-1). ``replicas[i]`` is the (SampleInfo, ObjectRef) tuple
+    for replica i, or None while that slot is still being generated.
+
+    The group is created up front (at dataloader time) so ``put`` can write
+    into a known slot without racing to materialize the bucket; it is
+    released downstream once every slot is filled.
+    """
+
+    uid: str
+    rollout_n: int
+    replicas: list[tuple[SampleInfo, "ray.ObjectRef"] | None] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.replicas:
+            self.replicas = [None] * self.rollout_n
+
+    def is_complete(self) -> bool:
+        return all(slot is not None for slot in self.replicas)
 
 
 def preprocess_dataloader(data: dict, n: int = 1, uid_base: int = 0):
