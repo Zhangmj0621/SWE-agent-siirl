@@ -140,7 +140,7 @@ class RolloutManager:
         self._validate_reuse_pool = ValidateReuseWorkerPool()
 
         # Colocated lifecycle guard: prevents non-idempotent SGLang calls
-        # (pause_generation, offload_memory, resume) from being invoked twice.
+        # (abort_generation, offload_memory, resume) from being invoked twice.
         self._train_offloaded = False
         self._weights_offloaded_for_sync_cycle = False
         self._weights_onloaded_for_sync = False
@@ -570,18 +570,18 @@ class RolloutManager:
             f"trace_id={trace_id} timeout_s={timeout_s}"
         )
         t0 = time.monotonic()
-        pause_succeeded = False
+        abort_succeeded = False
         try:
-            ray.get([w.pause_generation.remote() for w in tp0_workers], timeout=timeout_s)
-            pause_succeeded = True
+            ray.get([w.abort_generation.remote(timeout_s) for w in tp0_workers], timeout=timeout_s)
+            abort_succeeded = True
             ray.get([w.flush_cache.remote() for w in tp0_workers], timeout=timeout_s)
             ray.get([w.offload_memory.remote(tags) for w in tp0_workers], timeout=timeout_s)
             self._train_offloaded = True
             self._weights_offloaded_for_sync_cycle = offload_weights
         except Exception:
-            if pause_succeeded:
+            if abort_succeeded:
                 with contextlib.suppress(Exception):
-                    ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
+                    ray.get([w.resume_generation.remote() for w in tp0_workers], timeout=timeout_s)
             logger.error("[RolloutManager] offload_for_train failed\n" + traceback.format_exc())
             self._log_worker_debug_states(
                 tp0_workers,
@@ -753,7 +753,7 @@ class RolloutManager:
         """Resume rollout GPU memory after weight sync.
 
         Idempotent: repeated calls while not offloaded are no-ops.
-        Calls continue_generation to match the pause_generation from offload_for_train.
+        Resumes rollout dispatch after abort_generation from offload_for_train.
         """
         from loguru import logger
 
@@ -794,7 +794,7 @@ class RolloutManager:
                 tag=f"kv_cache trace_id={trace_id}",
             )
 
-            ray.get([w.continue_generation.remote() for w in tp0_workers], timeout=timeout_s)
+            ray.get([w.resume_generation.remote() for w in tp0_workers], timeout=timeout_s)
             self._train_offloaded = False
         except Exception:
             logger.error("[RolloutManager] resume_after_sync failed\n" + traceback.format_exc())

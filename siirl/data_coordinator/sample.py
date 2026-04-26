@@ -69,6 +69,14 @@ class Sample(BaseModel):
             "help": "Rollout timing information: rollout_start_at, rollout_end_at, rollout_duration, generation_duration, reward_duration"
         },
     )
+    partial_agent_data: dict[str, Any] | None = Field(
+        default=None,
+        metadata={
+            "help": "Snapshot of the AgentData loop state when rollout was aborted by weight sync. "
+            "Populated by rollout_flow on abort and consumed by rollout_flow on resume. "
+            "MUST be None for completed samples so it is not shipped into the trainer TensorDict."
+        },
+    )
     # Internal timing fields used by naive_flow.py, consumed by naive_executor.py
     _generation_duration: float = PrivateAttr(default=0.0)
     _reward_duration: float = PrivateAttr(default=0.0)

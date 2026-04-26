@@ -29,6 +29,7 @@ from loguru import logger
 
 from siirl.data_coordinator.sample import Sample, SampleInfo
 from siirl.execution.rollout.concurrency import resolve_rollout_concurrency
+from siirl.execution.rollout.utils import RolloutGenerationAborted
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.model_utils.model import compute_position_id_with_mask
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient
@@ -67,7 +68,15 @@ class NaiveExecutor:
         self.tasks: set[asyncio.Task] = set()  # Track active generation tasks for cleanup
         self.finish_group_samples: dict[str, list[Any]] = {}  # Save result of finish samples until reach n group
         self.pending_queue = deque()
+        # Partial-rollout (aborted by weight sync) samples live in a shared queue
+        # on the DataCoordinator — see DataCoordinator.{put_partial,get_partial}.
+        # Hoisting it off-worker lets idle workers help drain partials produced by
+        # busier peers; safe because flush_cache during weight sync invalidates any
+        # KV/prefix cache that would have tied a partial to its original worker.
         self.rollout_n = config.rollout.n
+        self._dispatch_paused = False
+        self._dispatch_condition: asyncio.Condition | None = None
+        self._dispatch_loop: asyncio.AbstractEventLoop | None = None
 
         # Semaphore to control concurrent generation tasks (limit to batch size)
         # Use ContextVar to store semaphore per-async-context (per-event-loop)
@@ -104,23 +113,70 @@ class NaiveExecutor:
             mod = importlib.import_module(module_path)
             self.rollout_flow = getattr(mod, name)
 
+    def pause_dispatch(self):
+        # Atomic write under GIL; no need to hop to the dispatch loop just to flip a bool.
+        # The dispatch loop checks the flag on each iteration via _wait_dispatch_resumed.
+        self._dispatch_paused = True
+
+    def resume_dispatch(self):
+        loop = self._dispatch_loop
+        if loop is None or loop.is_closed():
+            self._dispatch_paused = False
+            return
+        # Resume has to run on the dispatch loop because it must notify the Condition
+        # to wake a coroutine that is currently awaiting on it.
+        asyncio.run_coroutine_threadsafe(self._resume_dispatch(), loop).result()
+
+    async def _resume_dispatch(self):
+        self._dispatch_paused = False
+        if self._dispatch_condition is None:
+            return
+        async with self._dispatch_condition:
+            self._dispatch_condition.notify_all()
+
+    def _init_dispatch_condition(self):
+        self._dispatch_loop = asyncio.get_running_loop()
+        self._dispatch_condition = asyncio.Condition()
+
+    async def _wait_dispatch_resumed(self):
+        if self._dispatch_condition is None:
+            self._init_dispatch_condition()
+        condition = self._dispatch_condition
+        async with condition:
+            while self._dispatch_paused:
+                await condition.wait()
+
     async def init_sample(self):
         # need_replenish = self.max_concurrency_size
         pass
 
     async def get_sample(self):
         """
-        Get new samples from data coordinator to replenish the batch.
-        Calculates the number of missing samples and requests them from data coordinator.
+        Get new samples to replenish the batch.
 
-        Returns:
-            List of new samples from data coordinator (empty if batch is full)
+        Priority: shared partial queue (DataCoordinator) > local pending_queue >
+        fresh pull from dataloader. Partial samples are pulled first so that
+        in-progress trajectories finish before fresh ones start (reduces
+        staleness span); since the partial queue is shared across workers, an
+        idle worker can pick up partials produced by a busy peer.
         """
         # Calculate number of samples needed to reach target batch size
         need_replenish = self.max_concurrency_size - len(self.tasks)
         if need_replenish == 0:
             return []
-        # Request new samples from data coordinator (Ray remote call)
+        new_samples = []
+
+        # 1. Drain partials from the shared cancel queue first (any worker can take any partial)
+        partials = await self.data_coordinator.get_partial.remote(need_replenish)
+        if partials:
+            new_samples.extend(partials)
+            need_replenish -= len(partials)
+
+        if need_replenish == 0:
+            return new_samples
+
+        # 2. Then drain local pending queue (already-expanded fresh samples)
+        # 3. Finally pull fresh samples from dataloader
         if len(self.pending_queue) < need_replenish:
             # diff = need_replenish - len(self.pending_queue)
             # pull_size = (diff + self.rollout_n - 1) // self.rollout_n
@@ -131,8 +187,6 @@ class NaiveExecutor:
             for sample in pull_samples:
                 samples = [copy.deepcopy(sample) for _ in range(self.rollout_n)]
                 self.pending_queue.extend(samples)
-        new_samples = []
-
         for _ in range(need_replenish):
             if len(self.pending_queue):
                 new_samples.append(self.pending_queue.popleft())
@@ -396,6 +450,19 @@ class NaiveExecutor:
                     await self.put_data(sample=sample, loop=loop)
                 return sample
 
+        except RolloutGenerationAborted as aborted:
+            if not is_validate:
+                # Hand the partial sample back to the shared cancel queue so any
+                # worker can pick it up after weight sync resumes dispatch.
+                await self.data_coordinator.put_partial.remote(aborted.sample)
+                logger.debug(
+                    "[NaiveExecutor.generate] Sample uid={} aborted by weight sync; "
+                    "handed back to shared cancel queue",
+                    sample_uid,
+                )
+                return None
+            raise
+
         except Exception as e:
             import traceback
 
@@ -417,6 +484,7 @@ class NaiveExecutor:
         except LookupError:
             # ContextVar not set yet - create new semaphore for this event loop
             self._semaphore_ctx.set(asyncio.Semaphore(self.max_concurrency_size))
+        self._init_dispatch_condition()
 
         self.running = True
         stats_task = None
@@ -431,6 +499,7 @@ class NaiveExecutor:
             stats_task = asyncio.create_task(self.rollout_status())
 
         while self.running:
+            await self._wait_dispatch_resumed()
             # Get new samples to replenish batch
             samples = await self.get_sample()
             if not samples:
@@ -691,9 +760,16 @@ class NaiveExecutor:
             timeout_rate = (timeouts / attempts) if attempts > 0 else 0.0
 
             if last_status != current_status or timeouts > 0:
+                # Shared partial queue lives on the coordinator; query is cheap at
+                # 10s cadence and -1 acts as a sentinel if the RPC ever fails.
+                try:
+                    cancel_queue_size = await self.data_coordinator.get_partial_size.remote()
+                except Exception:
+                    cancel_queue_size = -1
                 message = (
                     f"rank_{self._rank} active generate tasks: {current_status}, "
                     f"{len(self.pending_queue)} left in pending_queue, "
+                    f"{cancel_queue_size} left in shared cancel_queue, "
                     f"sem_limit={self.max_concurrency_size}, "
                     f"http_attempts={attempts}, http_timeouts={timeouts}, http_timeout_rate={timeout_rate:.3f}"
                 )
@@ -709,7 +785,21 @@ class NaiveExecutor:
         """
         Stop executor and clean up active tasks.
         Sets running flag to False and waits for all active generation tasks to complete.
+        Residual samples left in the local pending_queue (already-expanded fresh
+        samples that never got dispatched) are dropped with a warning. Partials
+        live on the shared DataCoordinator queue and survive across workers, so
+        they are NOT touched here.
         """
         self.running = False
         # Wait for all remaining tasks to finish before exiting
         await asyncio.gather(*self.tasks)
+
+        dropped_pending = len(self.pending_queue)
+        if dropped_pending:
+            logger.warning(
+                "[NaiveExecutor.stop] rank_{} dropping {} residual fresh samples from "
+                "local pending_queue (not dispatched before shutdown)",
+                self._rank,
+                dropped_pending,
+            )
+            self.pending_queue.clear()

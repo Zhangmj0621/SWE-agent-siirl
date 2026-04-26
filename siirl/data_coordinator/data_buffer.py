@@ -67,6 +67,13 @@ class DataCoordinator:
         # Used to avoid uid = 0 in async mode
         self._next_train_uid = 0
 
+        # Shared cancel queue for partial-rollout samples aborted by weight sync.
+        # Any rollout worker may push to / pull from this queue — partial samples
+        # do NOT need to return to the original worker since flush_cache happens
+        # globally during weight sync, so KV/prefix cache cannot be reused anyway.
+        # Hoisting this to the coordinator load-balances partial work across workers.
+        self._cancel_queue: asyncio.Queue = asyncio.Queue()
+
     async def put(self, sample_info: SampleInfo, sample_ref: Any):
         """
         Called by a RolloutWorker to register a new sample reference and its metadata.
@@ -546,6 +553,41 @@ class DataCoordinator:
             for _ in range(data_queue.qsize()):
                 all_popped.append(await data_queue.get())
             return all_popped
+
+    @ray.method(concurrency_group="dataloader")
+    async def put_partial(self, sample) -> None:
+        """Push a partial-rollout sample (aborted by weight sync) into the shared
+        cancel queue. Any rollout worker may pull it later via ``get_partial``.
+
+        Note: validate-path samples must NOT be pushed here — only train-mode
+        partials carry the partial_agent_data needed for resume.
+        """
+        await self._cancel_queue.put(sample)
+
+    @ray.method(concurrency_group="dataloader")
+    async def get_partial(self, batch_size: int) -> list:
+        """Drain up to ``batch_size`` partial-rollout samples from the shared
+        cancel queue. Returns fewer samples (or an empty list) if the queue is
+        shorter than requested. Called by rollout workers in ``get_sample`` to
+        prioritize finishing partial work before pulling fresh data.
+        """
+        if batch_size <= 0:
+            return []
+        # Mirror get_dataloader: bounded by current qsize so we never block waiting
+        # for partial samples that may never arrive (workers must fall through to
+        # fresh data instead). Safe under concurrency_group="dataloader" serialization.
+        if self._cancel_queue.qsize() > batch_size:
+            return [await self._cancel_queue.get() for _ in range(batch_size)]
+        else:
+            all_popped = []
+            for _ in range(self._cancel_queue.qsize()):
+                all_popped.append(await self._cancel_queue.get())
+            return all_popped
+
+    @ray.method(concurrency_group="dataloader")
+    async def get_partial_size(self) -> int:
+        """Return the current size of the shared cancel queue (for monitoring)."""
+        return self._cancel_queue.qsize()
 
     @ray.method(concurrency_group="dataloader")
     def save_dataloader_state(self):
