@@ -613,12 +613,29 @@ class DataCoordinator:
         """Save dataloader state and pending dataloader queues."""
         if self.dataloader is None:
             return None
+        # Dereference ObjectRefs in _pending_groups so the snapshot is usable
+        # after a cluster restart (ObjectRef IDs do not survive re-init).
+        pending_groups = {}
+        for uid, group in self._pending_groups.items():
+            slots = []
+            for slot in group.replicas:
+                if slot is None:
+                    slots.append(None)
+                else:
+                    info, ref = slot
+                    slots.append((info, ray.get(ref)))
+            pending_groups[uid] = {
+                "uid": group.uid,
+                "rollout_n": group.rollout_n,
+                "replicas": slots,
+            }
         return {
             "dataloader_state": self.dataloader.state_dict(),
             "pending_queue": list(self.pending_queue._queue),
             "train_queue": list(self.dataloader_queue._queue),
             "val_queue": list(self.dataloader_val_queue._queue),
             "next_train_uid": self._next_train_uid,
+            "pending_groups": pending_groups,
         }
 
     @ray.method(concurrency_group="dataloader")
@@ -645,6 +662,17 @@ class DataCoordinator:
             else:
                 queued_uids = [int(sample.uid) for sample in train_items if getattr(sample, "uid", None) is not None]
                 self._next_train_uid = (max(queued_uids) + 1) if queued_uids else 0
+            # Rehydrate _pending_groups: re-ray.put the Samples to get fresh ObjectRefs
+            # valid in the current cluster session.
+            self._pending_groups = {}
+            for uid, group_state in (state_dict.get("pending_groups") or {}).items():
+                group = SampleGroup(uid=group_state["uid"], rollout_n=int(group_state["rollout_n"]))
+                for i, slot in enumerate(group_state["replicas"]):
+                    if slot is None:
+                        continue
+                    info, sample = slot
+                    group.replicas[i] = (info, ray.put(sample))
+                self._pending_groups[uid] = group
             self._prepare_data_event.set()
             return
 
@@ -652,6 +680,7 @@ class DataCoordinator:
         self.pending_queue = asyncio.Queue()
         self.dataloader_queue = asyncio.Queue()
         self.dataloader_val_queue = asyncio.Queue()
+        self._pending_groups = {}
         self._next_train_uid = 0
 
 
