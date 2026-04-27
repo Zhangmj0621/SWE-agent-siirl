@@ -475,7 +475,9 @@ class DataCoordinator:
 
             while not self._prepare_data_stop:
                 moved = False
-                reserve = self._prepare_data_reserve
+                # pending_queue holds replicas (rollout_n per prompt); scale reserve
+                # from prompts to replicas so callers can keep passing prompt counts.
+                reserve = self._prepare_data_reserve * self.rollout_n
                 moved_count = 0
                 while self.pending_queue.qsize() > reserve:
                     sample = self.pending_queue.get_nowait()
@@ -523,9 +525,13 @@ class DataCoordinator:
 
     @ray.method(concurrency_group="dataloader")
     async def get_dataloader_size(self, train_batch_size):
+        # Queues hold replicas (rollout_n per prompt); callers work in prompt
+        # units, so scale the reserve up and the returned total back down.
         data_queue = self.dataloader_queue
-        remain_pending_size = self.pending_queue.qsize() - train_batch_size
-        return data_queue.qsize() + (remain_pending_size if remain_pending_size > 0 else 0)
+        reserve_replicas = train_batch_size * self.rollout_n
+        remain_pending_replicas = self.pending_queue.qsize() - reserve_replicas
+        total_replicas = data_queue.qsize() + (remain_pending_replicas if remain_pending_replicas > 0 else 0)
+        return total_replicas // self.rollout_n
 
     @ray.method(concurrency_group="dataloader")
     async def run_dataloader(self, epoch=0, is_validate=False):
