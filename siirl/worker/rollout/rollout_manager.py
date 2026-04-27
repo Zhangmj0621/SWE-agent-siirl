@@ -1039,11 +1039,17 @@ class RolloutManager:
         """
         Prefetch data asynchronously into dataloader queue.
         Make sure samples used per step is less than async_factor * train_batch_size.
+
+        staleness_sample_cnt is tracked in replica units (rollout_n per prompt)
+        to match queue contents — if we tracked prompts, floor-rounded conversions
+        would hide half-consumed groups and let the prefetcher overrun the
+        async_factor budget.
         """
         if total_remain_steps is None:
             return
         putted_samples = 0
-        max_samples_per_step: int = self.config.trainer.async_factor * self.config.data.train_batch_size
+        rollout_n = self.config.rollout.n
+        max_samples_per_step: int = self.config.trainer.async_factor * self.config.data.train_batch_size * rollout_n
         while putted_samples < total_remain_steps - self.config.data.train_batch_size:
             async with self.staleness_cond:
                 while self.staleness_sample_cnt >= max_samples_per_step:
@@ -1053,7 +1059,7 @@ class RolloutManager:
                 self.prefetch_data_not_has_batch = True
                 return
             async with self.staleness_cond:
-                self.staleness_sample_cnt += 1
+                self.staleness_sample_cnt += rollout_n
                 putted_samples += 1
 
     async def prepare_data(

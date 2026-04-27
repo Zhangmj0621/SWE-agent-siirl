@@ -525,13 +525,14 @@ class DataCoordinator:
 
     @ray.method(concurrency_group="dataloader")
     async def get_dataloader_size(self, train_batch_size):
-        # Queues hold replicas (rollout_n per prompt); callers work in prompt
-        # units, so scale the reserve up and the returned total back down.
+        # Queues hold replicas (rollout_n per prompt); callers track
+        # staleness in replica units so return the raw replica count here.
+        # Returning prompts (floor-dividing) would hide half-consumed groups
+        # and let the prefetcher exceed async_factor * train_batch_size.
         data_queue = self.dataloader_queue
         reserve_replicas = train_batch_size * self.rollout_n
         remain_pending_replicas = self.pending_queue.qsize() - reserve_replicas
-        total_replicas = data_queue.qsize() + (remain_pending_replicas if remain_pending_replicas > 0 else 0)
-        return total_replicas // self.rollout_n
+        return data_queue.qsize() + (remain_pending_replicas if remain_pending_replicas > 0 else 0)
 
     @ray.method(concurrency_group="dataloader")
     async def run_dataloader(self, epoch=0, is_validate=False):
