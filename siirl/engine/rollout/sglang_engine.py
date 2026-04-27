@@ -323,9 +323,10 @@ class SglangEngine:
     ):
         """Single sample generation with optional router load balancing.
 
-        Pass ``rid`` to reuse a previously-issued request id (e.g. when resuming a
-        partial rollout that was aborted by weight sync). When ``rid`` is None a
-        fresh uuid4 hex is generated per request.
+        Pass ``rid`` to reuse a previously-issued request id. Callers should keep
+        the same ``rid`` across every turn of a multi-turn agent (and across
+        abort/resume) so the inference engine can identify the logical request.
+        When ``rid`` is None a fresh uuid4 hex is generated as a fallback.
         """
         await self._begin_generation_when_resumed()
         request_rid = rid if rid is not None else uuid.uuid4().hex

@@ -14,6 +14,7 @@
 import asyncio
 import json
 import time
+import uuid
 from typing import Any
 
 import numpy as np
@@ -199,7 +200,12 @@ class NaiveFlow:
             raw_prompt = raw_prompt.tolist()
         partial = sample.partial_agent_data
         if not partial:
-            return AgentData(raw_prompt=raw_prompt, ground_truth=sample.reward_model["ground_truth"])
+            agent_data = AgentData(raw_prompt=raw_prompt, ground_truth=sample.reward_model["ground_truth"])
+            # Assign a stable rid that follows this sample through every multi-turn
+            # generate() call (and across abort/resume). The inference engine sees
+            # the same rid on every turn, so it can identify the logical request.
+            agent_data.rid = uuid.uuid4().hex
+            return agent_data
 
         agent_data = AgentData(
             raw_prompt=partial.get("messages", raw_prompt),
@@ -214,7 +220,9 @@ class NaiveFlow:
         agent_data.env_rewards = list(partial.get("env_rewards", []))
         agent_data.routed_experts = partial.get("routed_experts")
         agent_data.env_kwargs = dict(partial.get("env_kwargs", agent_data.env_kwargs))
-        agent_data.rid = partial.get("rid")
+        # rid from a previously-aborted generation; fall back to a fresh uuid for
+        # old snapshots without rid so we never dispatch a turn without one.
+        agent_data.rid = partial.get("rid") or uuid.uuid4().hex
         agent_data.state = AgentState.GENERATING
         return agent_data
 
@@ -348,8 +356,10 @@ class NaiveFlow:
                 agent_data.routed_experts = abort.routed_experts
             agent_data.rid = abort.rid
             return AgentState.ABORTED
-        # Generation completed normally — clear any stale rid from a prior abort.
-        agent_data.rid = None
+        # Multi-turn generations share one rid for the whole agent lifetime,
+        # so the inference engine can correlate turns of the same logical
+        # request. rid is assigned once in _load_agent_data and preserved
+        # across abort/resume — do NOT clear it on per-turn completion.
         agent_data.response_ids += response_ids
         agent_data.rollout_log_prob += rollout_log_prob
         agent_data.prompts_ids += response_ids

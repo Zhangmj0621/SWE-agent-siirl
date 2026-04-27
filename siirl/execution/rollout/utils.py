@@ -54,9 +54,10 @@ class AgentData:
         self.env_kwargs = {}
         self.env_rewards = []
         self.routed_experts = None  # Raw flat np.int32 array from SGLang MoE routing
-        # SGLang request id of the most recent in-flight generation. Set when a
-        # generation is aborted so the same rid can be reused on resume (enables
-        # future per-rid cancel semantics). None outside an aborted window.
+        # SGLang request id. Assigned once by naive_flow._load_agent_data and shared
+        # across every generate() call of this sample's multi-turn lifetime (so the
+        # inference engine can correlate turns as one logical request), and
+        # preserved across abort/resume via partial_agent_data.
         self.rid: str | None = None
         if ground_truth:
             self.env_kwargs["ground_truth"] = ground_truth
