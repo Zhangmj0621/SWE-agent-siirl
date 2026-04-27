@@ -150,19 +150,14 @@ class NaiveExecutor:
         """
         Get one new sample to replenish the batch.
 
-        Returns at most one sample per call to keep load balanced across
-        rollout workers. Replicas of each prompt are pre-expanded in the
-        DataCoordinator (see run_dataloader), so a single prompt's rollout_n
-        replicas can land on different workers and long-tail prompts no
-        longer block a single worker.
+        Returns at most one sample per call. The dispatch semaphore in ``run``
+        already guarantees we only reach here when this worker has a free
+        inference slot, so there is no need to double-gate on len(self.tasks).
 
         Priority: shared partial queue (DataCoordinator) > fresh replica
         from dataloader. Partial samples are pulled first so in-progress
         trajectories finish before fresh ones start.
         """
-        if len(self.tasks) >= self.max_concurrency_size:
-            return []
-
         # 1. Prefer a partial from the shared cancel queue (any worker can take any partial).
         partials = await self.data_coordinator.get_partial.remote(1)
         if partials:
@@ -371,7 +366,8 @@ class NaiveExecutor:
     ):
         """
         Asynchronous sample generation pipeline: preprocess → rollout → postprocess → data coordination.
-        Uses semaphore to control concurrency and offloads CPU-bound processing to executor.
+        Dispatch concurrency is gated at the caller (``run`` or the validate path's
+        validate_semaphore); this function itself does not throttle.
 
         Args:
             sample: Raw sample from data coordinator
@@ -386,43 +382,40 @@ class NaiveExecutor:
         sample_uid = getattr(sample, "uid", "unknown")
 
         try:
-            # Get semaphore from current async context (per-event-loop)
-            semaphore = self._semaphore_ctx.get()
-            async with semaphore:  # Limit concurrent generations to batch size
-                loop = asyncio.get_running_loop()
-                # 1. Preprocess sample (CPU-bound, offload to executor)
-                sample = await loop.run_in_executor(None, self._pre_process, sample, is_validate)
+            loop = asyncio.get_running_loop()
+            # 1. Preprocess sample (CPU-bound, offload to executor)
+            sample = await loop.run_in_executor(None, self._pre_process, sample, is_validate)
 
-                # 2. Execute rollout flow (LLM generation with reward calculation)
-                if validate_request_seed is None:
+            # 2. Execute rollout flow (LLM generation with reward calculation)
+            if validate_request_seed is None:
+                sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
+            else:
+                try:
+                    sample = await self.rollout_flow(
+                        sample,
+                        self.reward_fn,
+                        is_validate,
+                        request_seed=validate_request_seed,
+                    )
+                except TypeError as exc:
+                    if "request_seed" not in str(exc):
+                        raise
                     sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
-                else:
-                    try:
-                        sample = await self.rollout_flow(
-                            sample,
-                            self.reward_fn,
-                            is_validate,
-                            request_seed=validate_request_seed,
-                        )
-                    except TypeError as exc:
-                        if "request_seed" not in str(exc):
-                            raise
-                        sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
 
-                # 3. Postprocess sample (CPU-bound padding and tensor formatting)
-                sample = await loop.run_in_executor(None, self._post_process, sample)
+            # 3. Postprocess sample (CPU-bound padding and tensor formatting)
+            sample = await loop.run_in_executor(None, self._post_process, sample)
 
-                # 4. Collect timing information from rollout flow
-                timing_info["rollout_end_at"] = time.time()
-                timing_info["rollout_duration"] = timing_info["rollout_end_at"] - timing_info["rollout_start_at"]
-                timing_info["generation_duration"] = getattr(sample, "_generation_duration", 0)
-                timing_info["reward_duration"] = getattr(sample, "_reward_duration", 0)
-                sample.timing_info = timing_info
+            # 4. Collect timing information from rollout flow
+            timing_info["rollout_end_at"] = time.time()
+            timing_info["rollout_duration"] = timing_info["rollout_end_at"] - timing_info["rollout_start_at"]
+            timing_info["generation_duration"] = getattr(sample, "_generation_duration", 0)
+            timing_info["reward_duration"] = getattr(sample, "_reward_duration", 0)
+            sample.timing_info = timing_info
 
-                # 5. Store processed sample in Ray object store and notify data coordinator
-                if not is_validate:
-                    await self.put_data(sample=sample, loop=loop)
-                return sample
+            # 5. Store processed sample in Ray object store and notify data coordinator
+            if not is_validate:
+                await self.put_data(sample=sample, loop=loop)
+            return sample
 
         except RolloutGenerationAborted as aborted:
             if not is_validate:
@@ -449,15 +442,22 @@ class NaiveExecutor:
         Main execution loop for the executor.
         Continuously replenishes samples, creates generation tasks, and maintains batch size.
         Runs until self.running is set to False.
+
+        Dispatch is gated by ``self._semaphore_ctx`` — we only pull a new sample
+        from the DataCoordinator once this worker has a free inference slot.
+        This prevents a slow worker from draining the shared queue into its own
+        task set while peers sit idle. The slot is released in the task's
+        done-callback so generate() itself does not need its own semaphore.
         """
         # Create semaphore for this event loop if not already exists
         # Check if ContextVar has been set to avoid creating multiple semaphores
         # when switching between run() and validate() in the same event loop
         try:
-            self._semaphore_ctx.get()
+            semaphore = self._semaphore_ctx.get()
         except LookupError:
             # ContextVar not set yet - create new semaphore for this event loop
-            self._semaphore_ctx.set(asyncio.Semaphore(self.max_concurrency_size))
+            semaphore = asyncio.Semaphore(self.max_concurrency_size)
+            self._semaphore_ctx.set(semaphore)
         self._init_dispatch_condition()
 
         self.running = True
@@ -474,29 +474,31 @@ class NaiveExecutor:
 
         while self.running:
             await self._wait_dispatch_resumed()
-            # Get new samples to replenish batch
+            # Block until this worker has an inference slot before touching the
+            # shared queue — if we are already saturated, let peers pull instead.
+            await semaphore.acquire()
             samples = await self.get_sample()
             if not samples:
-                # No new samples - short sleep to avoid busy waiting
+                # Nothing to dispatch right now; give the slot back and retry.
+                semaphore.release()
                 await asyncio.sleep(0.001)
-            else:
-                # Create generation tasks for new samples
-                tasks = []
-                for sample in samples:
-                    task = asyncio.create_task(self.generate(sample))
-                    tasks.append(task)
-                    self.tasks.add(task)
-                    # Remove task from tracking set when completed
-                    task.add_done_callback(self.tasks.discard)
+                continue
+            for sample in samples:
+                task = asyncio.create_task(self.generate(sample))
+                self.tasks.add(task)
+                # Release both the task-set slot and the semaphore slot when the
+                # task finishes (including on exception / cancellation).
+                task.add_done_callback(self.tasks.discard)
+                task.add_done_callback(lambda t, sem=semaphore: sem.release())
 
-                # Debug code (commented out) - save batch for inspection
-                # samples = await asyncio.gather(*tasks)
-                # batch = Samples2Dict(samples=samples)
-                # torch.save(batch, f"save_dict/{os.environ.get('RANK')}_batch.pt")
-                # break
+            # Debug code (commented out) - save batch for inspection
+            # samples = await asyncio.gather(*tasks)
+            # batch = Samples2Dict(samples=samples)
+            # torch.save(batch, f"save_dict/{os.environ.get('RANK')}_batch.pt")
+            # break
 
-                # Yield control to event loop (non-blocking sleep)
-                await asyncio.sleep(0)
+            # Yield control to event loop (non-blocking sleep)
+            await asyncio.sleep(0)
         if self._dp_rank == 0:
             stats_task.cancel()
             await asyncio.gather(stats_task, return_exceptions=True)
@@ -639,15 +641,6 @@ class NaiveExecutor:
         Uses high concurrency with router load balancing.
         Streaming collection via as_completed to reduce tail latency.
         """
-        # Create semaphore for this event loop if not already exists
-        # This handles the case where validate() is called multiple times
-        # or switches with run() in the same event loop
-        try:
-            self._semaphore_ctx.get()
-        except LookupError:
-            # ContextVar not set yet - create new semaphore for this event loop
-            self._semaphore_ctx.set(asyncio.Semaphore(self.max_concurrency_size))
-
         # Enable router on rollout_flow for validate duration
         self.rollout_flow.use_router = use_router
         max_concurrent = self._resolve_validate_concurrency(use_router)
