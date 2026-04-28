@@ -102,15 +102,9 @@ class Sample(BaseModel):
 class SampleGroup:
     """Aggregation container for the rollout_n replicas of one prompt.
 
-    Patterned after the RolloutSample / agent_loop_output_list design in
-    recipe/fully_async_policy: replicas of a single prompt share a uid and
-    each is dispatched independently with its own ``replica_index``
-    (0..rollout_n-1). ``replicas[i]`` is the (SampleInfo, ObjectRef) tuple
-    for replica i, or None while that slot is still being generated.
-
     The group is created up front (at dataloader time) so ``put`` can write
     into a known slot without racing to materialize the bucket; it is
-    released downstream once every slot is filled.
+    released downstream once every slot is filled.s
     """
 
     uid: str

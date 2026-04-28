@@ -69,11 +69,7 @@ class DataCoordinator:
         # Used to avoid uid = 0 in async mode
         self._next_train_uid = 0
 
-        # Shared cancel queue for partial-rollout samples aborted by weight sync.
-        # Any rollout worker may push to / pull from this queue — partial samples
-        # do NOT need to return to the original worker since flush_cache happens
-        # globally during weight sync, so KV/prefix cache cannot be reused anyway.
-        # Hoisting this to the coordinator load-balances partial work across workers.
+        # Used for partial rollout samples
         self._cancel_queue: asyncio.Queue = asyncio.Queue()
 
         # Per-uid group container. Each group has rollout_n fixed slots; replicas
@@ -90,10 +86,6 @@ class DataCoordinator:
         (see SampleGroup). When every slot of the group is filled, the group
         is atomically flushed to _sample_queue in replica-index order so the
         trainer sees replica 0, 1, ..., rollout_n-1 as a contiguous run.
-
-        Args:
-            sample_info: Metadata about the sample (must carry uid and replica_index)
-            sample_ref: Ray ObjectRef or the actual sample data
         """
         # Due to Ray's small object optimization, an ObjectRef passed by the client
         # might be automatically resolved to its actual value. Here, we ensure that
@@ -582,26 +574,15 @@ class DataCoordinator:
 
     @ray.method(concurrency_group="dataloader")
     async def put_partial(self, sample) -> None:
-        """Push a partial-rollout sample (aborted by weight sync) into the shared
-        cancel queue. Any rollout worker may pull it later via ``get_partial``.
-
-        Note: validate-path samples must NOT be pushed here — only train-mode
-        partials carry the partial_agent_data needed for resume.
-        """
+        # Push a partial-rollout sample (aborted by weight sync) into the shared
+        # cancel queue. Any rollout worker may pull it later via ``get_partial``.
         await self._cancel_queue.put(sample)
 
     @ray.method(concurrency_group="dataloader")
     async def get_partial(self, batch_size: int) -> list:
-        """Drain up to ``batch_size`` partial-rollout samples from the shared
-        cancel queue. Returns fewer samples (or an empty list) if the queue is
-        shorter than requested. Called by rollout workers in ``get_sample`` to
-        prioritize finishing partial work before pulling fresh data.
-        """
         if batch_size <= 0:
             return []
-        # Mirror get_dataloader: bounded by current qsize so we never block waiting
-        # for partial samples that may never arrive (workers must fall through to
-        # fresh data instead). Safe under concurrency_group="dataloader" serialization.
+
         if self._cancel_queue.qsize() > batch_size:
             return [await self._cancel_queue.get() for _ in range(batch_size)]
         else:

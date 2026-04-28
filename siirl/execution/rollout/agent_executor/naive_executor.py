@@ -65,11 +65,8 @@ class NaiveExecutor:
         self._train_target_concurrency = target_concurrency
         self._train_concurrency_limits = train_limits
         self.tasks: set[asyncio.Task] = set()  # Track active generation tasks for cleanup
-        # Partial-rollout (aborted by weight sync) samples live in a shared queue
-        # on the DataCoordinator — see DataCoordinator.{put_partial,get_partial}.
-        # Hoisting it off-worker lets idle workers help drain partials produced by
-        # busier peers; safe because flush_cache during weight sync invalidates any
-        # KV/prefix cache that would have tied a partial to its original worker.
+        
+        # Used for partial rollout
         self._dispatch_paused = False
         self._dispatch_condition: asyncio.Condition | None = None
         self._dispatch_loop: asyncio.AbstractEventLoop | None = None
@@ -727,8 +724,6 @@ class NaiveExecutor:
             timeout_rate = (timeouts / attempts) if attempts > 0 else 0.0
 
             if last_status != current_status or timeouts > 0:
-                # Shared partial queue lives on the coordinator; query is cheap at
-                # 10s cadence and -1 acts as a sentinel if the RPC ever fails.
                 try:
                     cancel_queue_size = await self.data_coordinator.get_partial_size.remote()
                 except Exception:
