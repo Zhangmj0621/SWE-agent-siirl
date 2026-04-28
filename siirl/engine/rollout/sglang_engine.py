@@ -101,7 +101,7 @@ class SglangEngine:
             temperature=config.rollout.temperature,
             top_p=config.rollout.top_p,
             top_k=config.rollout.top_k,
-            repetition_penalty=1.0,
+            repetition_penalty=config.rollout.repetition_penalty,
         )
         self._extra_server_args = extra_server_args
         self.process = None  # Server process, started by launch_server()
@@ -125,7 +125,7 @@ class SglangEngine:
         args = {
             "model_path": self.config.actor_ref.model.path,
             "dtype": config.dtype,
-            "random_seed": config.seed + self.rank,
+            "random_seed": config.seed + self.node_rank,
             "mem_fraction_static": config.gpu_memory_utilization,
             "enable_memory_saver": True,
             # GPU placement parameters (directly from RolloutManager)
@@ -141,6 +141,7 @@ class SglangEngine:
             "host": self.ip,
             "port": self.port,
             # Server settings
+            "context_length": self.max_model_len,
             "trust_remote_code": config.trust_remote_code,
             "max_running_requests": resolve_max_num_seqs(self.config),
             "log_level": "warning",
@@ -148,6 +149,8 @@ class SglangEngine:
             "attention_backend": "fa3",
             "skip_tokenizer_init": False,
             "dist_timeout": 1800,
+            "enable_metrics": True,
+            "tool_call_parser": "qwen",
         }
 
         # Only set nccl_port if explicitly provided (None = SGLang auto-allocates)
@@ -229,15 +232,12 @@ class SglangEngine:
         return ray_timeout if ray_timeout <= 5 else ray_timeout - 5
 
     def _get_sampling_params(
-        self,
-        is_validate: bool,
-        input_len: int | None = None,
-        request_seed: int | None = None,
+        self, is_validate: bool, input_len: int | None = None, sampling_params: dict | None = None, request_seed: int | None = None
     ) -> dict:
         """Get sampling parameters based on mode (train/validate)."""
+        if sampling_params is None:
+            sampling_params = {}
         params = copy.deepcopy(self.sampling_params)
-        if input_len is not None:
-            params["max_new_tokens"] = min(self.max_model_len - input_len, self.max_response_length)
         if is_validate:
             val_kwargs = self.config.rollout.val_kwargs
             do_sample = bool(getattr(val_kwargs, "do_sample", False))
@@ -247,6 +247,7 @@ class SglangEngine:
                     "top_k": int(getattr(val_kwargs, "top_k", -1)),
                     "top_p": float(getattr(val_kwargs, "top_p", 1.0)),
                     "temperature": float(getattr(val_kwargs, "temperature", 0.0)),
+                    "repetition_penalty": float(getattr(val_kwargs, "repetition_penalty", 1.0)),
                 }
             )
             if not do_sample:
@@ -260,6 +261,14 @@ class SglangEngine:
                 )
         if request_seed is not None and ((not is_validate) or bool(getattr(self.config.rollout.val_kwargs, "do_sample", False))):
             params["random_seed"] = int(request_seed)
+
+        # if request_seed is not None and (is_validate or bool(getattr(self.config.rollout.val_kwargs, "do_sample", False))):
+        #     params["sampling_seed"] = int(request_seed)
+        if sampling_params:
+            params.update(sampling_params)
+        max_response_length = sampling_params.get("max_new_tokens") or self.max_response_length
+        params["max_new_tokens"] = max(0, min(self.max_model_len - input_len - 1, max_response_length))
+
         return params
 
     def _get_generate_url(self, use_router: bool = False) -> str:
@@ -318,6 +327,7 @@ class SglangEngine:
         use_router: bool = False,
         return_routed_experts: bool = False,
         request_seed: int | None = None,
+        sampling_params: dict | None = None,
         max_new_tokens: int | None = None,
         rid: str | None = None,
     ):
@@ -334,6 +344,7 @@ class SglangEngine:
             sampling_params = self._get_sampling_params(
                 is_validate,
                 len(input_ids),
+                sampling_params=sampling_params,
                 request_seed=request_seed,
             )
             if max_new_tokens is not None:

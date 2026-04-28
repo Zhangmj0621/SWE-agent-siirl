@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import contextvars
 import copy
 import hashlib
 import importlib
 import os
 import time
 from collections.abc import Callable
-from typing import Any
 
 import numpy as np
 import ray
@@ -65,16 +63,21 @@ class NaiveExecutor:
         self._train_target_concurrency = target_concurrency
         self._train_concurrency_limits = train_limits
         self.tasks: set[asyncio.Task] = set()  # Track active generation tasks for cleanup
-        
+
         # Used for partial rollout
         self._dispatch_paused = False
         self._dispatch_condition: asyncio.Condition | None = None
         self._dispatch_loop: asyncio.AbstractEventLoop | None = None
 
         # Semaphore to control concurrent generation tasks (limit to batch size)
-        # Use ContextVar to store semaphore per-async-context (per-event-loop)
-        # This avoids cross-event-loop binding issues without any locks
-        self._semaphore_ctx: contextvars.ContextVar = contextvars.ContextVar("semaphore")
+        # Train semaphore: created at init with max_concurrency_size
+        self.train_semaphore = asyncio.Semaphore(self.max_concurrency_size)
+        # Validate semaphore: created at init, will be used with validate concurrency
+        # Note: actual validate concurrency is controlled by the semaphore count
+        # We'll create it with a large initial value and set the actual limit in _validate_multi_turn
+        # But better to just create it here with the appropriate size from config
+        validate_concurrency = self._resolve_validate_concurrency_from_config()
+        self.validate_semaphore = asyncio.Semaphore(validate_concurrency)
         self.reward_fn = None  # Custom reward function (optional)
         self.rollout_flow = None  # Rollout flow function for sample generation
         self._rank = int(os.environ.get("RANK"))
@@ -321,7 +324,7 @@ class NaiveExecutor:
         reward_tensor = torch.zeros_like(response_ids[0], dtype=torch.float32)
         prompt_length = prompt_ids[0].shape[-1]
         valid_response_length = attention_mask[0][prompt_length:].sum()
-        reward_tensor[valid_response_length - 1] = sample.rewards
+        reward_tensor[valid_response_length - 1] = sample.rewards if sample.rewards is not None else 0.0
         # Clean up and set processed fields in sample
         sample.token_level_rewards = reward_tensor.numpy()
         sample.token_level_scores = copy.deepcopy(reward_tensor.numpy())
@@ -333,6 +336,97 @@ class NaiveExecutor:
         sample.position_ids = position_ids[0].numpy()
 
         return sample
+
+    def _create_fallback_sample(self, original_sample, error, timing_info, is_validate=False, error_stage="unknown"):
+        """
+        Create a minimal valid fallback sample when generation fails.
+
+        This ensures that:
+        - No training data is lost
+        - Failed samples are properly marked (reward=0)
+        - Error information is preserved for analysis
+        - Training can continue without interruption
+
+        Args:
+            original_sample: Original sample that failed generation
+            error: The exception that caused the failure
+            timing_info: Timing information collected so far
+            is_validate: Whether this is a validation run
+            error_stage: Where the error occurred ('preprocess', 'rollout', 'postprocess', 'unexpected')
+
+        Returns:
+            A minimal valid Sample object with reward=0 and error metadata
+        """
+        from siirl.data_coordinator.sample import Sample
+
+        sample_uid = str(getattr(original_sample, "uid", "unknown"))
+        logger.warning(
+            f"[FallbackSample] Creating fallback sample for {sample_uid} " f"(error_stage={error_stage}, error={type(error).__name__})"
+        )
+
+        # Get pad token (fallback to 0 if not available)
+        pad_token_id = getattr(self.engine.tokenizer, "pad_token_id", 0)
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        max_prompt_len = self.config.data.max_prompt_length
+        max_response_len = self.config.data.max_response_length
+        total_len = max_prompt_len + max_response_len
+
+        # Create minimal valid numpy arrays
+        fallback_sample = Sample(
+            uid=sample_uid,
+            # Prompts: all pad tokens
+            prompts=np.array([pad_token_id] * max_prompt_len, dtype=np.int64),
+            # Responses: all pad tokens
+            responses=np.array([pad_token_id] * max_response_len, dtype=np.int64),
+            # Response mask: all zeros (no valid response)
+            response_mask=np.array([0] * max_response_len, dtype=np.int64),
+            # Log probabilities: all zeros
+            rollout_log_prob=np.zeros(max_response_len, dtype=np.float32),
+            # Reward: 0 for failed samples
+            rewards=0.0,
+            # Input IDs: concatenated prompts and responses
+            input_ids=np.array([pad_token_id] * total_len, dtype=np.int64),
+            # Attention mask: all zeros (no valid tokens)
+            attention_mask=np.array([0] * total_len, dtype=np.int64),
+            # Position IDs: all zeros
+            position_ids=np.zeros(total_len, dtype=np.int64),
+            # Token level rewards/scores: all zeros
+            token_level_rewards=np.zeros(max_response_len, dtype=np.float32),
+            token_level_scores=np.zeros(max_response_len, dtype=np.float32),
+        )
+
+        # Preserve original sample metadata
+        if hasattr(original_sample, "raw_prompt_ids"):
+            fallback_sample.raw_prompt_ids = original_sample.raw_prompt_ids
+        if hasattr(original_sample, "data_source"):
+            fallback_sample.data_source = original_sample.data_source
+        if hasattr(original_sample, "reward_model"):
+            fallback_sample.reward_model = original_sample.reward_model
+        if hasattr(original_sample, "extra_info"):
+            fallback_sample.extra_info = original_sample.extra_info
+
+        # Record error information for debugging
+        import traceback
+
+        fallback_sample._generation_error = str(error)
+        fallback_sample._generation_error_type = type(error).__name__
+        fallback_sample._generation_error_stage = error_stage
+        fallback_sample._generation_traceback = traceback.format_exc()
+
+        # Update timing info
+        timing_info["rollout_failed_at"] = time.time()
+        timing_info["rollout_error"] = str(error)
+        timing_info["rollout_error_type"] = type(error).__name__
+        timing_info["rollout_error_stage"] = error_stage
+        if "rollout_end_at" not in timing_info:
+            timing_info["rollout_end_at"] = timing_info["rollout_failed_at"]
+            timing_info["rollout_duration"] = timing_info["rollout_failed_at"] - timing_info["rollout_start_at"]
+
+        fallback_sample.timing_info = timing_info
+
+        return fallback_sample
 
     async def put_data(self, sample, loop):
         sample_ref = await loop.run_in_executor(None, ray.put, sample)
@@ -366,11 +460,17 @@ class NaiveExecutor:
         Dispatch concurrency is gated at the caller (``run`` or the validate path's
         validate_semaphore); this function itself does not throttle.
 
+        Includes comprehensive error handling with fallback sample creation to ensure
+        no data loss even when generation fails.
+
         Args:
             sample: Raw sample from data coordinator
+            is_validate: Whether this is a validation run
+            validate_request_seed: Optional seed for reproducible validation
 
         Returns:
-            Postprocessed sample with generated response and formatted tensors, or None if failed
+            Postprocessed sample with generated response and formatted tensors.
+            Returns a fallback sample (reward=0) if generation fails, ensuring data is always stored.
         """
         # Record timing information for performance analysis
         timing_info = {
@@ -378,36 +478,59 @@ class NaiveExecutor:
         }
         sample_uid = getattr(sample, "uid", "unknown")
 
+        # Store original sample for fallback creation
+        original_sample = sample
+
         try:
+            # Use the appropriate semaphore based on phase
             loop = asyncio.get_running_loop()
             # 1. Preprocess sample (CPU-bound, offload to executor)
             sample = await loop.run_in_executor(None, self._pre_process, sample, is_validate)
 
             # 2. Execute rollout flow (LLM generation with reward calculation)
-            if validate_request_seed is None:
-                sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
-            else:
-                try:
-                    sample = await self.rollout_flow(
-                        sample,
-                        self.reward_fn,
-                        is_validate,
-                        request_seed=validate_request_seed,
-                    )
-                except TypeError as exc:
-                    if "request_seed" not in str(exc):
-                        raise
-                    sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
+            try:
+                if validate_request_seed is None:
+                    sample = await self.rollout_flow(sample, self.reward_fn, is_validate=is_validate)
+                else:
+                    try:
+                        sample = await self.rollout_flow(
+                            sample,
+                            self.reward_fn,
+                            is_validate=is_validate,
+                            request_seed=validate_request_seed,
+                        )
+                    except TypeError as exc:
+                        if "request_seed" not in str(exc):
+                            raise
+                        logger.warning(
+                            f"[NaiveExecutor.generate] rollout_flow does not support request_seed, "
+                            f"falling back to non-reproducible generation for sample {sample_uid}"
+                        )
+                        sample = await self.rollout_flow(sample, self.reward_fn, is_validate=is_validate)
+            except Exception as e:
+                logger.error(f"[NaiveExecutor.generate] Sample {sample_uid} rollout failed: {e}")
+                logger.error(f"[NaiveExecutor.generate] Rollout error type: {type(e).__name__}")
+                import traceback
+
+                logger.error(f"[NaiveExecutor.generate] Rollout traceback:\n{traceback.format_exc()}")
+                # Create fallback sample with error info
+                sample = self._create_fallback_sample(
+                    original_sample=original_sample, error=e, timing_info=timing_info, is_validate=is_validate, error_stage="rollout"
+                )
 
             # 3. Postprocess sample (CPU-bound padding and tensor formatting)
             sample = await loop.run_in_executor(None, self._post_process, sample)
-
             # 4. Collect timing information from rollout flow
             timing_info["rollout_end_at"] = time.time()
             timing_info["rollout_duration"] = timing_info["rollout_end_at"] - timing_info["rollout_start_at"]
             timing_info["generation_duration"] = getattr(sample, "_generation_duration", 0)
             timing_info["reward_duration"] = getattr(sample, "_reward_duration", 0)
-            sample.timing_info = timing_info
+            # Merge timing_info instead of overwriting (preserve multiturn_turns from agent_flow)
+            if sample.timing_info is None:
+                sample.timing_info = timing_info
+            else:
+                # Update timing_info with new fields, preserve existing fields (like multiturn_turns)
+                sample.timing_info.update(timing_info)
 
             # 5. Store processed sample in Ray object store and notify data coordinator
             if not is_validate:
@@ -420,19 +543,32 @@ class NaiveExecutor:
                 # worker can pick it up after weight sync resumes dispatch.
                 await self.data_coordinator.put_partial.remote(aborted.sample)
                 logger.debug(
-                    "[NaiveExecutor.generate] Sample uid={} aborted by weight sync; "
-                    "handed back to shared cancel queue",
+                    "[NaiveExecutor.generate] Sample uid={} aborted by weight sync; " "handed back to shared cancel queue",
                     sample_uid,
                 )
                 return None
             raise
 
         except Exception as e:
+            # Final fallback: catch any unexpected errors
             import traceback
 
-            logger.error(f"[NaiveExecutor.generate] Sample uid={sample_uid} failed: {e}")
+            logger.error(f"[NaiveExecutor.generate] Sample {sample_uid} unexpected error: {e}")
             logger.error(f"[NaiveExecutor.generate] Traceback:\n{traceback.format_exc()}")
-            raise
+
+            # Create fallback sample as last resort
+            sample = self._create_fallback_sample(
+                original_sample=original_sample, error=e, timing_info=timing_info, is_validate=is_validate, error_stage="unexpected"
+            )
+
+            # Ensure data is stored even on failure
+            if not is_validate:
+                try:
+                    await self.put_data(sample=sample, loop=asyncio.get_running_loop())
+                except Exception as storage_error:
+                    logger.error(f"[NaiveExecutor.generate] Failed to store fallback sample {sample_uid}: {storage_error}")
+
+            return sample
 
     async def run(self):
         """
@@ -449,12 +585,7 @@ class NaiveExecutor:
         # Create semaphore for this event loop if not already exists
         # Check if ContextVar has been set to avoid creating multiple semaphores
         # when switching between run() and validate() in the same event loop
-        try:
-            semaphore = self._semaphore_ctx.get()
-        except LookupError:
-            # ContextVar not set yet - create new semaphore for this event loop
-            semaphore = asyncio.Semaphore(self.max_concurrency_size)
-            self._semaphore_ctx.set(semaphore)
+        semaphore = self.train_semaphore
         self._init_dispatch_condition()
 
         self.running = True
@@ -617,15 +748,31 @@ class NaiveExecutor:
         result = await self.generate(sample, is_validate=True, validate_request_seed=request_seed)
         return idx, result
 
-    def _resolve_validate_concurrency(self, use_router: bool) -> int:
-        limits = resolve_rollout_concurrency(self.config, phase="validate", use_router=use_router)
-        logger.debug(
-            "Validate multi-turn concurrency: "
-            f"use_router={use_router}, base_key={limits['base_key']}, base={limits['base']}, "
-            f"num_engines={limits['num_engines']}, resolved={limits['resolved']}, "
-            f"max_num_seqs={limits['max_num_seqs']}, effective={limits['effective']}"
+    def _resolve_validate_concurrency_from_config(self) -> int:
+        """
+        Calculate validate concurrency at initialization time.
+        This is called once during __init__ to create the validate semaphore.
+        """
+        # Check if validate_chunk_size is configured
+        validate_chunk_size = int(getattr(self.config.rollout, "validate_chunk_size", 0))
+        if validate_chunk_size <= 0:
+            # No limit: use a very large number to represent "unlimited" concurrency
+            logger.info("No validate_chunk_size configured, using unlimited concurrency")
+            return 999999  # Practically unlimited
+
+        # Get total number of rollout workers
+        rollout_gpus = max(1, int(getattr(self.config.trainer, "rollout_gpus", 1)))
+        tp_size = max(1, int(getattr(self.config.rollout, "tensor_model_parallel_size", 1)))
+        num_engines = max(1, rollout_gpus // tp_size)
+
+        # Each executor's semaphore = total concurrency / num_workers
+        per_executor_concurrency = max(1, validate_chunk_size // num_engines)
+
+        logger.info(
+            f"Initial validate concurrency: total={validate_chunk_size}, "
+            f"num_workers={num_engines}, per_executor={per_executor_concurrency}"
         )
-        return int(limits["effective"])
+        return per_executor_concurrency
 
     async def _validate_multi_turn(
         self,
@@ -640,12 +787,11 @@ class NaiveExecutor:
         """
         # Enable router on rollout_flow for validate duration
         self.rollout_flow.use_router = use_router
-        max_concurrent = self._resolve_validate_concurrency(use_router)
-        validate_semaphore = asyncio.Semaphore(max_concurrent)
 
         async def _indexed_generate_limited(idx: int, sample: Sample):
-            async with validate_semaphore:
-                return await self._indexed_generate(idx, sample, request_seed=self._get_validate_request_seed(sample))
+            # Note: Don't acquire semaphore here because generate() already does
+            # asyncio.Semaphore is not reentrant, so acquiring twice would cause deadlock
+            return await self._indexed_generate(idx, sample, request_seed=self._get_validate_request_seed(sample))
 
         tasks: list[asyncio.Task] = []
         try:
@@ -707,10 +853,40 @@ class NaiveExecutor:
                 )
 
         val_get_time_sec = val_get_time.elapsed if hasattr(val_get_time, "elapsed") else float(val_get_time)
+
+        # Aggregate multiturn interaction counts
+        multiturn_turns_list = []
+        # Aggregate response lengths
+        response_lengths = []
+        for sample in result:
+            if sample.timing_info and "multiturn_turns" in sample.timing_info:
+                multiturn_turns_list.append(sample.timing_info["multiturn_turns"])
+            if sample.response_mask is not None:
+                response_lengths.append(int(sum(sample.response_mask)))
+
         metrics = {
             "val_get_time": val_get_time_sec,
             "val_generate_time": val_generate_time.elapsed,
         }
+
+        # Add multiturn metrics if available
+        if multiturn_turns_list:
+            import numpy as np
+
+            metrics["val/multiturn_turns/mean"] = float(np.mean(multiturn_turns_list))
+            metrics["val/multiturn_turns/max"] = float(np.max(multiturn_turns_list))
+            metrics["val/multiturn_turns/min"] = float(np.min(multiturn_turns_list))
+
+        # Add response length metrics if available
+        if response_lengths:
+            import numpy as np
+
+            metrics["val/response/length/mean"] = float(np.mean(response_lengths))
+            metrics["val/response/length/max"] = float(np.max(response_lengths))
+            metrics["val/response/length/min"] = float(np.min(response_lengths))
+
+        logger.info(f"[validate_samples] Total validation metrics: {list(metrics.keys())}")
+
         return result, metrics
 
     async def rollout_status(self, interval: float = 10.0):

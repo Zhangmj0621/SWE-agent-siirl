@@ -1,6 +1,12 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO, Union
+
+if TYPE_CHECKING:
+    from sweagent.environment.repo import GithubRepoConfig, LocalRepoConfig, PreExistingRepoConfig
+
+# Type for repo configuration (compatible with SWE-agent's repo types)
+RepoConfig = Union[Any, "LocalRepoConfig", "GithubRepoConfig", "PreExistingRepoConfig", None]
 
 
 @dataclass
@@ -24,6 +30,7 @@ class ContainerStartArgs:
             Defaults to None (typically `{"memory": "4Gi", "cpu": "2"}`).
         resource_limits: Resource limits for the container (e.g., memory, cpu).
             Defaults to None (typically `{"memory": "4Gi", "cpu": "2"}`).
+        repo: Repository configuration (for SWEEnv compatibility). Defaults to None.
     """
 
     image: str
@@ -35,6 +42,7 @@ class ContainerStartArgs:
     startup_timeout: float = 180.0
     resource_requests: dict[str, int | str] | None = None
     resource_limits: dict[str, int | str] | None = None
+    repo: RepoConfig = None
 
 
 @dataclass

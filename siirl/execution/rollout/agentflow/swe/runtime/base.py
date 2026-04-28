@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...base import Sample
@@ -15,6 +15,7 @@ class SWESampleData:
     container_args: ContainerStartArgs
     problem_statement: str  # 问题描述，作为最初 prompt
     runtime_meta: Any  # original dict
+    issue_images: list[str] = field(default=None, metadata="If has images input, it will not be None")
 
 
 class RuntimeBuilder(ABC):
@@ -41,7 +42,12 @@ class Runtime(ABC):
 
     @abstractmethod
     async def bootstrap(self, env: ContainerEnv):
-        """Bootstrap environment so agent can work on"""
+        """Bootstrap environment so agent can work on it"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def bootstrap_sync(self, env: ContainerEnv):
+        """Synchronous version of bootstrap() - for use in thread pool"""
         raise NotImplementedError
 
     @abstractmethod
@@ -50,6 +56,16 @@ class Runtime(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def diff_sync(self, env: ContainerEnv):
+        """Synchronous version of diff() - for use in thread pool"""
+        raise NotImplementedError
+
+    @abstractmethod
     async def eval(self, env: ContainerEnv):
         """Apply patch in sample to sample env, run evaluation, and set reward"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def eval_sync(self, env: ContainerEnv):
+        """Synchronous version of eval() - for use in thread pool"""
         raise NotImplementedError

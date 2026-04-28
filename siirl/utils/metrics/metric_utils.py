@@ -26,6 +26,7 @@ import pandas as pd
 import psutil
 import ray
 import torch
+from loguru import logger
 from scipy.stats import mode
 from tensordict import TensorDict
 
@@ -295,23 +296,98 @@ def compute_log_prob_diff_metrics(
     if "rollout_log_prob" not in data or "old_log_probs" not in data:
         return metrics, std_stats
 
+    # Debug information
+    rollout_log_prob = data["rollout_log_prob"]
+    old_log_probs = data["old_log_probs"]
+
+    logger.info("\n[DEBUG] compute_log_prob_diff_metrics:")
+    logger.info(f"  rollout_log_prob shape: {rollout_log_prob.shape}, dtype: {rollout_log_prob.dtype}")
+    logger.info(f"  old_log_probs shape: {old_log_probs.shape}, dtype: {old_log_probs.dtype}")
+    logger.info(
+        f"  rollout_log_prob min/max/mean: {rollout_log_prob.min():.4f} / {rollout_log_prob.max():.4f} / {rollout_log_prob.mean():.4f}"
+    )
+    logger.info(f"  old_log_probs min/max/mean: {old_log_probs.min():.4f} / {old_log_probs.max():.4f} / {old_log_probs.mean():.4f}")
+
+    # Check for potential padding values (0.0 or very large values)
+    rollout_zero_ratio = (rollout_log_prob == 0.0).float().mean().item()
+    rollout_near_zero_ratio = (rollout_log_prob.abs() < 1e-6).float().mean().item()
+    logger.info(f"  rollout_log_prob == 0.0 ratio: {rollout_zero_ratio:.4f} ({rollout_zero_ratio * 100:.2f}%)")
+    logger.info(f"  rollout_log_prob ≈ 0.0 ratio: {rollout_near_zero_ratio:.4f} ({rollout_near_zero_ratio * 100:.2f}%)")
+
+    if "response_mask" in data:
+        response_mask = data["response_mask"]
+        mask_sum = response_mask.sum().item()
+        mask_ratio = mask_sum / response_mask.numel()
+        logger.info(f"  response_mask: shape={response_mask.shape}, valid_ratio={mask_ratio:.4f} ({mask_ratio * 100:.2f}%)")
+
+        # Check values in padding regions (where mask == 0)
+        padding_mask = response_mask == 0
+        if padding_mask.any():
+            rollout_padding_vals = rollout_log_prob[padding_mask]
+            old_padding_vals = old_log_probs[padding_mask]
+            logger.info(
+                f"  [PADDING REGION] rollout_log_prob: min={rollout_padding_vals.min():.4f}, "
+                f"max={rollout_padding_vals.max():.4f}, mean={rollout_padding_vals.mean():.4f}"
+            )
+            logger.info(
+                f"  [PADDING REGION] old_log_probs: min={old_padding_vals.min():.4f}, "
+                f"max={old_padding_vals.max():.4f}, mean={old_padding_vals.mean():.4f}"
+            )
+            logger.info(
+                f"  [PADDING REGION] rollout == 0 count: {(rollout_padding_vals == 0).sum().item()} / {rollout_padding_vals.numel()}"
+            )
+
+        # Check values in valid regions (where mask == 1)
+        valid_mask = response_mask > 0
+        if valid_mask.any():
+            rollout_valid_vals = rollout_log_prob[valid_mask]
+            old_valid_vals = old_log_probs[valid_mask]
+            logger.info(
+                f"  [VALID REGION] rollout_log_prob: min={rollout_valid_vals.min():.4f}, "
+                f"max={rollout_valid_vals.max():.4f}, mean={rollout_valid_vals.mean():.4f}"
+            )
+            logger.info(
+                f"  [VALID REGION] old_log_probs: min={old_valid_vals.min():.4f}, "
+                f"max={old_valid_vals.max():.4f}, mean={old_valid_vals.mean():.4f}"
+            )
+
     # Convert log probs to probs for comparison
-    rollout_probs = torch.exp(data["rollout_log_prob"])
-    actor_probs = torch.exp(data["old_log_probs"])
+    rollout_probs = torch.exp(rollout_log_prob)
+    actor_probs = torch.exp(old_log_probs)
+
+    logger.info(f"  rollout_probs min/max/mean: {rollout_probs.min():.6f} / {rollout_probs.max():.6f} / {rollout_probs.mean():.6f}")
+    logger.info(f"  actor_probs min/max/mean: {actor_probs.min():.6f} / {actor_probs.max():.6f} / {actor_probs.mean():.6f}")
 
     # Compute absolute difference
     probs_diff = torch.abs(rollout_probs.cpu() - actor_probs.cpu())
 
+    logger.info(f"  probs_diff shape: {probs_diff.shape}")
+    logger.info(f"  probs_diff min/max/mean (before mask): {probs_diff.min():.6f} / {probs_diff.max():.6f} / {probs_diff.mean():.6f}")
+
     # Apply mask if available
     if "response_mask" in data:
         mask = data["response_mask"].bool().cpu()
+        logger.info(f"  response_mask shape: {data['response_mask'].shape}, sum: {mask.sum().item()}")
         valid_diff = torch.masked_select(probs_diff, mask)
+
+        # Also check padding region diff for debugging
+        padding_diff = torch.masked_select(probs_diff, ~mask)
+        if padding_diff.numel() > 0:
+            logger.info(
+                f"  [PADDING] probs_diff: min={padding_diff.min():.6f}, max={padding_diff.max():.6f}, mean={padding_diff.mean():.6f}"
+            )
     else:
         valid_diff = probs_diff.flatten()
+
+    logger.info(f"  valid_diff shape: {valid_diff.shape}")
+    logger.info(f"  valid_diff min/max/mean (after mask): {valid_diff.min():.6f} / {valid_diff.max():.6f} / {valid_diff.mean():.6f}")
 
     if valid_diff.numel() > 0:
         metrics["actor/rollout_probs_diff_max"] = torch.max(valid_diff).item()
         metrics["actor/rollout_probs_diff_mean"] = torch.mean(valid_diff).item()
+        logger.info(
+            f"  FINAL metrics: max={metrics['actor/rollout_probs_diff_max']:.6f}, mean={metrics['actor/rollout_probs_diff_mean']:.6f}"
+        )
 
         # Create StdStats for distributed std calculation
         std_stats = StdStats.from_tensor(valid_diff)
@@ -362,6 +438,7 @@ def extract_rollout_timing_metrics(data: TensorDict) -> dict[str, Any]:
     generation_durations = []
     reward_durations = []
     rollout_start_times = []
+    multiturn_turns_list = []
 
     for timing_info in timing_info_list:
         if isinstance(timing_info, dict):
@@ -373,6 +450,8 @@ def extract_rollout_timing_metrics(data: TensorDict) -> dict[str, Any]:
                 reward_durations.append(timing_info["reward_duration"])
             if "rollout_start_at" in timing_info:
                 rollout_start_times.append(timing_info["rollout_start_at"])
+            if "multiturn_turns" in timing_info:
+                multiturn_turns_list.append(timing_info["multiturn_turns"])
 
     # Compute average metrics
     if rollout_durations:
@@ -381,6 +460,14 @@ def extract_rollout_timing_metrics(data: TensorDict) -> dict[str, Any]:
         metrics["perf/delta_time/generation_per_sample"] = sum(generation_durations) / len(generation_durations)
     if reward_durations:
         metrics["perf/delta_time/reward_per_sample"] = sum(reward_durations) / len(reward_durations)
+
+    # Compute multiturn metrics
+    if multiturn_turns_list:
+        import numpy as np
+
+        metrics["response/multiturn_turns/mean"] = float(np.mean(multiturn_turns_list))
+        metrics["response/multiturn_turns/max"] = float(np.max(multiturn_turns_list))
+        metrics["response/multiturn_turns/min"] = float(np.min(multiturn_turns_list))
 
     # Store earliest rollout start for e2e latency calculation (internal use)
     if rollout_start_times:

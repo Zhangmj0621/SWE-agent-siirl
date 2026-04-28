@@ -84,3 +84,46 @@ def add_generation_prompt_for_gpt_oss(message_content: str) -> str:
         Message content string with generation prompt
     """
     return message_content + "<|start|>assistant"
+
+
+"""
+    Exception may used in SweAgent, Copy from SweAgent
+"""
+
+
+class EnvCreateError(Exception):
+    """Raised when create Env failed"""
+
+
+class FormatError(Exception):
+    """Raised when the model response cannot properly be parsed into thought and actions."""
+
+
+class ContextWindowExceededError(Exception):
+    """Raised when the context window of a LM is exceeded"""
+
+
+class CostLimitExceededError(Exception):
+    """Raised when we exceed a cost limit"""
+
+
+class InstanceCostLimitExceededError(CostLimitExceededError):
+    """Raised when we exceed the cost limit set for one task instance"""
+
+
+class TotalCostLimitExceededError(CostLimitExceededError):
+    """Raised when we exceed the total cost limit"""
+
+
+class InstanceCallLimitExceededError(CostLimitExceededError):
+    """Raised when we exceed the per instance call limit"""
+
+
+class ContentPolicyViolationError(Exception):
+    """Raised when the model response violates a content policy"""
+
+
+class ModelConfigurationError(Exception):
+    """Raised when the model configuration is invalid/no further retries
+    should be made.
+    """

@@ -27,12 +27,26 @@ from siirl.worker.ray_utils import allocate_resources
 from siirl.worker.rollout.rollout_manager import RolloutManager
 from siirl.worker.validate.progress import ValidateProgressMonitor
 
+
 # --- Constants ---
-RAY_RUNTIME_ENV_VARS = {
-    "TOKENIZERS_PARALLELISM": "true",
-    "NCCL_DEBUG": "WARN",
-    "VLLM_LOGGING_LEVEL": "WARN",
-}
+def _get_ray_runtime_env_vars():
+    """Build runtime environment variables for Ray workers."""
+    env_vars = {
+        "TOKENIZERS_PARALLELISM": "true",
+        "NCCL_DEBUG": "WARN",
+        "VLLM_LOGGING_LEVEL": "WARN",
+    }
+    # Add ACR registry variables if set
+    import os
+
+    if "ACR_REGISTRY" in os.environ:
+        env_vars["ACR_REGISTRY"] = os.environ["ACR_REGISTRY"]
+    if "ACR_NAMESPACE" in os.environ:
+        env_vars["ACR_NAMESPACE"] = os.environ["ACR_NAMESPACE"]
+    return env_vars
+
+
+RAY_RUNTIME_ENV_VARS = _get_ray_runtime_env_vars()
 
 MAIN_RUNNER_CPU_RESERVATION = 5
 VALIDATE_PROGRESS_DRIVER_POLL_S = 0.5

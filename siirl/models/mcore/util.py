@@ -57,12 +57,26 @@ def preprocess_packed_seqs(
             start_idx = cu_seqlens_padded_cpu[i] // cp_size
             # split to 2 chunks
             d = input_ids[i, attention_mask[i]]
-            input_ids_rmpad[start_idx : start_idx + half_seqlen] = d[half_seqlen * cp_rank : half_seqlen * (cp_rank + 1)]
+
+            # Handle case where actual sequence length is not evenly divisible by cp_size
+            slice_start = half_seqlen * cp_rank
+            slice_end = min(half_seqlen * (cp_rank + 1), d.shape[0])
+            target_end = min(half_seqlen, d.shape[0] - slice_start)
+
+            try:
+                if slice_start < d.shape[0] and target_end > 0:
+                    input_ids_rmpad[start_idx : start_idx + target_end] = d[slice_start:slice_end]
+            except Exception:
+                print(f"cp_rank: {cp_rank}, half_seqlen: {half_seqlen}")
+                print(f"slice: [{slice_start} : {slice_end}] (clamped)")
+                print(f"d shape: {d.shape}, d sliced shape: {d[slice_start:slice_end].shape}")
+                print(f"target shape: {input_ids_rmpad[start_idx : start_idx + target_end].shape}")
+                print(f"start_idx: {start_idx}, input_ids_rmpad shape: {input_ids_rmpad.shape}")
 
             remain_start = seqlen_padded_i - half_seqlen * (cp_rank + 1)
             remain_end = seqlen_padded_i - half_seqlen * cp_rank
             remain_end = min(remain_end, d.shape[0])
-            remain_len = remain_end - remain_start
+            remain_len = max(0, remain_end - remain_start)
             if remain_len > 0:
                 input_ids_rmpad[start_idx + half_seqlen : start_idx + half_seqlen + remain_len] = d[remain_start:remain_end]
 

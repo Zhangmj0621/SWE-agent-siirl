@@ -59,6 +59,8 @@ class OptimizerArguments:
     )
     clip_grad: float = field(default=1.0, metadata={"help": "gradient clip"})
     override_optimizer_config: dict | None = field(default=None, metadata={"help": "Override optimizer config"})
+    adam_beta1: float = field(default=0.9, metadata={"help": "adam_beta1"})
+    adam_beta2: float = field(default=0.99, metadata={"help": "adam_beta2"})
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -168,6 +170,7 @@ class EvalSamplingArguments:
     temperature: int = field(default=0)
     n: int = field(default=1)
     do_sample: bool = field(default=False)
+    repetition_penalty: float = field(default=1.0, metadata={"help": "Repetition penalty for validation"})
 
 
 @dataclass
@@ -191,6 +194,7 @@ class RolloutArguments:
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
     top_k: int = field(default=-1, metadata={"help": "Top-k sampling"})
     top_p: float = field(default=1.0, metadata={"help": "Top-p sampling"})
+    repetition_penalty: float = field(default=1.0, metadata={"help": "Repetition penalty"})
     dtype: str = field(default="bfloat16", metadata={"help": "Compute dtype"})
     gpu_memory_utilization: float = field(default=0.5, metadata={"help": "GPU memory usage"})
     ignore_eos: bool = field(default=False, metadata={"help": "Ignore EOS tokens"})
@@ -228,8 +232,9 @@ class RolloutArguments:
     n: int = field(default=1, metadata={"help": "Number of responses"})
     enable_chunked_prefill: bool = field(default=True, metadata={"help": "Whether or not enable chunked prefill"})
     trust_remote_code: bool = field(default=False, metadata={"help": "trust the code or not."})
+    tool_call_parser: str = field(default="qwen", metadata={"help": "Tool call parser type (e.g., qwen, python)"})
     val_kwargs: EvalSamplingArguments = field(default_factory=EvalSamplingArguments)
-    seed: int = field(default=0, metadata={"help": "The random seed"})
+    seed: int = field(default=42, metadata={"help": "The random seed"})
     calculate_log_probs: bool = field(default=True, metadata={"help": "Whether rollout calculate log probs"})
     multi_stage_wake_up: bool = field(
         default=False,

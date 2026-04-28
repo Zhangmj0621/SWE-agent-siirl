@@ -24,7 +24,6 @@ def gptmodel_forward(
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
     get_torch_device().empty_cache()
-
     if pack_seqs:
         batch_size, seq_len = attention_mask.shape[:2]
         input_ids_rmpad, packed_seq_params = preprocess_packed_seqs(input_ids, attention_mask, pre_process=pre_process)

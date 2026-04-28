@@ -18,10 +18,11 @@ from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+from siirl.params.model_args import OptimizerArguments
 from siirl.utils.megatron.megatron_utils import print_rank_0
 
 
-def init_megatron_optim_config(optim_config: dict) -> OptimizerConfig:
+def init_megatron_optim_config(optim_config: OptimizerArguments) -> OptimizerConfig:
     optim_args = {
         "optimizer": "adam",
         "lr": optim_config.lr,
@@ -31,6 +32,8 @@ def init_megatron_optim_config(optim_config: dict) -> OptimizerConfig:
         "bf16": True,
         "params_dtype": torch.bfloat16,
         "use_distributed_optimizer": True,
+        "adam_beta1": optim_config.adam_beta1,
+        "adam_beta2": optim_config.adam_beta2,
     }
 
     override_config = optim_config.override_optimizer_config
