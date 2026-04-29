@@ -14,6 +14,7 @@
 import asyncio
 import json
 import time
+import uuid
 from typing import Any
 
 import numpy as np
@@ -22,7 +23,14 @@ from loguru import logger
 from siirl.data_coordinator.sample import Sample
 from siirl.environment import EnvResponse, initialize_env
 from siirl.environment.tool_env.utils.tool_parser import FunctionCall, ToolParser
-from siirl.execution.rollout.utils import AgentData, AgentState, add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually
+from siirl.execution.rollout.utils import (
+    AgentData,
+    AgentState,
+    RolloutGenerationAborted,
+    SglangGenerationAborted,
+    add_generation_prompt_for_gpt_oss,
+    format_gpt_oss_tool_response_manually,
+)
 from siirl.params import SiiRLArguments
 from siirl.utils.reward_score import default_compute_score
 
@@ -85,8 +93,8 @@ class NaiveFlow:
 
         # Generate response and log probabilities from prompt using inference engine
         loop = asyncio.get_event_loop()
-        agent_data = AgentData(raw_prompt=sample.raw_prompt.tolist(), ground_truth=sample.reward_model["ground_truth"])
-        while agent_data.state != AgentState.TERMINATED:
+        agent_data = self._load_agent_data(sample)
+        while agent_data.state not in (AgentState.TERMINATED, AgentState.ABORTED):
             if agent_data.state == AgentState.PENDING:
                 agent_data.state = await self._handle_pending_state(agent_data, loop)
             elif agent_data.state == AgentState.GENERATING:
@@ -102,6 +110,14 @@ class NaiveFlow:
             else:
                 logger.error(f"Invalid state: {agent_data.state}")
                 agent_data.state = AgentState.TERMINATED
+
+        if agent_data.state == AgentState.ABORTED:
+            self._save_partial_agent_data(sample, agent_data)
+            raise RolloutGenerationAborted(sample)
+
+        # Sample completed successfully — drop any partial snapshot so it does not
+        # get shipped into the trainer TensorDict via Samples2Dict.
+        sample.partial_agent_data = None
 
         # Create response mask (all 1s since all generated tokens are valid)
         response_ids = agent_data.prompts_ids[-len(agent_data.response_mask) :]
@@ -178,6 +194,53 @@ class NaiveFlow:
 
         return sample
 
+    def _load_agent_data(self, sample: Sample) -> AgentData:
+        raw_prompt = sample.raw_prompt
+        if hasattr(raw_prompt, "tolist"):
+            raw_prompt = raw_prompt.tolist()
+        partial = sample.partial_agent_data
+        if not partial:
+            agent_data = AgentData(raw_prompt=raw_prompt, ground_truth=sample.reward_model["ground_truth"])
+            # Assign a stable rid that follows this sample through every multi-turn
+            # generate() call (and across abort/resume). The inference engine sees
+            # the same rid on every turn, so it can identify the logical request.
+            agent_data.rid = uuid.uuid4().hex
+            return agent_data
+
+        agent_data = AgentData(
+            raw_prompt=partial.get("messages", raw_prompt),
+            ground_truth=sample.reward_model["ground_truth"],
+        )
+        agent_data.prompts_ids = list(partial.get("prompts_ids", []))
+        agent_data.rollout_log_prob = list(partial.get("rollout_log_prob", []))
+        agent_data.response_ids = list(partial.get("response_ids", []))
+        agent_data.response_mask = list(partial.get("response_mask", []))
+        agent_data.env_turns = int(partial.get("env_turns", 0))
+        agent_data.assistant_turns = int(partial.get("assistant_turns", 0))
+        agent_data.env_rewards = list(partial.get("env_rewards", []))
+        agent_data.routed_experts = partial.get("routed_experts")
+        agent_data.env_kwargs = dict(partial.get("env_kwargs", agent_data.env_kwargs))
+        # rid from a previously-aborted generation; fall back to a fresh uuid for
+        # old snapshots without rid so we never dispatch a turn without one.
+        agent_data.rid = partial.get("rid") or uuid.uuid4().hex
+        agent_data.state = AgentState.GENERATING
+        return agent_data
+
+    def _save_partial_agent_data(self, sample: Sample, agent_data: AgentData):
+        sample.partial_agent_data = {
+            "messages": agent_data.messages,
+            "prompts_ids": agent_data.prompts_ids,
+            "rollout_log_prob": agent_data.rollout_log_prob,
+            "response_ids": agent_data.response_ids,
+            "response_mask": agent_data.response_mask,
+            "env_turns": agent_data.env_turns,
+            "assistant_turns": agent_data.assistant_turns,
+            "env_rewards": agent_data.env_rewards,
+            "env_kwargs": agent_data.env_kwargs,
+            "routed_experts": agent_data.routed_experts,
+            "rid": agent_data.rid,
+        }
+
     async def _handle_processing_envs_state(self, agent_data: AgentData, loop):
         tasks = []
         env_call_name = []
@@ -225,6 +288,7 @@ class NaiveFlow:
         agent_data.response_mask += [0] * len(response_ids)
         agent_data.rollout_log_prob += [0.0] * len(response_ids)
         agent_data.env_turns += 1
+        agent_data.response_ids = []
         for env_response in env_responses:
             if env_response.complete:
                 return AgentState.TERMINATED
@@ -270,17 +334,36 @@ class NaiveFlow:
         is_validate=False,
         request_seed: int | None = None,
     ):
-        _, response_ids, rollout_log_prob, routed_experts = await self.engine.generate(
-            agent_data.prompts_ids,
-            is_validate,
-            use_router=self.use_router,
-            request_seed=request_seed,
-            return_routed_experts=self._return_routed_experts,
-        )
-        agent_data.response_ids = response_ids
+        remaining_response_length = self.max_response_length - len(agent_data.response_mask)
+        if remaining_response_length <= 0:
+            return AgentState.TERMINATED
+        try:
+            _, response_ids, rollout_log_prob, routed_experts = await self.engine.generate(
+                agent_data.prompts_ids,
+                is_validate,
+                use_router=self.use_router,
+                request_seed=request_seed,
+                return_routed_experts=self._return_routed_experts,
+                max_new_tokens=remaining_response_length,
+                rid=agent_data.rid,
+            )
+        except SglangGenerationAborted as abort:
+            agent_data.response_ids += abort.responses
+            agent_data.rollout_log_prob += abort.rollout_log_prob
+            agent_data.prompts_ids += abort.responses
+            agent_data.response_mask += [1] * len(abort.responses)
+            if abort.routed_experts is not None:
+                agent_data.routed_experts = abort.routed_experts
+            agent_data.rid = abort.rid
+            return AgentState.ABORTED
+        # Multi-turn generations share one rid for the whole agent lifetime,
+        # so the inference engine can correlate turns of the same logical
+        # request. rid is assigned once in _load_agent_data and preserved
+        # across abort/resume — do NOT clear it on per-turn completion.
+        agent_data.response_ids += response_ids
         agent_data.rollout_log_prob += rollout_log_prob
         agent_data.prompts_ids += response_ids
-        agent_data.response_mask += [1] * len(agent_data.response_ids)
+        agent_data.response_mask += [1] * len(response_ids)
         agent_data.assistant_turns += 1
         if routed_experts is not None:
             agent_data.routed_experts = routed_experts

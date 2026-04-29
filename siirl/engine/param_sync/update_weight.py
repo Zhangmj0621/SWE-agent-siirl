@@ -366,7 +366,9 @@ class ParamSyncDistributed(ParamSyncInterface):
                         f"tensor_workers={len(self.tensor_rollout_workers)} "
                         f"weight_version={self.weight_version} bump={bump_weight_version}"
                     )
-                ray.get([worker.pause_generation.remote() for worker in all_workers], timeout=timeout_s)
+                ray.get([worker.abort_generation.remote(timeout_s) for worker in all_workers], timeout=timeout_s)
+                # Flush radix/prefix cache so KV entries computed with the outgoing weights
+                # are not reused after the weight swap. Must run before _update_weights_*.
                 ray.get([worker.flush_cache.remote() for worker in all_workers], timeout=timeout_s)
             dist.barrier(group=get_gloo_group())
 
@@ -378,7 +380,7 @@ class ParamSyncDistributed(ParamSyncInterface):
             dist.barrier(group=get_gloo_group())
             if dist.get_rank() == 0:
                 self._check_weight_version()
-                ray.get([worker.continue_generation.remote() for worker in all_workers], timeout=timeout_s)
+                ray.get([worker.resume_generation.remote() for worker in all_workers], timeout=timeout_s)
             dist.barrier(group=get_gloo_group())
             sync_success = True
         finally:

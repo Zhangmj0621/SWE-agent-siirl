@@ -64,7 +64,11 @@ async def producer_task_detailed_profile(
         end_put = time.perf_counter()
         ray_put_timings.append(end_put - start_put)
 
-        sample_info = SampleInfo(uid=str(uuid.uuid4()))
+        sample_info = SampleInfo(
+            weight_version=0,
+            uid=str(uuid.uuid4()),
+            replica_index=0,
+        )
 
         # 2. Profile `coordinator.put.remote` (RPC Overhead + Remote Execution)
         start_coord = time.perf_counter()
@@ -100,7 +104,9 @@ async def main():
     log_with_time("  Detailed Performance Profile: ray.put vs coordinator.put.remote")
     log_with_time("=" * 80)
 
-    coordinator = init_data_coordinator(NUM_BUFFERS, force_local=True)
+    coordinator = init_data_coordinator(
+        num_buffers=NUM_BUFFERS, ppo_mini_batch_size=BATCH_SIZE_FOR_SIM, world_size=1, rollout_n=1
+    )
 
     # --- Part 1: Detailed Profile of the Current "Sample-by-Sample" Method ---
     log_with_time("\n--- Part 1: Profiling Current Sample-by-Sample Approach ---")

@@ -18,7 +18,6 @@ import hashlib
 import importlib
 import os
 import time
-from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -29,6 +28,7 @@ from loguru import logger
 
 from siirl.data_coordinator.sample import Sample, SampleInfo
 from siirl.execution.rollout.concurrency import resolve_rollout_concurrency
+from siirl.execution.rollout.utils import RolloutGenerationAborted
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.model_utils.model import compute_position_id_with_mask
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient
@@ -65,9 +65,11 @@ class NaiveExecutor:
         self._train_target_concurrency = target_concurrency
         self._train_concurrency_limits = train_limits
         self.tasks: set[asyncio.Task] = set()  # Track active generation tasks for cleanup
-        self.finish_group_samples: dict[str, list[Any]] = {}  # Save result of finish samples until reach n group
-        self.pending_queue = deque()
-        self.rollout_n = config.rollout.n
+        
+        # Used for partial rollout
+        self._dispatch_paused = False
+        self._dispatch_condition: asyncio.Condition | None = None
+        self._dispatch_loop: asyncio.AbstractEventLoop | None = None
 
         # Semaphore to control concurrent generation tasks (limit to batch size)
         # Use ContextVar to store semaphore per-async-context (per-event-loop)
@@ -104,39 +106,62 @@ class NaiveExecutor:
             mod = importlib.import_module(module_path)
             self.rollout_flow = getattr(mod, name)
 
+    def pause_dispatch(self):
+        # Atomic write under GIL; no need to hop to the dispatch loop just to flip a bool.
+        # The dispatch loop checks the flag on each iteration via _wait_dispatch_resumed.
+        self._dispatch_paused = True
+
+    def resume_dispatch(self):
+        loop = self._dispatch_loop
+        if loop is None or loop.is_closed():
+            self._dispatch_paused = False
+            return
+        # Resume has to run on the dispatch loop because it must notify the Condition
+        # to wake a coroutine that is currently awaiting on it.
+        asyncio.run_coroutine_threadsafe(self._resume_dispatch(), loop).result()
+
+    async def _resume_dispatch(self):
+        self._dispatch_paused = False
+        if self._dispatch_condition is None:
+            return
+        async with self._dispatch_condition:
+            self._dispatch_condition.notify_all()
+
+    def _init_dispatch_condition(self):
+        self._dispatch_loop = asyncio.get_running_loop()
+        self._dispatch_condition = asyncio.Condition()
+
+    async def _wait_dispatch_resumed(self):
+        if self._dispatch_condition is None:
+            self._init_dispatch_condition()
+        condition = self._dispatch_condition
+        async with condition:
+            while self._dispatch_paused:
+                await condition.wait()
+
     async def init_sample(self):
         # need_replenish = self.max_concurrency_size
         pass
 
     async def get_sample(self):
         """
-        Get new samples from data coordinator to replenish the batch.
-        Calculates the number of missing samples and requests them from data coordinator.
+        Get one new sample to replenish the batch.
 
-        Returns:
-            List of new samples from data coordinator (empty if batch is full)
+        Returns at most one sample per call. The dispatch semaphore in ``run``
+        already guarantees we only reach here when this worker has a free
+        inference slot, so there is no need to double-gate on len(self.tasks).
+
+        Priority: shared partial queue (DataCoordinator) > fresh replica
+        from dataloader. Partial samples are pulled first so in-progress
+        trajectories finish before fresh ones start.
         """
-        # Calculate number of samples needed to reach target batch size
-        need_replenish = self.max_concurrency_size - len(self.tasks)
-        if need_replenish == 0:
-            return []
-        # Request new samples from data coordinator (Ray remote call)
-        if len(self.pending_queue) < need_replenish:
-            # diff = need_replenish - len(self.pending_queue)
-            # pull_size = (diff + self.rollout_n - 1) // self.rollout_n
+        # 1. Prefer a partial from the shared cancel queue (any worker can take any partial).
+        partials = await self.data_coordinator.get_partial.remote(1)
+        if partials:
+            return partials
 
-            # Only get one sample each time to ensure load balancing among rollout workers
-            pull_samples = await self.data_coordinator.get_dataloader.remote(1)
-
-            for sample in pull_samples:
-                samples = [copy.deepcopy(sample) for _ in range(self.rollout_n)]
-                self.pending_queue.extend(samples)
-        new_samples = []
-
-        for _ in range(need_replenish):
-            if len(self.pending_queue):
-                new_samples.append(self.pending_queue.popleft())
-        return new_samples
+        # 2. Pull one replica from the dataloader (already expanded to rollout_n copies).
+        return await self.data_coordinator.get_dataloader.remote(1)
 
     def _manual_pad(self, ids, max_length, padding_side="right"):
         """
@@ -318,20 +343,15 @@ class NaiveExecutor:
             prompt_length=getattr(sample, "prompt_length", 0),
             response_length=getattr(sample, "response_length", 0),
             uid=str(sample.uid),
+            replica_index=sample.replica_index,
             weight_version=self.engine._weight_version,
             dict_info={
                 "key": "Actor",
             },
         )
-        if sample.uid not in self.finish_group_samples:
-            self.finish_group_samples[sample.uid] = []
-        self.finish_group_samples[sample.uid].append((sample_info, sample_ref))
-        # Send processed sample to data coordinator
-        if len(self.finish_group_samples[sample.uid]) == self.rollout_n:
-            tuple_datas = self.finish_group_samples.pop(sample.uid)
-            sample_infos = [tuple_data[0] for tuple_data in tuple_datas]
-            sample_refs = [tuple_data[1] for tuple_data in tuple_datas]
-            await self.data_coordinator.put_batch.remote(sample_infos, sample_refs)
+        # DataCoordinator.put buffers replicas per uid and releases the full group
+        # to _sample_queue once all rollout_n replicas arrive.
+        await self.data_coordinator.put.remote(sample_info, sample_ref)
 
         return sample
 
@@ -343,7 +363,8 @@ class NaiveExecutor:
     ):
         """
         Asynchronous sample generation pipeline: preprocess → rollout → postprocess → data coordination.
-        Uses semaphore to control concurrency and offloads CPU-bound processing to executor.
+        Dispatch concurrency is gated at the caller (``run`` or the validate path's
+        validate_semaphore); this function itself does not throttle.
 
         Args:
             sample: Raw sample from data coordinator
@@ -358,43 +379,53 @@ class NaiveExecutor:
         sample_uid = getattr(sample, "uid", "unknown")
 
         try:
-            # Get semaphore from current async context (per-event-loop)
-            semaphore = self._semaphore_ctx.get()
-            async with semaphore:  # Limit concurrent generations to batch size
-                loop = asyncio.get_running_loop()
-                # 1. Preprocess sample (CPU-bound, offload to executor)
-                sample = await loop.run_in_executor(None, self._pre_process, sample, is_validate)
+            loop = asyncio.get_running_loop()
+            # 1. Preprocess sample (CPU-bound, offload to executor)
+            sample = await loop.run_in_executor(None, self._pre_process, sample, is_validate)
 
-                # 2. Execute rollout flow (LLM generation with reward calculation)
-                if validate_request_seed is None:
+            # 2. Execute rollout flow (LLM generation with reward calculation)
+            if validate_request_seed is None:
+                sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
+            else:
+                try:
+                    sample = await self.rollout_flow(
+                        sample,
+                        self.reward_fn,
+                        is_validate,
+                        request_seed=validate_request_seed,
+                    )
+                except TypeError as exc:
+                    if "request_seed" not in str(exc):
+                        raise
                     sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
-                else:
-                    try:
-                        sample = await self.rollout_flow(
-                            sample,
-                            self.reward_fn,
-                            is_validate,
-                            request_seed=validate_request_seed,
-                        )
-                    except TypeError as exc:
-                        if "request_seed" not in str(exc):
-                            raise
-                        sample = await self.rollout_flow(sample, self.reward_fn, is_validate)
 
-                # 3. Postprocess sample (CPU-bound padding and tensor formatting)
-                sample = await loop.run_in_executor(None, self._post_process, sample)
+            # 3. Postprocess sample (CPU-bound padding and tensor formatting)
+            sample = await loop.run_in_executor(None, self._post_process, sample)
 
-                # 4. Collect timing information from rollout flow
-                timing_info["rollout_end_at"] = time.time()
-                timing_info["rollout_duration"] = timing_info["rollout_end_at"] - timing_info["rollout_start_at"]
-                timing_info["generation_duration"] = getattr(sample, "_generation_duration", 0)
-                timing_info["reward_duration"] = getattr(sample, "_reward_duration", 0)
-                sample.timing_info = timing_info
+            # 4. Collect timing information from rollout flow
+            timing_info["rollout_end_at"] = time.time()
+            timing_info["rollout_duration"] = timing_info["rollout_end_at"] - timing_info["rollout_start_at"]
+            timing_info["generation_duration"] = getattr(sample, "_generation_duration", 0)
+            timing_info["reward_duration"] = getattr(sample, "_reward_duration", 0)
+            sample.timing_info = timing_info
 
-                # 5. Store processed sample in Ray object store and notify data coordinator
-                if not is_validate:
-                    await self.put_data(sample=sample, loop=loop)
-                return sample
+            # 5. Store processed sample in Ray object store and notify data coordinator
+            if not is_validate:
+                await self.put_data(sample=sample, loop=loop)
+            return sample
+
+        except RolloutGenerationAborted as aborted:
+            if not is_validate:
+                # Hand the partial sample back to the shared cancel queue so any
+                # worker can pick it up after weight sync resumes dispatch.
+                await self.data_coordinator.put_partial.remote(aborted.sample)
+                logger.debug(
+                    "[NaiveExecutor.generate] Sample uid={} aborted by weight sync; "
+                    "handed back to shared cancel queue",
+                    sample_uid,
+                )
+                return None
+            raise
 
         except Exception as e:
             import traceback
@@ -408,15 +439,23 @@ class NaiveExecutor:
         Main execution loop for the executor.
         Continuously replenishes samples, creates generation tasks, and maintains batch size.
         Runs until self.running is set to False.
+
+        Dispatch is gated by ``self._semaphore_ctx`` — we only pull a new sample
+        from the DataCoordinator once this worker has a free inference slot.
+        This prevents a slow worker from draining the shared queue into its own
+        task set while peers sit idle. The slot is released in the task's
+        done-callback so generate() itself does not need its own semaphore.
         """
         # Create semaphore for this event loop if not already exists
         # Check if ContextVar has been set to avoid creating multiple semaphores
         # when switching between run() and validate() in the same event loop
         try:
-            self._semaphore_ctx.get()
+            semaphore = self._semaphore_ctx.get()
         except LookupError:
             # ContextVar not set yet - create new semaphore for this event loop
-            self._semaphore_ctx.set(asyncio.Semaphore(self.max_concurrency_size))
+            semaphore = asyncio.Semaphore(self.max_concurrency_size)
+            self._semaphore_ctx.set(semaphore)
+        self._init_dispatch_condition()
 
         self.running = True
         stats_task = None
@@ -431,29 +470,32 @@ class NaiveExecutor:
             stats_task = asyncio.create_task(self.rollout_status())
 
         while self.running:
-            # Get new samples to replenish batch
+            await self._wait_dispatch_resumed()
+            # Block until this worker has an inference slot before touching the
+            # shared queue — if we are already saturated, let peers pull instead.
+            await semaphore.acquire()
             samples = await self.get_sample()
             if not samples:
-                # No new samples - short sleep to avoid busy waiting
+                # Nothing to dispatch right now; give the slot back and retry.
+                semaphore.release()
                 await asyncio.sleep(0.001)
-            else:
-                # Create generation tasks for new samples
-                tasks = []
-                for sample in samples:
-                    task = asyncio.create_task(self.generate(sample))
-                    tasks.append(task)
-                    self.tasks.add(task)
-                    # Remove task from tracking set when completed
-                    task.add_done_callback(self.tasks.discard)
+                continue
+            for sample in samples:
+                task = asyncio.create_task(self.generate(sample))
+                self.tasks.add(task)
+                # Release both the task-set slot and the semaphore slot when the
+                # task finishes (including on exception / cancellation).
+                task.add_done_callback(self.tasks.discard)
+                task.add_done_callback(lambda t, sem=semaphore: sem.release())
 
-                # Debug code (commented out) - save batch for inspection
-                # samples = await asyncio.gather(*tasks)
-                # batch = Samples2Dict(samples=samples)
-                # torch.save(batch, f"save_dict/{os.environ.get('RANK')}_batch.pt")
-                # break
+            # Debug code (commented out) - save batch for inspection
+            # samples = await asyncio.gather(*tasks)
+            # batch = Samples2Dict(samples=samples)
+            # torch.save(batch, f"save_dict/{os.environ.get('RANK')}_batch.pt")
+            # break
 
-                # Yield control to event loop (non-blocking sleep)
-                await asyncio.sleep(0)
+            # Yield control to event loop (non-blocking sleep)
+            await asyncio.sleep(0)
         if self._dp_rank == 0:
             stats_task.cancel()
             await asyncio.gather(stats_task, return_exceptions=True)
@@ -596,15 +638,6 @@ class NaiveExecutor:
         Uses high concurrency with router load balancing.
         Streaming collection via as_completed to reduce tail latency.
         """
-        # Create semaphore for this event loop if not already exists
-        # This handles the case where validate() is called multiple times
-        # or switches with run() in the same event loop
-        try:
-            self._semaphore_ctx.get()
-        except LookupError:
-            # ContextVar not set yet - create new semaphore for this event loop
-            self._semaphore_ctx.set(asyncio.Semaphore(self.max_concurrency_size))
-
         # Enable router on rollout_flow for validate duration
         self.rollout_flow.use_router = use_router
         max_concurrent = self._resolve_validate_concurrency(use_router)
@@ -691,9 +724,13 @@ class NaiveExecutor:
             timeout_rate = (timeouts / attempts) if attempts > 0 else 0.0
 
             if last_status != current_status or timeouts > 0:
+                try:
+                    cancel_queue_size = await self.data_coordinator.get_partial_size.remote()
+                except Exception:
+                    cancel_queue_size = -1
                 message = (
                     f"rank_{self._rank} active generate tasks: {current_status}, "
-                    f"{len(self.pending_queue)} left in pending_queue, "
+                    f"{cancel_queue_size} left in shared cancel_queue, "
                     f"sem_limit={self.max_concurrency_size}, "
                     f"http_attempts={attempts}, http_timeouts={timeouts}, http_timeout_rate={timeout_rate:.3f}"
                 )
@@ -709,6 +746,8 @@ class NaiveExecutor:
         """
         Stop executor and clean up active tasks.
         Sets running flag to False and waits for all active generation tasks to complete.
+        Partials live on the shared DataCoordinator queue and survive across workers,
+        so they are NOT touched here.
         """
         self.running = False
         # Wait for all remaining tasks to finish before exiting

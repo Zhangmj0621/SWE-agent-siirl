@@ -110,6 +110,7 @@ class MainRunner:
             num_buffers=config.trainer.nnodes,
             ppo_mini_batch_size=config.actor_ref.actor.ppo_mini_batch_size,
             world_size=actor_resources.num_gpus,
+            rollout_n=config.rollout.n,
         )
 
         # Initialize dataloader in DataCoordinator

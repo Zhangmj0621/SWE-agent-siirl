@@ -1,8 +1,10 @@
 import asyncio
 import types
+from dataclasses import dataclass, field
 from typing import Any, Union, get_args, get_origin
 
 import numpy as np
+import ray
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
 from tensordict import TensorDict
@@ -16,6 +18,11 @@ class SampleInfo(BaseModel):
     dict_info: dict[str, Any] = Field(default_factory=dict)
     weight_version: int = Field()
     uid: str | None = Field(default=None)
+    replica_index: int | None = Field(
+        default=None,
+        metadata={"help": "Position of this replica within its group's rollout_n slots. "
+                  "Set by run_dataloader on dispatch and copied over from sample on put."},
+    )
 
 
 class Sample(BaseModel):
@@ -62,11 +69,25 @@ class Sample(BaseModel):
     seq_reward: float = Field(default=None, metadata={"help": "used in dapo"})
     multi_modal_inputs: dict[str, Any] | None = Field(default=None)
     uid: str | None = Field(default=None)
+    replica_index: int | None = Field(
+        default=None,
+        metadata={"help": "Position of this replica within its group's rollout_n slots "
+                  "(0..rollout_n-1). Assigned when run_dataloader expands a prompt into "
+                  "replicas and preserved across partial-rollout abort/resume."},
+    )
     temperature: float = Field(default=None, metadata={"help": "temperature"})
     timing_info: dict[str, Any] | None = Field(
         default=None,
         metadata={
             "help": "Rollout timing information: rollout_start_at, rollout_end_at, rollout_duration, generation_duration, reward_duration"
+        },
+    )
+    partial_agent_data: dict[str, Any] | None = Field(
+        default=None,
+        metadata={
+            "help": "Snapshot of the AgentData loop state when rollout was aborted by weight sync. "
+            "Populated by rollout_flow on abort and consumed by rollout_flow on resume. "
+            "MUST be None for completed samples so it is not shipped into the trainer TensorDict."
         },
     )
     # Internal timing fields used by naive_flow.py, consumed by naive_executor.py
@@ -75,6 +96,27 @@ class Sample(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+@dataclass
+class SampleGroup:
+    """Aggregation container for the rollout_n replicas of one prompt.
+
+    The group is created up front (at dataloader time) so ``put`` can write
+    into a known slot without racing to materialize the bucket; it is
+    released downstream once every slot is filled.s
+    """
+
+    uid: str
+    rollout_n: int
+    replicas: list[tuple[SampleInfo, "ray.ObjectRef"] | None] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.replicas:
+            self.replicas = [None] * self.rollout_n
+
+    def is_complete(self) -> bool:
+        return all(slot is not None for slot in self.replicas)
 
 
 def preprocess_dataloader(data: dict, n: int = 1, uid_base: int = 0):

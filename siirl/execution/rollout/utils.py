@@ -4,6 +4,31 @@ from typing import Any
 from siirl.environment.tool_env.utils.tool_parser import FunctionCall
 
 
+class RolloutGenerationAborted(Exception):
+    """Raised when rollout generation is aborted and should be resumed later."""
+
+    def __init__(self, sample: Any):
+        super().__init__("rollout generation aborted")
+        self.sample = sample
+
+
+class SglangGenerationAborted(Exception):
+    """Raised when SGLang returns an aborted generation with partial tokens."""
+
+    def __init__(
+        self,
+        responses: list[int],
+        rollout_log_prob: list[float],
+        routed_experts: Any = None,
+        rid: str | None = None,
+    ):
+        super().__init__("sglang generation aborted")
+        self.responses = responses
+        self.rollout_log_prob = rollout_log_prob
+        self.routed_experts = routed_experts
+        self.rid = rid
+
+
 class AgentState(Enum):
     PENDING = "pending"
     GENERATING = "generating"
@@ -29,6 +54,11 @@ class AgentData:
         self.env_kwargs = {}
         self.env_rewards = []
         self.routed_experts = None  # Raw flat np.int32 array from SGLang MoE routing
+        # SGLang request id. Assigned once by naive_flow._load_agent_data and shared
+        # across every generate() call of this sample's multi-turn lifetime (so the
+        # inference engine can correlate turns as one logical request), and
+        # preserved across abort/resume via partial_agent_data.
+        self.rid: str | None = None
         if ground_truth:
             self.env_kwargs["ground_truth"] = ground_truth
 

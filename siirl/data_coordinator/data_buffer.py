@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 from collections import defaultdict, deque
 from collections.abc import Callable
 from typing import Any
@@ -21,7 +22,7 @@ import loguru
 import ray
 
 from siirl.data_coordinator.dataloader import DataLoaderNode
-from siirl.data_coordinator.sample import Dict2Samples, SampleInfo, preprocess_dataloader
+from siirl.data_coordinator.sample import Dict2Samples, SampleGroup, SampleInfo, preprocess_dataloader
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.model_utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions
 
@@ -40,10 +41,11 @@ class DataCoordinator:
     This strategy is designed for both colocation and disaggregation since it doesn't cause off-policy.
     """
 
-    def __init__(self, nnodes: int, ppo_mini_batch_size: int, world_size: int):
+    def __init__(self, nnodes: int, ppo_mini_batch_size: int, world_size: int, rollout_n: int):
         self.nnodes = nnodes
         self.ppo_mini_batch_size = ppo_mini_batch_size
         self.world_size = world_size
+        self.rollout_n = max(1, int(rollout_n))
         # Use a deque to store tuples of metadata and references for efficient FIFO operations
         self._sample_queue: deque[tuple[SampleInfo, ray.ObjectRef]] = deque()
         self._put_counter = 0  # Used for round-robin buffer selection
@@ -67,15 +69,23 @@ class DataCoordinator:
         # Used to avoid uid = 0 in async mode
         self._next_train_uid = 0
 
+        # Used for partial rollout samples
+        self._cancel_queue: asyncio.Queue = asyncio.Queue()
+
+        # Per-uid group container. Each group has rollout_n fixed slots; replicas
+        # are written into their slot by replica_index on ``put``. When every slot
+        # is filled the group is flushed to ``_sample_queue`` as a contiguous run
+        # in replica-index order.
+        self._pending_groups: dict[str, SampleGroup] = {}
+
     async def put(self, sample_info: SampleInfo, sample_ref: Any):
         """
-        Called by a RolloutWorker to register a new sample reference and its metadata.
-        This method automatically routes the ObjectRef to a DataBuffer on its local
-        node to be held.
+        Called by a RolloutWorker with one finished rollout replica.
 
-        Args:
-            sample_info: Metadata about the sample
-            sample_ref: Ray ObjectRef or the actual sample data
+        Writes the replica into its pre-allocated slot in _pending_groups[uid]
+        (see SampleGroup). When every slot of the group is filled, the group
+        is atomically flushed to _sample_queue in replica-index order so the
+        trainer sees replica 0, 1, ..., rollout_n-1 as a contiguous run.
         """
         # Due to Ray's small object optimization, an ObjectRef passed by the client
         # might be automatically resolved to its actual value. Here, we ensure that
@@ -83,28 +93,18 @@ class DataCoordinator:
         if not isinstance(sample_ref, ray.ObjectRef):
             sample_ref = ray.put(sample_ref)
 
-        # Register the metadata and reference to the global queue
+        uid = sample_info.uid
+        replica_index = sample_info.replica_index
         async with self.lock:
-            # More complex logic can be implemented here, such as inserting into a
-            # priority queue based on priority
-            self._sample_queue.append((sample_info, sample_ref))
-
-    async def put_batch(self, sample_infos: list[SampleInfo], sample_refs: list[ray.ObjectRef]):
-        """
-        Called by a worker to register a batch of new sample references and their metadata.
-        This method routes the ObjectRefs to DataBuffers on their local nodes.
-
-        Args:
-            sample_infos: List of metadata for each sample
-            sample_refs: List of Ray ObjectRefs
-            caller_node_id: The node ID of the caller. If None, will try to get it from
-                          the runtime context (but this won't work correctly for remote calls)
-        """
-        if not sample_refs:
-            return
-
-        async with self.lock:
-            self._sample_queue.extend(zip(sample_infos, sample_refs, strict=False))
+            group = self._pending_groups.get(uid)
+            if group is None:
+                # Partial-rollout resume may arrive after the process that created the
+                # group died; rebuild a group lazily so we don't drop the replica.
+                group = SampleGroup(uid=uid, rollout_n=self.rollout_n)
+                self._pending_groups[uid] = group
+            group.replicas[replica_index] = (sample_info, sample_ref)
+            if group.is_complete():
+                self._sample_queue.extend(self._pending_groups.pop(uid).replicas)
 
     async def get_batch(
         self,
@@ -467,7 +467,9 @@ class DataCoordinator:
 
             while not self._prepare_data_stop:
                 moved = False
-                reserve = self._prepare_data_reserve
+                # pending_queue holds replicas (rollout_n per prompt); scale reserve
+                # from prompts to replicas so callers can keep passing prompt counts.
+                reserve = self._prepare_data_reserve * self.rollout_n
                 moved_count = 0
                 while self.pending_queue.qsize() > reserve:
                     sample = self.pending_queue.get_nowait()
@@ -500,15 +502,29 @@ class DataCoordinator:
                 await self.dataloader_val_queue.put(sample)
         else:
             for sample in samples:
-                await self.pending_queue.put(sample)
+                # Expand each prompt into rollout_n replicas dispatched independently
+                # (so long-tail prompts can't stall on one worker). Each replica is
+                # tagged with its slot index so DataCoordinator.put can write it back
+                # into the pre-created SampleGroup at _pending_groups[uid].
+                uid = str(sample.uid)
+                self._pending_groups[uid] = SampleGroup(uid=uid, rollout_n=self.rollout_n)
+                for i in range(self.rollout_n):
+                    replica = sample if i == 0 else copy.deepcopy(sample)
+                    replica.replica_index = i
+                    await self.pending_queue.put(replica)
             self._prepare_data_event.set()
         return True
 
     @ray.method(concurrency_group="dataloader")
     async def get_dataloader_size(self, train_batch_size):
+        # Queues hold replicas (rollout_n per prompt); callers track
+        # staleness in replica units so return the raw replica count here.
+        # Returning prompts (floor-dividing) would hide half-consumed groups
+        # and let the prefetcher exceed async_factor * train_batch_size.
         data_queue = self.dataloader_queue
-        remain_pending_size = self.pending_queue.qsize() - train_batch_size
-        return data_queue.qsize() + (remain_pending_size if remain_pending_size > 0 else 0)
+        reserve_replicas = train_batch_size * self.rollout_n
+        remain_pending_replicas = self.pending_queue.qsize() - reserve_replicas
+        return data_queue.qsize() + (remain_pending_replicas if remain_pending_replicas > 0 else 0)
 
     @ray.method(concurrency_group="dataloader")
     async def run_dataloader(self, epoch=0, is_validate=False):
@@ -529,7 +545,16 @@ class DataCoordinator:
                 await self.dataloader_val_queue.put(sample)
         else:
             for sample in samples:
-                await self.pending_queue.put(sample)
+                # Expand each prompt into rollout_n replicas dispatched independently
+                # (so long-tail prompts can't stall on one worker). Each replica is
+                # tagged with its slot index so DataCoordinator.put can write it back
+                # into the pre-created SampleGroup at _pending_groups[uid].
+                uid = str(sample.uid)
+                self._pending_groups[uid] = SampleGroup(uid=uid, rollout_n=self.rollout_n)
+                for i in range(self.rollout_n):
+                    replica = sample if i == 0 else copy.deepcopy(sample)
+                    replica.replica_index = i
+                    await self.pending_queue.put(replica)
             self._prepare_data_event.set()
         return True
 
@@ -548,16 +573,57 @@ class DataCoordinator:
             return all_popped
 
     @ray.method(concurrency_group="dataloader")
+    async def put_partial(self, sample) -> None:
+        # Push a partial-rollout sample (aborted by weight sync) into the shared
+        # cancel queue. Any rollout worker may pull it later via ``get_partial``.
+        await self._cancel_queue.put(sample)
+
+    @ray.method(concurrency_group="dataloader")
+    async def get_partial(self, batch_size: int) -> list:
+        if batch_size <= 0:
+            return []
+
+        if self._cancel_queue.qsize() > batch_size:
+            return [await self._cancel_queue.get() for _ in range(batch_size)]
+        else:
+            all_popped = []
+            for _ in range(self._cancel_queue.qsize()):
+                all_popped.append(await self._cancel_queue.get())
+            return all_popped
+
+    @ray.method(concurrency_group="dataloader")
+    async def get_partial_size(self) -> int:
+        """Return the current size of the shared cancel queue (for monitoring)."""
+        return self._cancel_queue.qsize()
+
+    @ray.method(concurrency_group="dataloader")
     def save_dataloader_state(self):
         """Save dataloader state and pending dataloader queues."""
         if self.dataloader is None:
             return None
+        # Dereference ObjectRefs in _pending_groups so the snapshot is usable
+        # after a cluster restart (ObjectRef IDs do not survive re-init).
+        pending_groups = {}
+        for uid, group in self._pending_groups.items():
+            slots = []
+            for slot in group.replicas:
+                if slot is None:
+                    slots.append(None)
+                else:
+                    info, ref = slot
+                    slots.append((info, ray.get(ref)))
+            pending_groups[uid] = {
+                "uid": group.uid,
+                "rollout_n": group.rollout_n,
+                "replicas": slots,
+            }
         return {
             "dataloader_state": self.dataloader.state_dict(),
             "pending_queue": list(self.pending_queue._queue),
             "train_queue": list(self.dataloader_queue._queue),
             "val_queue": list(self.dataloader_val_queue._queue),
             "next_train_uid": self._next_train_uid,
+            "pending_groups": pending_groups,
         }
 
     @ray.method(concurrency_group="dataloader")
@@ -584,6 +650,17 @@ class DataCoordinator:
             else:
                 queued_uids = [int(sample.uid) for sample in train_items if getattr(sample, "uid", None) is not None]
                 self._next_train_uid = (max(queued_uids) + 1) if queued_uids else 0
+            # Rehydrate _pending_groups: re-ray.put the Samples to get fresh ObjectRefs
+            # valid in the current cluster session.
+            self._pending_groups = {}
+            for uid, group_state in (state_dict.get("pending_groups") or {}).items():
+                group = SampleGroup(uid=group_state["uid"], rollout_n=int(group_state["rollout_n"]))
+                for i, slot in enumerate(group_state["replicas"]):
+                    if slot is None:
+                        continue
+                    info, sample = slot
+                    group.replicas[i] = (info, ray.put(sample))
+                self._pending_groups[uid] = group
             self._prepare_data_event.set()
             return
 
@@ -591,6 +668,7 @@ class DataCoordinator:
         self.pending_queue = asyncio.Queue()
         self.dataloader_queue = asyncio.Queue()
         self.dataloader_val_queue = asyncio.Queue()
+        self._pending_groups = {}
         self._next_train_uid = 0
 
 
@@ -599,7 +677,7 @@ class DataCoordinator:
 # ====================================================================
 
 
-def init_data_coordinator(num_buffers: int, ppo_mini_batch_size: int, world_size: int) -> ray.actor.ActorHandle:
+def init_data_coordinator(num_buffers: int, ppo_mini_batch_size: int, world_size: int, rollout_n: int) -> ray.actor.ActorHandle:
     """
     Initializes the data coordination system, which includes a global DataCoordinator
     and multiple distributed DataBuffers. Returns a single, unified DataCoordinator
@@ -629,6 +707,7 @@ def init_data_coordinator(num_buffers: int, ppo_mini_batch_size: int, world_size
             nnodes=num_buffers,
             ppo_mini_batch_size=ppo_mini_batch_size,
             world_size=world_size,
+            rollout_n=rollout_n,
         )
 
     return coordinator

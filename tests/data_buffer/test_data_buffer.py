@@ -27,7 +27,11 @@ from siirl.data_coordinator.sample import SampleInfo
 
 class TestDataCoordinator(unittest.IsolatedAsyncioTestCase):
     """
-    Unit tests for the new DataCoordinator/DataBuffer architecture.
+    Unit tests for the DataCoordinator/DataBuffer architecture.
+
+    Uses ``rollout_n=1`` + ``replica_index=0`` so each ``put`` acts as an
+    immediate single-slot group that flushes to the sample queue — matches
+    the pre-grouping append-on-put behavior these tests exercise.
     """
 
     @classmethod
@@ -42,8 +46,9 @@ class TestDataCoordinator(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         """Create a new, clean DataCoordinator system for each test."""
-        # Use force_local=True for single-node unit testing
-        self.coordinator = init_data_coordinator(num_buffers=2, force_local=True)
+        self.coordinator = init_data_coordinator(
+            num_buffers=2, ppo_mini_batch_size=1, world_size=1, rollout_n=1
+        )
         # Ensure the actor has started and is ready
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
 
@@ -58,14 +63,19 @@ class TestDataCoordinator(unittest.IsolatedAsyncioTestCase):
         """Helper to create a sample with identifiable content."""
         return TensorDict({"data": torch.tensor([[content_id]])}, batch_size=[1])
 
-    def _create_mock_sample_info(self, tokens: int, group: int = 0) -> SampleInfo:
-        """Helper to create a SampleInfo object."""
+    def _create_mock_sample_info(self, tokens: int, uid: str | None = None) -> SampleInfo:
+        """Helper to create a SampleInfo object.
+
+        Every sample is a distinct single-slot group (``rollout_n=1``,
+        ``replica_index=0``) unless the caller supplies a shared uid.
+        """
         return SampleInfo(
-            agent_group=group,
             sum_tokens=tokens,
             prompt_length=tokens,
             response_length=0,
-            uid=uuid.uuid4().int,
+            weight_version=0,
+            uid=uid or uuid.uuid4().hex,
+            replica_index=0,
         )
 
     # === Test Cases ===
@@ -177,30 +187,30 @@ class TestDataCoordinator(unittest.IsolatedAsyncioTestCase):
         """
         Test using the filter_plugin to achieve node-affinity scheduling.
         This simulates a trainer on 'node_A' preferentially pulling data
-        that was also produced on 'node_A'.
+        that was also produced on 'node_A'. We stash the node id in
+        ``dict_info`` since it is a first-class metadata bag on SampleInfo.
         """
         # 1. Simulate data coming from two different nodes
         # Samples from node_A
         for i in range(3):
-            info = self._create_mock_sample_info(tokens=128, group=i)
-            info.node_id = "node_A"  # Manually set node_id for testing
+            info = self._create_mock_sample_info(tokens=128)
+            info.dict_info["node_id"] = "node_A"
             data = self._create_mock_sample(content_id=100 + i)
             await self.coordinator.put.remote(info, ray.put(data))
 
         # Samples from node_B
         for i in range(2):
-            info = self._create_mock_sample_info(tokens=256, group=i)
-            info.node_id = "node_B"  # Manually set node_id for testing
+            info = self._create_mock_sample_info(tokens=256)
+            info.dict_info["node_id"] = "node_B"
             data = self._create_mock_sample(content_id=200 + i)
             await self.coordinator.put.remote(info, ray.put(data))
 
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 5)
 
-        # 2. Create a filter factory to generate an affinity filter
-        # This closure captures the desired local_node_id.
+        # 2. Create a filter factory to generate an affinity filter.
         def create_affinity_filter(local_node_id: str):
             def affinity_filter(sample_info: SampleInfo) -> bool:
-                return sample_info.node_id == local_node_id
+                return sample_info.dict_info.get("node_id") == local_node_id
 
             return affinity_filter
 
@@ -226,6 +236,92 @@ class TestDataCoordinator(unittest.IsolatedAsyncioTestCase):
         retrieved_data = ray.get(remote_batch)
         retrieved_ids = sorted([d.get("data").item() for d in retrieved_data])
         self.assertEqual(retrieved_ids, [200, 201])
+
+
+class TestDataCoordinatorGrouping(unittest.IsolatedAsyncioTestCase):
+    """
+    Unit tests that exercise the replica-grouping behavior of ``put`` directly
+    (``rollout_n>1``): replicas of the same uid must arrive in all slots before
+    the group flushes to the sample queue as a contiguous run in index order.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not ray.is_initialized():
+            ray.init(num_cpus=4, ignore_reinit_error=True, logging_level="error")
+
+    @classmethod
+    def tearDownClass(cls):
+        if ray.is_initialized():
+            ray.shutdown()
+
+    async def asyncSetUp(self):
+        self.rollout_n = 3
+        self.coordinator = init_data_coordinator(
+            num_buffers=1, ppo_mini_batch_size=1, world_size=1, rollout_n=self.rollout_n
+        )
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
+
+    async def asyncTearDown(self):
+        ray.kill(self.coordinator, no_restart=True)
+        await asyncio.sleep(0.1)
+
+    def _info(self, uid: str, replica_index: int, tokens: int = 64) -> SampleInfo:
+        return SampleInfo(
+            sum_tokens=tokens,
+            prompt_length=tokens,
+            response_length=0,
+            weight_version=0,
+            uid=uid,
+            replica_index=replica_index,
+        )
+
+    async def test_partial_group_stays_buffered(self):
+        """A group with fewer than rollout_n slots filled must not flush."""
+        uid = "grp-A"
+        await self.coordinator.put.remote(
+            self._info(uid, 0), ray.put(TensorDict({"x": torch.tensor([0])}, batch_size=[1]))
+        )
+        await self.coordinator.put.remote(
+            self._info(uid, 1), ray.put(TensorDict({"x": torch.tensor([1])}, batch_size=[1]))
+        )
+        # 2/3 replicas in; nothing should be queued yet.
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
+
+    async def test_full_group_flushes_in_index_order(self):
+        """Once every slot is filled the group flushes as replica 0..n-1."""
+        uid = "grp-B"
+        # Fill out of order to prove we flush by replica_index, not arrival order.
+        await self.coordinator.put.remote(
+            self._info(uid, 2), ray.put(TensorDict({"x": torch.tensor([2])}, batch_size=[1]))
+        )
+        await self.coordinator.put.remote(
+            self._info(uid, 0), ray.put(TensorDict({"x": torch.tensor([0])}, batch_size=[1]))
+        )
+        await self.coordinator.put.remote(
+            self._info(uid, 1), ray.put(TensorDict({"x": torch.tensor([1])}, batch_size=[1]))
+        )
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), self.rollout_n)
+
+        batch = await self.coordinator.get_batch.remote(batch_size=self.rollout_n)
+        retrieved = [ray.get(r) if isinstance(r, ray.ObjectRef) else r for r in batch]
+        retrieved_ids = [item.get("x").item() for item in retrieved]
+        self.assertEqual(retrieved_ids, [0, 1, 2])
+
+    async def test_independent_groups_do_not_block_each_other(self):
+        """Completing one group's replicas should flush only that group."""
+        a, b = "grp-a", "grp-b"
+        # Fill group A completely.
+        for i in range(self.rollout_n):
+            await self.coordinator.put.remote(
+                self._info(a, i), ray.put(TensorDict({"x": torch.tensor([100 + i])}, batch_size=[1]))
+            )
+        # Only partially fill group B.
+        await self.coordinator.put.remote(
+            self._info(b, 0), ray.put(TensorDict({"x": torch.tensor([200])}, batch_size=[1]))
+        )
+        # A flushed (rollout_n items); B has not (partial).
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), self.rollout_n)
 
 
 if __name__ == "__main__":

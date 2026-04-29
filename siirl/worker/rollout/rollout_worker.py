@@ -446,6 +446,24 @@ class RolloutWorker:
     def continue_generation(self):
         return self.engine.continue_generation()
 
+    def abort_generation(self, timeout_s: int | None = None):
+        timeout_s = timeout_s or self.engine._rpc_timeout_s()
+        self.engine.pause_generation_dispatch()
+        if self.executor is not None:
+            self.executor.pause_dispatch()
+        result = self.engine.abort_generation(abort_all=True)
+        if not self.engine.wait_for_no_inflight_generation(timeout_s=timeout_s):
+            raise TimeoutError(
+                f"Timed out waiting for in-flight generation to abort on rollout worker rank={self.rank}"
+            )
+        return result
+
+    def resume_generation(self):
+        self.engine.resume_generation_dispatch()
+        if self.executor is not None:
+            self.executor.resume_dispatch()
+        return True
+
     def offload_memory(self, tags: list[str] | None = None):
         """Release GPU memory occupation for colocated mode."""
         try:

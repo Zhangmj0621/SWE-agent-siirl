@@ -16,7 +16,9 @@ import asyncio
 import copy
 import multiprocessing
 import os
+import threading
 import time
+import uuid
 from collections.abc import Callable
 
 import numpy as np
@@ -28,6 +30,7 @@ from sglang.srt.server_args import ServerArgs
 from urllib3.exceptions import NewConnectionError
 
 from siirl.execution.rollout.concurrency import resolve_max_num_seqs, resolve_rollout_concurrency
+from siirl.execution.rollout.utils import SglangGenerationAborted
 from siirl.models.loader import load_tokenizer
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.net_utils.http_utils import GlobalAsyncHTTPClient, wait_until_ok
@@ -102,6 +105,9 @@ class SglangEngine:
         )
         self._extra_server_args = extra_server_args
         self.process = None  # Server process, started by launch_server()
+        self._generation_paused = False
+        self._inflight_generation = 0
+        self._generation_cond = threading.Condition()
 
     def _build_server_args(self) -> dict:
         """
@@ -262,6 +268,49 @@ class SglangEngine:
             return f"http://{self.router_address}/generate"
         return f"http://{self.ip}:{self.port}/generate"
 
+    async def _begin_generation_when_resumed(self):
+        with self._generation_cond:
+            if not self._generation_paused:
+                self._inflight_generation += 1
+                return
+
+        def _wait():
+            with self._generation_cond:
+                while self._generation_paused:
+                    self._generation_cond.wait()
+                self._inflight_generation += 1
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _wait)
+
+    def _end_generation(self):
+        with self._generation_cond:
+            self._inflight_generation = max(0, self._inflight_generation - 1)
+            if self._inflight_generation == 0:
+                self._generation_cond.notify_all()
+
+    def pause_generation_dispatch(self):
+        with self._generation_cond:
+            self._generation_paused = True
+
+    def resume_generation_dispatch(self):
+        with self._generation_cond:
+            self._generation_paused = False
+            self._generation_cond.notify_all()
+
+    def wait_for_no_inflight_generation(self, timeout_s: int | None = None) -> bool:
+        deadline = None if timeout_s is None else time.monotonic() + max(0, timeout_s)
+        with self._generation_cond:
+            while self._inflight_generation > 0:
+                if deadline is None:
+                    self._generation_cond.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._generation_cond.wait(timeout=remaining)
+            return True
+
     async def generate(
         self,
         input_ids: list[int],
@@ -269,29 +318,54 @@ class SglangEngine:
         use_router: bool = False,
         return_routed_experts: bool = False,
         request_seed: int | None = None,
+        max_new_tokens: int | None = None,
+        rid: str | None = None,
     ):
-        """Single sample generation with optional router load balancing."""
-        sampling_params = self._get_sampling_params(
-            is_validate,
-            len(input_ids),
-            request_seed=request_seed,
-        )
-        url = self._get_generate_url(use_router=use_router)
+        """Single sample generation with optional router load balancing.
 
-        payload = {
-            "input_ids": input_ids,
-            "sampling_params": sampling_params,
-            "return_logprob": True,
-        }
-        if return_routed_experts:
-            payload["return_routed_experts"] = True
-        output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
-        responses = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
-        rollout_log_prob = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-        routed_experts = None
-        if return_routed_experts and "routed_experts" in output["meta_info"]:
-            routed_experts = np.frombuffer(pybase64.b64decode(output["meta_info"]["routed_experts"].encode("ascii")), dtype=np.int32)
-        return output["text"], responses, rollout_log_prob, routed_experts
+        Pass ``rid`` to reuse a previously-issued request id. Callers should keep
+        the same ``rid`` across every turn of a multi-turn agent (and across
+        abort/resume) so the inference engine can identify the logical request.
+        When ``rid`` is None a fresh uuid4 hex is generated as a fallback.
+        """
+        await self._begin_generation_when_resumed()
+        request_rid = rid if rid is not None else uuid.uuid4().hex
+        try:
+            sampling_params = self._get_sampling_params(
+                is_validate,
+                len(input_ids),
+                request_seed=request_seed,
+            )
+            if max_new_tokens is not None:
+                sampling_params["max_new_tokens"] = min(
+                    int(max_new_tokens),
+                    int(sampling_params.get("max_new_tokens", max_new_tokens)),
+                )
+            url = self._get_generate_url(use_router=use_router)
+
+            payload = {
+                "rid": request_rid,
+                "input_ids": input_ids,
+                "sampling_params": sampling_params,
+                "return_logprob": True,
+            }
+            if return_routed_experts:
+                payload["return_routed_experts"] = True
+            output = await GlobalAsyncHTTPClient.make_request(url, payload, "POST")
+            meta_info = output.get("meta_info", {})
+            token_logprobs = meta_info.get("output_token_logprobs") or []
+            responses = [item[1] for item in token_logprobs]
+            rollout_log_prob = [item[0] for item in token_logprobs]
+            routed_experts = None
+            if return_routed_experts and "routed_experts" in meta_info:
+                routed_experts = np.frombuffer(pybase64.b64decode(meta_info["routed_experts"].encode("ascii")), dtype=np.int32)
+            finish_reason = meta_info.get("finish_reason", {})
+            is_abort = finish_reason.get("type") == "abort" if isinstance(finish_reason, dict) else finish_reason == "abort"
+            if is_abort:
+                raise SglangGenerationAborted(responses, rollout_log_prob, routed_experts, rid=request_rid)
+            return output["text"], responses, rollout_log_prob, routed_experts
+        finally:
+            self._end_generation()
 
     def _resolve_batch_concurrency(self, use_router: bool) -> int:
         limits = resolve_rollout_concurrency(self.config, phase="validate", use_router=use_router)
@@ -481,6 +555,15 @@ class SglangEngine:
 
     def continue_generation(self):
         response = requests.post(f"{self.sgl_args.url()}/continue_generation", json={}, timeout=self._rpc_timeout_s())
+        response.raise_for_status()
+        return response
+
+    def abort_generation(self, rid: str = "", abort_all: bool = True):
+        response = requests.post(
+            f"{self.sgl_args.url()}/abort_request",
+            json={"rid": rid, "abort_all": abort_all},
+            timeout=self._rpc_timeout_s(),
+        )
         response.raise_for_status()
         return response
 

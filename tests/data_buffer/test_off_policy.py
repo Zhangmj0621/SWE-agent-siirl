@@ -49,7 +49,7 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         """Create a new, clean DataCoordinator for each test."""
-        self.coordinator = init_data_coordinator(num_buffers=1, ppo_mini_batch_size=1, world_size=1)
+        self.coordinator = init_data_coordinator(num_buffers=1, ppo_mini_batch_size=1, world_size=1, rollout_n=1)
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
 
     async def asyncTearDown(self):
@@ -62,13 +62,20 @@ class TestOffPolicyFiltering(unittest.IsolatedAsyncioTestCase):
         return TensorDict({"data": torch.tensor([[content_id]])}, batch_size=[1])
 
     def _create_sample_info(self, tokens: int, weight_version: int, uid: str = None) -> SampleInfo:
-        """Helper to create a SampleInfo object with weight_version."""
+        """Helper to create a SampleInfo object with weight_version.
+
+        ``replica_index=0`` together with coordinator ``rollout_n=1`` makes each
+        ``put`` act as an immediate single-slot group that flushes to
+        ``_sample_queue`` — matches the pre-refactor append-on-put behavior these
+        tests rely on.
+        """
         return SampleInfo(
             sum_tokens=tokens,
             prompt_length=tokens,
             response_length=0,
             weight_version=weight_version,
             uid=uid or str(tokens),
+            replica_index=0,
         )
 
     # === Test Cases for min_version filtering ===
@@ -263,7 +270,7 @@ class TestOffPolicyWithMultiplePartitions(unittest.IsolatedAsyncioTestCase):
             ray.shutdown()
 
     async def asyncSetUp(self):
-        self.coordinator = init_data_coordinator(num_buffers=1, ppo_mini_batch_size=2, world_size=2)
+        self.coordinator = init_data_coordinator(num_buffers=1, ppo_mini_batch_size=2, world_size=2, rollout_n=1)
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
 
     async def asyncTearDown(self):
@@ -280,6 +287,7 @@ class TestOffPolicyWithMultiplePartitions(unittest.IsolatedAsyncioTestCase):
             response_length=0,
             weight_version=weight_version,
             uid=uid or str(tokens),
+            replica_index=0,
         )
 
     async def test_min_version_with_partitions(self):

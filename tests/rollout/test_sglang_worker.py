@@ -65,6 +65,7 @@ class MainRunner:
             num_buffers=siirl_args.trainer.nnodes,
             ppo_mini_batch_size=siirl_args.actor_ref.actor.ppo_mini_batch_size,
             world_size=siirl_args.trainer.nnodes * siirl_args.trainer.n_gpus_per_node,
+            rollout_n=siirl_args.rollout.n,
         )
         dataloader_fut = data_coordinator_handle.init_dataloader.remote(siirl_args)
         # 2. Allocate GPU resources
