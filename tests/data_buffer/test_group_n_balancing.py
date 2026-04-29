@@ -55,6 +55,7 @@ class TestGroupNBalancing(unittest.TestCase):
             sum_tokens=sum_tokens,
             prompt_length=sum_tokens // 2,
             response_length=sum_tokens // 2,
+            weight_version=0,
         )
 
     def _create_batch_items(self, groups: list[tuple[str, list[int]]]) -> list[tuple[SampleInfo, MockObjectRef]]:
@@ -457,6 +458,7 @@ class TestGroupNBalancingGRPOScenario(unittest.TestCase):
                     sum_tokens=tokens,
                     prompt_length=tokens // 2,
                     response_length=tokens // 2,
+                    weight_version=0,
                 )
                 # Store score in dict_info for simulation
                 sample_info.dict_info["score"] = score

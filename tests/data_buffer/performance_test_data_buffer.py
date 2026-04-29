@@ -71,14 +71,17 @@ async def producer_task(producer_id: int, coordinator: ray.actor.ActorHandle, nu
         # 1. Store the sample data in the Ray object store of the current node
         sample_ref = ray.put(sample_data)
 
-        # 2. Create metadata
+        # 2. Create metadata. Use rollout_n=1 + replica_index=0 so each put acts
+        # as an immediate single-slot group that flushes to the sample queue.
         sample_info = SampleInfo(
-            agent_group=producer_id,
             sum_tokens=SEQ_LEN,
             prompt_length=SEQ_LEN,
             response_length=0,  # Assume response is empty in the producer phase
-            uid=uuid.uuid4().int,  # Generate a unique integer ID
+            weight_version=0,
+            uid=uuid.uuid4().hex,
+            replica_index=0,
         )
+        sample_info.dict_info["producer_id"] = producer_id
 
         # 3. Register the metadata and reference with the global DataCoordinator
         #    The DataCoordinator will automatically handle holding the reference locally
@@ -101,8 +104,9 @@ async def main():
     log_with_time("-" * 80)
 
     # 1. Initialize the data coordination system
-    # For single-machine testing, force_local=True must be set to avoid waiting for multiple nodes
-    coordinator = init_data_coordinator(NUM_BUFFERS, force_local=True)
+    coordinator = init_data_coordinator(
+        num_buffers=NUM_BUFFERS, ppo_mini_batch_size=TRAINER_BATCH_SIZE, world_size=1, rollout_n=1
+    )
     log_with_time("✅ Data system initialized with 1 Coordinator.")
 
     # 2. Test concurrent Producer (RolloutWorker) performance
