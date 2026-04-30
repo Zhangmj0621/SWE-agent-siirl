@@ -1375,8 +1375,9 @@ class RolloutManager:
                 from siirl.utils.metrics import restore_weighted_metrics
 
                 val_metrics = restore_weighted_metrics(val_metrics)
-            train_step = rollout_to_train_step(self.global_steps)
-            self.message_queue.append((val_metrics, train_step))
+            # Use current global_steps as the log step, which corresponds to the training step
+            # that this validation is for. This ensures validation metrics align with training metrics.
+            self.message_queue.append((val_metrics, self.global_steps))
         finally:
             self._reset_validate_reuse_sync_state()
             self._destroy_validate_reuse_pool()
