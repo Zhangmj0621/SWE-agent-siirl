@@ -2,7 +2,6 @@
 
 import tempfile
 from dataclasses import dataclass
-from io import BytesIO
 from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel
@@ -38,29 +37,26 @@ class SWEBenchRuntime(Runtime):
     async def bootstrap(self, env: ContainerEnv):
         pass
 
-    def bootstrap_sync(self, env: ContainerEnv):
-        """Synchronous version of bootstrap() - for use in thread pool."""
-        pass
-
     async def diff(self, env: ContainerEnv):
         output = await env.execute("git add -A && git diff --cached")
-        self.m.rollout.patch = output.output
-
-    def diff_sync(self, env: ContainerEnv):
-        """Synchronous version of diff() - for use in thread pool."""
-        output = env.execute_sync("git add -A && git diff --cached")
         self.m.rollout.patch = output.output
 
     async def eval(self, env: ContainerEnv):
         # apply patch
         if self.m.rollout.patch is None:
             raise RuntimeError("must run diff before patch")
-        stdin = BytesIO(self.m.rollout.patch)
-        await env.execute("git apply --verbose --reject -", stdin=stdin)
+        patch_str = (
+            self.m.rollout.patch.decode("utf-8", errors="replace")
+            if isinstance(self.m.rollout.patch, bytes)
+            else self.m.rollout.patch
+        )
+        # Note: we avoid stdin=BytesIO(...) because K8sEnvAdapter.execute does not
+        # support stdin; use write_file + bash/git <file> instead.
+        await env.write_file("/tmp/model.patch", patch_str)
+        await env.execute("git apply --verbose --reject /tmp/model.patch", check=False)
 
         # run eval script
-        stdin = BytesIO(self.spec.eval_script.encode("utf-8"))
-        await env.execute("cat > /eval.sh", stdin=stdin)
+        await env.write_file("/eval.sh", self.spec.eval_script)
         output = await env.execute("bash /eval.sh", check=False)
 
         with tempfile.NamedTemporaryFile() as f:
@@ -89,33 +85,6 @@ class SWEBenchRuntime(Runtime):
                 },
             }
             """
-        # naive reward
-        if report["resolved"]:
-            self.sample.reward = 1.0
-        else:
-            self.sample.reward = 0.0
-
-    def eval_sync(self, env: ContainerEnv):
-        """Synchronous version of eval() - for use in thread pool."""
-        # apply patch
-        if self.m.rollout.patch is None:
-            raise RuntimeError("must run diff before patch")
-        env.write_file_sync("/tmp/model.patch", self.m.rollout.patch)
-        env.execute_sync("git apply --verbose --reject - < /tmp/model.patch")
-
-        # run eval script
-        env.write_file_sync("/eval.sh", self.spec.eval_script)
-        output = env.execute_sync("bash /eval.sh", check=False)
-
-        with tempfile.NamedTemporaryFile() as f:
-            prediction = {
-                "instance_id": self.spec.instance_id,
-                "model_patch": self.m.rollout.patch,  # placeholder
-            }
-            f.write(output.output)
-            report = get_eval_report(self.spec, prediction, f.name, True)
-            report = report[self.spec.instance_id]
-
         # naive reward
         if report["resolved"]:
             self.sample.reward = 1.0

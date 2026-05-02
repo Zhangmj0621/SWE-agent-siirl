@@ -97,8 +97,9 @@ class ModelAdapterForSWE:
     """
     Adapter to make siirl Model compatible with SWE-agent's AbstractModel.
 
-    This adapter wraps a siirl Model and provides the sync query() method
-    that SWE-agent expects, while delegating to the model's query_for_swe() method.
+    This adapter wraps a siirl Model and exposes the async ``query()`` method
+    that upstream ``RLTokenAgent.forward`` awaits directly (no sync bridge,
+    no nested event loop).
     """
 
     def __init__(self, siirl_model: Model):
@@ -106,7 +107,7 @@ class ModelAdapterForSWE:
         Initialize the adapter.
 
         Args:
-            siirl_model: siirl Model instance with query_for_swe() method
+            siirl_model: siirl Model instance with async ``query()``.
         """
         self._model = siirl_model
 
@@ -123,6 +124,10 @@ class ModelAdapterForSWE:
         self.stats = ModelStats()
 
     @property
+    def tokenizer(self):
+        return getattr(self._model, "tokenizer", None)
+
+    @property
     def config(self):
         """Return a minimal config object for compatibility."""
         return type(
@@ -134,17 +139,50 @@ class ModelAdapterForSWE:
             },
         )()
 
-    def query(
+    async def query(
         self,
         history: list[int] | list[dict],
         action_prompt: str = "> ",
     ) -> dict:
-        """
-        Query method matching SWE-agent AbstractModel signature.
+        """Query method matching upstream SWE-agent ``AbstractModel.query`` (async).
 
-        Delegates to the siirl model's query_for_swe() method.
+        Awaits the siirl ``Model.query`` and packages the response in the dict
+        shape expected by upstream ``RLTokenAgent.forward`` /
+        ``DefaultAgent.forward``.
         """
-        return self._model.query_for_swe(history, action_prompt)
+        # Normalise history into the (input_tokens, messages) pair siirl Model expects.
+        if isinstance(history, list) and history and isinstance(history[0], int):
+            input_tokens = list(history)
+            messages: list[dict] = []
+        else:
+            messages = history if isinstance(history, list) else []
+            input_tokens = []
+
+        response = await self._model.query(
+            input_tokens=input_tokens,
+            messages=messages,
+            max_tokens=None,
+            timeout=None,
+        )
+
+        raw = response.raw if isinstance(response.raw, dict) else {}
+        result: dict[str, Any] = {
+            "message": response.output,
+            "output_tokens": response.output_tokens,
+            "log_probs": response.log_probs,
+            # Upstream RLTokenAgent.forward reads `rollout_log_probs` directly.
+            # siirl Model reuses `log_probs` for the same purpose; some backends
+            # also surface it under `raw["rollout_log_probs"]`.
+            "rollout_log_probs": raw.get("rollout_log_probs") or response.log_probs or [],
+            "rollout_routed_experts": raw.get("rollout_routed_experts", "") or "",
+        }
+        if response.tool_calls:
+            result["tool_calls"] = response.tool_calls
+        if response.reasoning_content:
+            result["reasoning_content"] = response.reasoning_content
+        if response.thinking_blocks:
+            result["thinking_blocks"] = response.thinking_blocks
+        return result
 
 
 class RLTokenAgentWrapper(AbstractAgent):
@@ -223,34 +261,38 @@ class RLTokenAgentWrapper(AbstractAgent):
         """Add hook to the underlying agent."""
         self._agent.add_hook(hook)
 
-    def setup(
+    async def setup(
         self,
         env: ContainerEnv,
         problem_statement: ProblemStatement | ProblemStatementConfig,
         output_dir: Path = Path("."),
     ) -> None:
         """Setup the agent for a new instance."""
-        # Convert ContainerEnv to SWEEnv if needed
         swe_env = env._env if hasattr(env, "_env") else env
-        self._agent.setup(env=swe_env, problem_statement=problem_statement, output_dir=output_dir)
+        await self._agent.setup(env=swe_env, problem_statement=problem_statement, output_dir=output_dir)
 
-    def run(
+    async def run(
         self,
         env: ContainerEnv,
         output_dir: Path = Path("."),
     ) -> AgentRunResult:
-        """Run the agent on a problem instance."""
+        """Run the agent on a problem instance (async).
+
+        Awaits upstream ``RLTokenAgent.run`` directly, so step-level concurrency
+        between rollouts is preserved at every ``await`` point.
+        """
         swe_env = env._env if hasattr(env, "_env") else env
 
-        # Run the synchronous RLTokenAgent.run() in a thread pool
-        result = self._agent.run(env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir)
+        result = await self._agent.run(env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir)
 
         # CRITICAL: Assign token tracking data to sample for RL training
-        # Note: Use self.sample directly (not self.sample.m.data)
         self.sample.prompts = self._agent.init_input_ids
         self.sample.tokens = self._agent.input_ids[len(self._agent.init_input_ids) :]
         self.sample.loss_mask = self._agent.loss_mask[len(self._agent.init_input_ids) :]
         self.sample.rollout_log_probs = getattr(self._agent, "rollout_log_probs", [])
+        # Upstream now also surfaces base64-encoded routed experts; forward it
+        # untouched so the training end can reshape it.
+        self.sample.rollout_routed_experts = getattr(self._agent, "routed_experts_raw", "") or ""
 
         # Store patch / exit_status in rollout for evaluation.
         # 优先读 self._agent.info（写 traj 的同一个 dict），落回 result.info 兜底。
@@ -925,7 +967,7 @@ class RLTokenAgent(AbstractAgent):
 
         # Check git status for debugging
         try:
-            status_output = self._env.execute("git status --short", check=False, cwd=repo_name)
+            status_output = await self._env.execute("git status --short", check=False, cwd=repo_name)
             status_str = status_output.output.decode("utf-8", errors="replace")
             self.logger.debug(f"Git status after autosubmission command:\n{status_str}")
         except Exception as e:
@@ -1494,19 +1536,17 @@ class DefaultAgentWrapper(AbstractAgent):
         """Add hook to the underlying agent."""
         self._agent.add_hook(hook)
 
-    def run(
+    async def run(
         self,
         env: ContainerEnv,
         output_dir: Path = Path("."),
     ) -> AgentRunResult:
-        """Run the agent on a problem instance.
+        """Run the agent on a problem instance (async).
 
-        Note: DefaultAgent.run() is synchronous, so we call it directly.
-        (The caller is responsible for running in thread pool if needed)
+        Awaits upstream ``DefaultAgent.run`` directly.
         """
-        # Convert ContainerEnv to SWEEnv if needed
         swe_env = env._env if hasattr(env, "_env") else env
-        result = self._agent.run(
+        result = await self._agent.run(
             env=swe_env,
             problem_statement=self.problem_statement,
             output_dir=output_dir,

@@ -1,6 +1,7 @@
 # SWE-bench evaluation using dedicated K8s pods for RL training
 # This implementation isolates evaluation from agent execution using separate pods
 
+import asyncio
 import json
 import logging
 import tempfile
@@ -41,28 +42,28 @@ def _make_trajectory_run_id(base_run_id: str, trajectory_id: str) -> str:
     return f"{base}-t-{traj}"
 
 
-def check_git_repo_status(env: ContainerEnv, timeout: int = 10) -> bool:
+async def check_git_repo_status(env: ContainerEnv, timeout: int = 10) -> bool:
     """校验 git 仓库状态，返回 True=有效，False=无效"""
     try:
         # 检查是否在 git 仓库内（最快的校验方式）
-        env.execute_sync("git rev-parse --is-inside-work-tree", check=True, timeout=timeout)  # 非 git 仓库会返回非0退出码，触发异常
+        await env.execute("git rev-parse --is-inside-work-tree", check=True, timeout=timeout)  # 非 git 仓库会返回非0退出码，触发异常
         # 检查 git 仓库是否被锁定（避免 git add 卡住）
-        lock_check = env.execute_sync("bash -c 'test -f .git/index.lock && echo locked || echo ok'", check=False, timeout=timeout)
+        lock_check = await env.execute("bash -c 'test -f .git/index.lock && echo locked || echo ok'", check=False, timeout=timeout)
         if "locked" in lock_check.output.decode("utf-8"):
             logger.warning("git 仓库被锁定（.git/index.lock 存在），清理锁文件")
             # 清理锁文件（避免 git 操作卡住）
-            env.execute_sync("rm -f .git/index.lock", check=False, timeout=timeout)
+            await env.execute("rm -f .git/index.lock", check=False, timeout=timeout)
         return True
     except Exception as e:
         logger.error(f"git 仓库无效: {e}")
         return False
 
 
-def has_git_changes(env: ContainerEnv, timeout: int = 10) -> bool:
+async def has_git_changes(env: ContainerEnv, timeout: int = 10) -> bool:
     """检查工作区是否有 git 可追踪的修改"""
     try:
         # git diff --quiet：有修改则退出码1，无修改则0；--exit-code 等价于 --quiet
-        diff_check = env.execute_sync("git diff --quiet --exit-code", check=False, timeout=timeout)
+        diff_check = await env.execute("git diff --quiet --exit-code", check=False, timeout=timeout)
         # 退出码 1 = 有修改，0 = 无修改
         return diff_check.returncode != 0
     except Exception as e:
@@ -70,16 +71,16 @@ def has_git_changes(env: ContainerEnv, timeout: int = 10) -> bool:
         return True
 
 
-def extract_git_patch_safely(env: ContainerEnv, timeout: int = 30) -> bytes:
-    if not check_git_repo_status(env, timeout=timeout):
+async def extract_git_patch_safely(env: ContainerEnv, timeout: int = 30) -> bytes:
+    if not await check_git_repo_status(env, timeout=timeout):
         return b""
-    if not has_git_changes(env, timeout=timeout):
+    if not await has_git_changes(env, timeout=timeout):
         logger.info("无 git 修改，返回空补丁")
         return b""
     git_common_opts = "-c core.askpass=false -c user.name='temp' -c user.email='temp@example.com'"
     try:
-        env.execute_sync(f"git {git_common_opts} add -A", check=False, timeout=timeout)
-        diff_output = env.execute_sync(f"git {git_common_opts} diff --cached", check=False, timeout=timeout)
+        await env.execute(f"git {git_common_opts} add -A", check=False, timeout=timeout)
+        diff_output = await env.execute(f"git {git_common_opts} diff --cached", check=False, timeout=timeout)
         return diff_output.output
     except Exception as e:
         logger.error(f"提取补丁失败: {e}")
@@ -205,11 +206,6 @@ class SWEBenchK8sEvalRuntime(Runtime):
         logger.debug("[K8S_BOOTSTRAP] Skipped verification (start() already initialized)")
         return
 
-    def bootstrap_sync(self, env: ContainerEnv):
-        """Synchronous version of bootstrap()."""
-        # Same logic as async version
-        return
-
     async def diff(self, env: ContainerEnv):
         """
         Extract patch from git.
@@ -232,24 +228,9 @@ class SWEBenchK8sEvalRuntime(Runtime):
                 logger.debug(f"[K8S_EVAL_DIFF] Patch preview:\n{output.output[:500].decode('utf-8', errors='replace')}")
             self.m.rollout.patch = output.output
 
-    def diff_sync(self, env: ContainerEnv):
-        """Synchronous version of diff() - for use in thread pool."""
-        if not self.m.rollout.patch:
-            self.m.rollout.patch = extract_git_patch_safely(env, timeout=30)
-            if len(self.m.rollout.patch) == 0:
-                logger.warning("[KS_EVAL_DIFF] No patch extracted! Git diff returned empty.")
-                # Try to get git status for debugging
-                try:
-                    status_output = env.execute_sync("git status", check=False)
-                    logger.debug(f"[K8S_EVAL_DIFF] Git status:\n{status_output.output.decode('utf-8', errors='replace')}")
-                except Exception as e:
-                    logger.warning(f"[K8S_EVAL_DIFF] Failed to get git status: {e}")
-            else:
-                logger.debug(f"[K8S_EVAL_DIFF] Patch preview:\n{self.m.rollout.patch[:500].decode('utf-8', errors='replace')}")
-
     async def eval(self, env: ContainerEnv | None):
         """
-        Async wrapper for eval - delegates to eval_sync.
+        Evaluate patch using the provided evaluation pod (fully async).
 
         IMPORTANT: The env parameter is a SEPARATE pod started in reward() phase.
         This ensures isolation between agent and evaluation.
@@ -257,7 +238,33 @@ class SWEBenchK8sEvalRuntime(Runtime):
         When using run_instance_k8s_for_rl:
         - env can be None (run_instance_k8s_for_rl will create its own pod)
         """
-        return self.eval_sync(env)
+        instance_id = self.spec.instance_id
+        logger.info(f"[K8S_EVAL] Starting evaluation for {instance_id}")
+
+        # Check patch status but continue with evaluation even if empty
+        if self.m.rollout.patch is None:
+            logger.warning("[K8S_EVAL] Patch is None, will evaluate base state")
+            self.m.rollout.patch = b""
+
+        patch_size = len(self.m.rollout.patch) if isinstance(self.m.rollout.patch, bytes | str) else 0
+        if patch_size == 0:
+            logger.warning(
+                f"[K8S_EVAL] Patch is empty ({type(self.m.rollout.patch).__name__}), "
+                f"will evaluate base state (no changes applied)"
+            )
+        else:
+            logger.info(f"[K8S_EVAL] Patch size: {patch_size} bytes, will apply and evaluate")
+
+        if self._use_run_instance_k8s_for_rl:
+            logger.info("[K8S_EVAL] Using run_instance_k8s_for_rl from SWE-bench (will create its own pod)")
+            await self._eval_with_run_instance_k8s()
+            return
+        logger.info("[K8S_EVAL] Using local implementation (requires external env)")
+        if env is None:
+            logger.error("[K8S_EVAL] Local implementation requires env but got None!")
+            self.sample.reward = 0.0
+            return
+        await self._eval_local(env)
 
     # Patch application strategies (same as run_instance_k8s_for_rl)
     GIT_APPLY_CMDS = [
@@ -266,52 +273,7 @@ class SWEBenchK8sEvalRuntime(Runtime):
         "patch --forward --batch --fuzz=5 -p1 -i",
     ]
 
-    def eval_sync(self, env: ContainerEnv | None):
-        """
-        Evaluate patch using the provided evaluation pod.
-
-        IMPORTANT: The env parameter is a SEPARATE pod started in reward() phase.
-        This ensures isolation between agent and evaluation.
-
-        When using run_instance_k8s_for_rl:
-        - env can be None (run_instance_k8s_for_rl will create its own pod)
-        - No external pod creation is needed
-
-        This implementation uses run_instance_k8s_for_rl from SWE-bench if configured,
-        otherwise falls back to the local implementation.
-
-        Note: Even if patch is empty, evaluation will still run to test the base state.
-        """
-        instance_id = self.spec.instance_id
-        logger.info(f"[K8S_EVAL] Starting evaluation for {instance_id}")
-
-        # Check patch status but continue with evaluation even if empty
-        if self.m.rollout.patch is None:
-            logger.warning("[K8S_EVAL] Patch is None, will evaluate base state")
-            self.m.rollout.patch = b""  # Set to empty bytes to allow evaluation to proceed
-
-        # Check if patch is empty (0 bytes or empty string)
-        patch_size = len(self.m.rollout.patch) if isinstance(self.m.rollout.patch, bytes | str) else 0
-        if patch_size == 0:
-            logger.warning(
-                f"[K8S_EVAL] Patch is empty ({type(self.m.rollout.patch).__name__}), " f"will evaluate base state (no changes applied)"
-            )
-        else:
-            logger.info(f"[K8S_EVAL] Patch size: {patch_size} bytes, will apply and evaluate")
-
-        # Decide which implementation to use based on config
-        if self._use_run_instance_k8s_for_rl:
-            logger.info("[K8S_EVAL] Using run_instance_k8s_for_rl from SWE-bench (will create its own pod)")
-            return self._eval_with_run_instance_k8s()
-        else:
-            logger.info("[K8S_EVAL] Using local implementation (requires external env)")
-            if env is None:
-                logger.error("[K8S_EVAL] Local implementation requires env but got None!")
-                self.sample.reward = 0.0
-                return
-            return self._eval_local(env)
-
-    def _eval_with_run_instance_k8s(self):
+    async def _eval_with_run_instance_k8s(self):
         """
         Use run_instance_k8s_for_rl from SWE-bench to evaluate the patch.
 
@@ -340,12 +302,16 @@ class SWEBenchK8sEvalRuntime(Runtime):
             # Call run_instance_k8s_for_rl
             # Get namespace from environment config (same as K8sEnvAdapter)
             namespace = self._config.get("environment", {}).get("namespace", "swe-siirl")
-            result = run_instance_k8s_for_rl(
+            # run_instance_k8s_for_rl is a blocking SWE-bench call that talks to the
+            # K8s API for minutes; offload to a worker thread so the event loop stays
+            # free for other rollouts.
+            result = await asyncio.to_thread(
+                run_instance_k8s_for_rl,
                 test_spec=self.spec,
                 pred=pred,
                 run_id=run_id,
-                namespace=namespace,  # Use namespace from environment config
-                timeout=1800,  # 30 minutes timeout
+                namespace=namespace,
+                timeout=1800,
                 dataset_image_name=None,
                 logger=eval_logger,
                 allow_partial_patch=self.config.allow_partial_patch,
@@ -409,7 +375,7 @@ class SWEBenchK8sEvalRuntime(Runtime):
                 }
             )
 
-    def _eval_local(self, env: ContainerEnv):
+    async def _eval_local(self, env: ContainerEnv):
         """
         Local implementation of evaluation logic (fallback when run_instance_k8s_for_rl is not available).
 
@@ -469,14 +435,14 @@ class SWEBenchK8sEvalRuntime(Runtime):
                 patch_file.write_text(ensure_trailing_newline(patch_str))
                 logger.info(f"[K8S_EVAL] Patch written to {patch_file}")
 
-            env.write_file_sync("/tmp/patch.patch", ensure_trailing_newline(patch_str))
+            await env.write_file("/tmp/patch.patch", ensure_trailing_newline(patch_str))
 
             # Try multiple patch application strategies (same as run_instance_k8s_for_rl)
             applied_patch = False
             for i, git_apply_cmd in enumerate(self.GIT_APPLY_CMDS):
                 cmd_str = f"{git_apply_cmd} /tmp/patch.patch"
                 logger.info(f"[K8S_EVAL] Attempting patch application (strategy {i+1}/{len(self.GIT_APPLY_CMDS)}): {cmd_str}")
-                result = env.execute_sync(f"bash -c '{cmd_str} 2>&1'", check=False)
+                result = await env.execute(f"bash -c '{cmd_str} 2>&1'", check=False)
 
                 if result.returncode == 0:
                     output = result.output.decode("utf-8", errors="replace")
@@ -501,7 +467,7 @@ class SWEBenchK8sEvalRuntime(Runtime):
 
             # Get git diff BEFORE running eval script (for validation)
             logger.info("[K8S_EVAL] Capturing git diff before running tests...")
-            git_diff_before_result = env.execute_sync("git --no-pager -c core.fileMode=false diff", check=False, timeout=120)
+            git_diff_before_result = await env.execute("git --no-pager -c core.fileMode=false diff", check=False, timeout=120)
             git_diff_before = git_diff_before_result.output.decode("utf-8", errors="replace")
             logger.debug(f"[K8S_EVAL] Git diff before:\n{git_diff_before}")
 
@@ -513,17 +479,17 @@ class SWEBenchK8sEvalRuntime(Runtime):
                 eval_file.write_text(self.spec.eval_script)
                 logger.info(f"[K8S_EVAL] Eval script written to {eval_file}")
 
-            # K8s adapter doesn't support stdin, so write script directly using write_file_sync
-            env.write_file_sync("/eval.sh", self.spec.eval_script)
+            # K8s adapter doesn't support stdin, so write script directly
+            await env.write_file("/eval.sh", self.spec.eval_script)
             # Increase timeout for test execution (1800 seconds = 30 minutes)
             # Also set GIT_PAGER to avoid terminal hanging issues
-            output = env.execute_sync("bash -c 'GIT_PAGER=cat bash /eval.sh'", check=False, timeout=1800)
+            output = await env.execute("bash -c 'GIT_PAGER=cat bash /eval.sh'", check=False, timeout=1800)
 
             # Get test output
             test_output = output.output
 
             # Get git diff after running eval script
-            git_diff_after_result = env.execute_sync("git --no-pager -c core.fileMode=false diff", check=False, timeout=120)
+            git_diff_after_result = await env.execute("git --no-pager -c core.fileMode=false diff", check=False, timeout=120)
             git_diff_after = git_diff_after_result.output.decode("utf-8", errors="replace")
             logger.info(f"[K8S_EVAL] Git diff after:\n{git_diff_after}")
 
@@ -620,7 +586,7 @@ class SWEBenchK8sEvalRuntime(Runtime):
                 }
             )
 
-    def _reapply_pre_install(self, env: ContainerEnv):
+    async def _reapply_pre_install(self, env: ContainerEnv):
         """Re-apply pre_install commands lost by _reset_repository().
 
         During Docker image build, pre_install commands (e.g., adding ``-rA``
@@ -641,13 +607,9 @@ class SWEBenchK8sEvalRuntime(Runtime):
 
             for cmd in pre_install_cmds:
                 logger.info(f"[K8S_EVAL] Re-applying pre_install: {cmd}")
-                # Write to a temp script to avoid shell quoting issues —
-                # pre_install commands (e.g. sed) often contain single quotes
-                # that conflict with bash -c '…' wrapping.
-                # No concurrency risk: each eval runs in its own isolated K8s pod.
                 script = f"#!/bin/bash\ncd /testbed && {cmd}\n"
-                env.write_file_sync("/tmp/_pre_install.sh", script)
-                env.execute_sync("bash /tmp/_pre_install.sh", check=False, timeout=60)
+                await env.write_file("/tmp/_pre_install.sh", script)
+                await env.execute("bash /tmp/_pre_install.sh", check=False, timeout=60)
         except Exception as e:
             logger.warning(f"[K8S_EVAL] Failed to re-apply pre_install (non-fatal): {e}")
 

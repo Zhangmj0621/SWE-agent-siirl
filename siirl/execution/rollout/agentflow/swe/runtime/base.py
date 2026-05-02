@@ -46,26 +46,11 @@ class Runtime(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def bootstrap_sync(self, env: ContainerEnv):
-        """Synchronous version of bootstrap() - for use in thread pool"""
-        raise NotImplementedError
-
-    @abstractmethod
     async def diff(self, env: ContainerEnv):
         """Build patch and update sample"""
         raise NotImplementedError
 
     @abstractmethod
-    def diff_sync(self, env: ContainerEnv):
-        """Synchronous version of diff() - for use in thread pool"""
-        raise NotImplementedError
-
-    @abstractmethod
     async def eval(self, env: ContainerEnv):
         """Apply patch in sample to sample env, run evaluation, and set reward"""
-        raise NotImplementedError
-
-    @abstractmethod
-    def eval_sync(self, env: ContainerEnv):
-        """Synchronous version of eval() - for use in thread pool"""
         raise NotImplementedError

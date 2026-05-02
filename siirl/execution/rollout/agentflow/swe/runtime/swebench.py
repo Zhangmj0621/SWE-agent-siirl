@@ -3,7 +3,6 @@
 
 import tempfile
 from dataclasses import dataclass
-from io import BytesIO
 from typing import cast
 
 from pydantic import BaseModel, Field
@@ -50,12 +49,16 @@ class SWEBenchRuntime(Runtime):
         if self.m.rollout.patch is None:
             raise RuntimeError("must run diff before patch")
         await env.execute(f"git checkout {self.instance['base_commit']}")
-        stdin = BytesIO(self.m.rollout.patch)
-        await env.execute("git apply --verbose --reject -", stdin=stdin)
+        patch_str = (
+            self.m.rollout.patch.decode("utf-8", errors="replace")
+            if isinstance(self.m.rollout.patch, bytes)
+            else self.m.rollout.patch
+        )
+        await env.write_file("/tmp/model.patch", patch_str)
+        await env.execute("git apply --verbose --reject /tmp/model.patch", check=False)
 
         # run eval script
-        stdin = BytesIO(self.spec.eval_script.encode("utf-8"))
-        await env.execute("cat > /eval.sh", stdin=stdin)
+        await env.write_file("/eval.sh", self.spec.eval_script)
         output = await env.execute("bash /eval.sh", check=False)
 
         with tempfile.NamedTemporaryFile() as f:
@@ -101,69 +104,17 @@ class SWEBenchRuntime(Runtime):
     async def _bootstrap_container(self, env: ContainerEnv):
         # rewrite of swebench.harness.docker_build:build_instance_image
         # may optimize if env provide image build interface
-        stdin = BytesIO(self.spec.setup_env_script.encode("utf-8"))
-        await env.execute("cat - | bash", stdin=stdin)
-        stdin = BytesIO(self.spec.install_repo_script.encode("utf-8"))
-        await env.execute("cat - | bash", stdin=stdin)
+        # Note: we avoid stdin=BytesIO(...) because K8sEnvAdapter.execute does not
+        # support stdin; use write_file + bash <file> instead.
+        await env.write_file("/tmp/setup_env.sh", self.spec.setup_env_script)
+        await env.execute("bash /tmp/setup_env.sh")
+        await env.write_file("/tmp/install_repo.sh", self.spec.install_repo_script)
+        await env.execute("bash /tmp/install_repo.sh")
 
         # apply test patch
         await env.execute(f"git checkout {self.instance['base_commit']}")
-        stdin = BytesIO(self.instance["test_patch"].encode("utf-8"))
-        await env.execute("git apply --verbose --reject -", stdin=stdin)
-
-    def bootstrap_sync(self, env: ContainerEnv):
-        """Synchronous version of bootstrap() - for use in thread pool."""
-        return self._bootstrap_container_sync(env)
-
-    def _bootstrap_container_sync(self, env: ContainerEnv):
-        """Synchronous version of _bootstrap_container()."""
-        # rewrite of swebench.harness.docker_build:build_instance_image
-        # may optimize if env provide image build interface
-        # Note: K8s adapter doesn't support stdin, so write to file first
-        env.write_file_sync("/tmp/setup_env.sh", self.spec.setup_env_script)
-        env.execute_sync("cat /tmp/setup_env.sh | bash")
-        env.write_file_sync("/tmp/install_repo.sh", self.spec.install_repo_script)
-        env.execute_sync("cat /tmp/install_repo.sh | bash")
-
-        # apply test patch
-        env.execute_sync(f"git checkout {self.instance['base_commit']}")
-        env.write_file_sync("/tmp/test.patch", self.instance["test_patch"])
-        env.execute_sync("git apply --verbose --reject - < /tmp/test_patch")
-
-    def diff_sync(self, env: ContainerEnv):
-        """Synchronous version of diff() - for use in thread pool."""
-        output = env.execute_sync("git add -A && git diff --cached")
-        self.m.rollout.patch = output.output
-
-    def eval_sync(self, env: ContainerEnv):
-        """Synchronous version of eval() - for use in thread pool."""
-        self._bootstrap_container_sync(env)
-        # apply patch
-        if self.m.rollout.patch is None:
-            raise RuntimeError("must run diff before patch")
-        env.execute_sync(f"git checkout {self.instance['base_commit']}")
-        # Note: write_file_sync doesn't support stdin, so write to file
-        env.write_file_sync("/tmp/model.patch", self.m.rollout.patch)
-        env.execute_sync("git apply --verbose --reject - < /tmp/model.patch")
-
-        # run eval script
-        env.write_file_sync("/eval.sh", self.spec.eval_script)
-        output = env.execute_sync("bash /eval.sh", check=False)
-
-        with tempfile.NamedTemporaryFile() as f:
-            prediction = {
-                "instance_id": self.spec.instance_id,
-                "model_patch": "",  # placeholder
-            }
-            f.write(output.output)
-            report = get_eval_report(self.spec, prediction, f.name, True)
-            report = report[self.spec.instance_id]
-
-        # naive reward
-        if report["resolved"]:
-            self.sample.reward = 1.0
-        else:
-            self.sample.reward = 0.0
+        await env.write_file("/tmp/test.patch", self.instance["test_patch"])
+        await env.execute("git apply --verbose --reject /tmp/test.patch", check=False)
 
 
 class SWEBenchBuiler(RuntimeBuilder):

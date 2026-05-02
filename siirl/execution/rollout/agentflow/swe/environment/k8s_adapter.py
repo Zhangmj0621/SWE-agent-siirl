@@ -4,9 +4,11 @@ K8s environment adapter — thin wrapper over upstream SWEEnv + SWE-ReX K8sDeplo
 All heavy lifting (pod lifecycle, bash session, file I/O) lives in SWEEnv. This
 module only provides:
 - the siirl ``ContainerEnv`` interface (execute/popen/copy/cleanup/...),
-- a sync/async pair of entry points so the rollout thread pool can call in,
 - a hard-timeout cleanup with detached ``kubectl delete`` fallback, and
 - a builder that parses a SWE-bench sample into a ``K8sDeploymentConfig``.
+
+All methods are async; the entire SWE rollout stack runs in a single event loop
+so that multiple agents can interleave at ``await`` points (step-level concurrency).
 """
 
 from __future__ import annotations
@@ -16,14 +18,13 @@ import contextlib
 import json
 import logging
 import subprocess
-import threading
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from sweagent.environment.swe_env import SWEEnv
 from swerex.deployment.config import K8sDeploymentConfig
-from swerex.runtime.abstract import BashAction, ReadFileRequest, WriteFileRequest
+from swerex.runtime.abstract import BashAction
 
 from .base import ContainerBuildArgs, ContainerEnv, ContainerEnvBuilder, ContainerOutput, ContainerStartArgs
 
@@ -38,8 +39,7 @@ logger = logging.getLogger(__name__)
 class K8sEnvAdapter(ContainerEnv):
     """Wraps a vanilla ``SWEEnv`` and exposes siirl's ``ContainerEnv`` interface.
 
-    Lazy-initialized: the pod isn't created until ``start_sync()`` or the first
-    async method is awaited.
+    Lazy-initialized: the pod isn't created until the first async method is awaited.
     """
 
     def __init__(
@@ -112,67 +112,55 @@ class K8sEnvAdapter(ContainerEnv):
             logger.exception("[K8sEnvAdapter] Failed to create repo config: %s", e)
             return None
 
-    def _start_swe_env(self) -> SWEEnv:
-        """Synchronously create, initialize, and start ``SWEEnv``.
+    async def _start_swe_env(self) -> SWEEnv:
+        """Create, initialize, and optionally reset ``SWEEnv``.
 
         Replicates ``SWEEnv.start()`` but honours ``skip_reset`` by calling
-        ``_init_deployment()`` and then optionally ``reset()``. Must be invoked
-        from a thread without a running event loop (``SWEEnv`` uses
-        ``asyncio.run`` internally).
+        ``_init_deployment()`` and then optionally ``reset()``.
         """
         deployment = self._build_deployment_config().get_deployment()
         repo = self._create_repo_config()
-        logger.info(f"[K8sEnvAdapter] Repo config: {repo}, " f"base_commit: {getattr(repo, 'base_commit', 'HEAD') if repo else 'N/A'}")
+        logger.info(
+            f"[K8sEnvAdapter] Repo config: {repo}, "
+            f"base_commit: {getattr(repo, 'base_commit', 'HEAD') if repo else 'N/A'}"
+        )
 
         swe_env = SWEEnv(deployment=deployment, repo=repo, post_startup_commands=[], name="swe_task")
-        swe_env._init_deployment()
+        await swe_env._init_deployment()
         if self._skip_reset:
             logger.info("[K8sEnvAdapter] Skipping reset() for eval pod")
         else:
-            swe_env.reset()
+            await swe_env.reset()
         return swe_env
-
-    def _ensure_initialized_sync(self) -> SWEEnv:
-        if self._swe_env is None:
-            try:
-                self._swe_env = self._start_swe_env()
-                logger.info("[K8sEnvAdapter] SWEEnv ready")
-            except Exception as e:
-                logger.error(f"[K8sEnvAdapter] SWEEnv start failed: {e}, cleaning up...")
-                if self._swe_env is not None:
-                    with contextlib.suppress(Exception):
-                        self._swe_env.close()
-                    self._swe_env = None
-                raise
-        return self._swe_env
 
     async def _ensure_initialized(self) -> SWEEnv:
         if self._swe_env is not None:
             return self._swe_env
-        loop = asyncio.get_running_loop()
         startup_timeout = self._config.get("startup_timeout", getattr(self.args, "startup_timeout", 1800.0))
         try:
-            self._swe_env = await asyncio.wait_for(loop.run_in_executor(None, self._start_swe_env), timeout=startup_timeout)
+            self._swe_env = await asyncio.wait_for(self._start_swe_env(), timeout=startup_timeout)
             logger.info("[K8sEnvAdapter] SWEEnv ready")
         except Exception as e:
             logger.exception("[K8sEnvAdapter] Failed to initialize SWEEnv: %s", e)
             if self._swe_env is not None:
                 with contextlib.suppress(Exception):
-                    await loop.run_in_executor(None, self._swe_env.close)
+                    await self._swe_env.close()
                 self._swe_env = None
             raise
         return self._swe_env
 
     # ----- ContainerEnv: exec / files ---------------------------------------
 
-    def _run_in_session_sync(self, cmd: str, cwd: str | None, timeout: float, check: bool) -> ContainerOutput:
-        """Sync path that bypasses ``SWEEnv.communicate`` to surface exit_code.
+    async def _run_in_session(self, cmd: str, cwd: str | None, timeout: float, check: bool) -> ContainerOutput:
+        """Execute a bash command in the persistent session.
 
-        Safe to call from any thread without a running event loop.
+        Bypasses ``SWEEnv.communicate`` to surface the exit_code directly.
         """
-        swe_env = self._ensure_initialized_sync()
+        swe_env = await self._ensure_initialized()
         full_cmd = f"cd {cwd} && {cmd}" if cwd else cmd
-        result = asyncio.run(swe_env.deployment.runtime.run_in_session(BashAction(command=full_cmd, timeout=int(timeout), check="silent")))
+        result = await swe_env.deployment.runtime.run_in_session(
+            BashAction(command=full_cmd, timeout=int(timeout), check="silent")
+        )
         output_bytes = result.output.encode() if isinstance(result.output, str) else result.output
         exit_code = result.exit_code if result.exit_code is not None else 0
         if check and exit_code != 0:
@@ -180,8 +168,10 @@ class K8sEnvAdapter(ContainerEnv):
             preview = output_bytes.decode("utf-8", errors="replace")[:500] if output_bytes else ""
             # Match SWEEnv.communicate(check="raise"): tear down the env on failure.
             with contextlib.suppress(Exception):
-                swe_env.close()
-            raise RuntimeError(f"[instance_id={instance_id}] Command {cmd!r} failed (exit_code={exit_code}): {preview}")
+                await swe_env.close()
+            raise RuntimeError(
+                f"[instance_id={instance_id}] Command {cmd!r} failed (exit_code={exit_code}): {preview}"
+            )
         return ContainerOutput(output=output_bytes, returncode=exit_code)
 
     async def execute(
@@ -196,9 +186,7 @@ class K8sEnvAdapter(ContainerEnv):
     ) -> ContainerOutput:
         if stdin is not None:
             raise NotImplementedError("stdin not supported")
-        # Keep the sync path: asyncio.run() can't run in this (running) loop.
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._run_in_session_sync, cmd, cwd, timeout, check)
+        return await self._run_in_session(cmd, cwd, timeout, check)
 
     async def popen(
         self,
@@ -215,60 +203,21 @@ class K8sEnvAdapter(ContainerEnv):
 
     async def read_file(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
         swe_env = await self._ensure_initialized()
-        result = await swe_env.deployment.runtime.read_file(ReadFileRequest(path=str(path), encoding=encoding, errors=errors))
-        return result.content
+        return await swe_env.read_file(str(path), encoding=encoding, errors=errors)
 
     async def write_file(self, path: str, content: str) -> None:
         swe_env = await self._ensure_initialized()
-        await swe_env.deployment.runtime.write_file(WriteFileRequest(path=str(path), content=content))
-
-    # ----- sync variants for thread-pool callers ----------------------------
-
-    def start_sync(self) -> K8sEnvAdapter:
-        self._ensure_initialized_sync()
-        return self
-
-    def execute_sync(
-        self,
-        cmd: str,
-        stdin: BytesIO | None = None,
-        cwd: str | None = None,
-        env: dict[str, str] | None = None,
-        forward_env: list[str] | None = None,
-        timeout: float = 900.0,
-        check: bool = True,
-    ) -> ContainerOutput:
-        if stdin is not None:
-            raise NotImplementedError("stdin not supported")
-        return self._run_in_session_sync(cmd, cwd, timeout, check)
-
-    def read_file_sync(self, path: str, **kwargs) -> str:
-        swe_env = self._ensure_initialized_sync()
-        return swe_env.read_file(path, **kwargs)
-
-    def write_file_sync(self, path: str, content: str) -> None:
-        swe_env = self._ensure_initialized_sync()
-        swe_env.write_file(path, content)
+        await swe_env.write_file(str(path), content)
 
     # ----- cleanup -----------------------------------------------------------
 
     async def cleanup(self):
-        if self._swe_env is None:
-            return
-        self._closed = True
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._swe_env.close)
-        finally:
-            self._swe_env = None
+        """Async close with hard timeout + detached ``kubectl delete`` fallback.
 
-    def cleanup_sync(self):
-        """Sync cleanup with a hard timeout and detached ``kubectl delete`` fallback.
-
-        ``SWEEnv.close()`` internally does ``asyncio.run(deployment.stop())``
-        which can hang if the pod stops responding; we never want that to block
-        the rollout thread. If close exceeds the timeout, we abandon it and
-        fire-and-forget a ``kubectl delete --force`` so the pod still gets reaped.
+        ``SWEEnv.close()`` talks to the K8s API and can hang if the pod stops
+        responding; we never want that to block the rollout. If close exceeds
+        the timeout, we abandon it and fire-and-forget a ``kubectl delete
+        --force`` so the pod still gets reaped.
         """
         if self._swe_env is None:
             return
@@ -276,25 +225,19 @@ class K8sEnvAdapter(ContainerEnv):
 
         pod_name, namespace = self._capture_pod_identity()
         close_timeout = 60
-
-        thread = threading.Thread(target=self._close_silently, name="K8sEnvAdapter_cleanup", daemon=True)
-        thread.start()
-        thread.join(timeout=close_timeout)
-
-        if thread.is_alive():
+        try:
+            await asyncio.wait_for(self._swe_env.close(), timeout=close_timeout)
+        except asyncio.TimeoutError:
             logger.error(
-                f"[K8sEnvAdapter] cleanup_sync() timed out after {close_timeout}s, "
+                f"[K8sEnvAdapter] cleanup() timed out after {close_timeout}s, "
                 "abandoning stuck close(). Falling back to detached kubectl delete."
             )
             self._detached_kubectl_delete(pod_name, namespace)
-
-        self._swe_env = None
-
-    def _close_silently(self) -> None:
-        try:
-            self._swe_env.close()
         except Exception as e:
-            logger.warning(f"[K8sEnvAdapter] close() raised: {e}")
+            logger.warning(f"[K8sEnvAdapter] close() raised: {e}; falling back to kubectl delete")
+            self._detached_kubectl_delete(pod_name, namespace)
+        finally:
+            self._swe_env = None
 
     def _capture_pod_identity(self) -> tuple[str | None, str | None]:
         try:
@@ -332,9 +275,14 @@ class K8sEnvAdapter(ContainerEnv):
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            logger.warning(f"[K8sEnvAdapter] Dispatched detached kubectl delete for pod {pod_name} in namespace {ns}")
+            logger.warning(
+                f"[K8sEnvAdapter] Dispatched detached kubectl delete for pod {pod_name} in namespace {ns}"
+            )
         except Exception as e:
-            logger.error(f"[K8sEnvAdapter] Failed to dispatch detached kubectl delete for {pod_name}: {e}. " "Pod may need manual cleanup.")
+            logger.error(
+                f"[K8sEnvAdapter] Failed to dispatch detached kubectl delete for {pod_name}: {e}. "
+                "Pod may need manual cleanup."
+            )
 
     # ----- misc --------------------------------------------------------------
 
@@ -356,7 +304,9 @@ class K8sEnvAdapter(ContainerEnv):
     def __getattr__(self, name: str):
         """Delegate unknown attributes to the underlying SWEEnv."""
         if self._swe_env is None:
-            raise AttributeError(f"SWEEnv not initialized; cannot delegate {name!r}. Call start_sync() first.")
+            raise AttributeError(
+                f"SWEEnv not initialized; cannot delegate {name!r}. Await an env method first."
+            )
         return getattr(self._swe_env, name)
 
 
@@ -429,11 +379,6 @@ class K8sEnvAdapterBuilder(ContainerEnvBuilder):
             config=self.config,
             skip_reset=is_eval_pod,
         )
-
-    def start_sync(self, args: ContainerStartArgs, runtime_meta: Any = None) -> K8sEnvAdapter:
-        env = self._make_adapter(runtime_meta)
-        env.start_sync()
-        return env
 
     async def start(self, args: ContainerStartArgs, runtime_meta: Any = None) -> K8sEnvAdapter:
         env = self._make_adapter(runtime_meta)
