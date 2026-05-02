@@ -4,3 +4,6 @@
 [submodule "swe-agent"]
 	path = siirl/3rdparty/swe-agent
 	url = https://github.com/Zhangmj0621/SWE-agent-siirl.git
+[submodule "SWE-ReX"]
+	url = https://github.com/Zhangmj0621/SWE-ReX-siirl.git
+	path = siirl/3rdparty/SWE-ReX
