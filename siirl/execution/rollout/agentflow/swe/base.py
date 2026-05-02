@@ -26,6 +26,10 @@ class SWERolloutMeta(Generic[Patch]):
     result: SWERolloutResult = SWERolloutResult.PENDING
     # 由 runtime 自己决定
     patch: Patch | None = None
+    # SWE agent 退出状态（来自 result.info["exit_status"]），用于决定是否进入 eval
+    exit_status: str | None = None
+    # 当前样本是否为 validate 阶段，用于在 reward 阶段决定过滤规则
+    is_validate: bool = False
 
 
 @dataclass
@@ -43,6 +47,9 @@ class SWEAgentMeta:
     rollout: SWERolloutMeta = field(default_factory=SWERolloutMeta)
     agent: Agent = null_field(Agent)
     runtime: Runtime = null_field(Runtime)
+    # Weight version (training step) when this sample was generated
+    # Used for organizing eval logs by training step
+    weight_version: int | None = None
 
 
 SWESample = Sample[SWEAgentMeta]

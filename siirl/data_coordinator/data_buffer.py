@@ -634,9 +634,9 @@ class DataCoordinator:
         if isinstance(state_dict, dict) and "dataloader_state" in state_dict:
             self.dataloader.load_state_dict(state_dict["dataloader_state"])
             self.pending_queue: asyncio.Queue = asyncio.Queue()
-            pending_items = list(state_dict.get("pending_queue", []))
-            for item in pending_items:
-                self.pending_queue.put_nowait(item)
+            # Don't restore pending_queue data (discard it to avoid duplication)
+            list(state_dict.get("pending_queue", []))
+            # pending_items are discarded, not restored
             self.dataloader_queue: asyncio.Queue = asyncio.Queue()
             train_items = list(state_dict.get("train_queue", []))
             for item in train_items:

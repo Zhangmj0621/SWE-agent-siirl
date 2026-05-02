@@ -23,7 +23,6 @@ from collections import defaultdict, deque
 
 import ray
 
-from siirl.execution.rollout.concurrency import resolve_train_server_concurrency
 from siirl.params.training_args import SiiRLArguments
 from siirl.utils.enums import DistributedEnv
 from siirl.utils.net_utils.net import (
@@ -1096,7 +1095,10 @@ class RolloutManager:
                     if val_before_train:
                         await self.validate(val_num_batch, dp_val_batch)
                         val_before_train = False
-
+                    next_step = self.global_steps + 1
+                    is_last_step = self.total_training_steps > 0 and next_step >= self.total_training_steps
+                    if self.config.trainer.test_freq > 0 and (is_last_step or next_step % self.config.trainer.test_freq == 0):
+                        await self.validate(val_num_batch, dp_val_batch)
                     if not self.config.trainer.colocate:
                         remain_sample_cnt = await self.data_coordinator.get_dataloader_size.remote(self.config.data.train_batch_size)
                         async with self.staleness_cond:
@@ -1123,8 +1125,6 @@ class RolloutManager:
                         self.prefetch_task = asyncio.create_task(self.prefetch_data(total_remain_steps=total_remain_steps))
                         start_prefetch_task = True
 
-                    next_step = self.global_steps + 1
-                    is_last_step = self.total_training_steps > 0 and next_step >= self.total_training_steps
                     if self.config.trainer.colocate:
                         if batch_idx == self.num_train_batches - 1:
                             if epoch != total_epochs - 1:
@@ -1148,8 +1148,7 @@ class RolloutManager:
                             self.report_failure(reason)
                         return
                     self.global_steps = next_step
-                    if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
-                        await self.validate(val_num_batch, dp_val_batch)
+
                     train_step = rollout_to_train_step(self.global_steps)
                     logger.info(f"Start rollout generation for train_step={train_step} (rollout_index={self.global_steps})")
         except Exception as e:
@@ -1302,76 +1301,72 @@ class RolloutManager:
                 all_val_samples.extend(val_batch)
 
             total_samples = len(all_val_samples)
-            configured_chunk_size = int(getattr(self.config.rollout, "validate_chunk_size", 0))
-            if configured_chunk_size > 0:
-                chunk_size = configured_chunk_size
-            else:
-                # Auto: one local-concurrency window per validate worker.
-                chunk_size = resolve_train_server_concurrency(self.config) * len(validate_workers)
-            # Ensure chunk_size is at least num_workers so every worker gets work per chunk.
-            chunk_size = max(1, chunk_size, len(validate_workers))
+            logger.info(f"Validate dispatch: workers={len(validate_workers)}, samples={total_samples}, mode=concurrent_with_semaphore")
 
-            logger.info(f"Validate dispatch: workers={len(validate_workers)}, " f"samples={total_samples}, chunk_size={chunk_size}")
+            # Split all samples across workers and dispatch all at once
+            # Each worker's internal semaphore will control actual concurrency
+            shards = split_validate_samples(all_val_samples, len(validate_workers))
+            assigned_workers = [(worker, len(shards[idx])) for idx, worker in enumerate(validate_workers) if shards[idx]]
 
-            all_samples = []
-            dispatched = 0
-            for chunk_start in range(0, total_samples, chunk_size):
-                chunk = all_val_samples[chunk_start : chunk_start + chunk_size]
-                chunk_samples = len(chunk)
-                shards = split_validate_samples(chunk, len(validate_workers))
-                assigned_workers = [(worker, len(shards[idx])) for idx, worker in enumerate(validate_workers) if shards[idx]]
-                futures = [
-                    worker.validate_assigned.remote(shards[idx], self.global_steps)
-                    for idx, worker in enumerate(validate_workers)
-                    if shards[idx]
-                ]
-                progress_task = None
-                if assigned_workers:
-                    progress_task = asyncio.create_task(
-                        self._monitor_validate_progress(
-                            assigned_workers,
-                            total_samples=total_samples,
-                            chunk_samples=chunk_samples,
-                            done_offset=dispatched,
-                        )
+            # Start all validation tasks concurrently
+            futures = [
+                worker.validate_assigned.remote(shards[idx], self.global_steps)
+                for idx, worker in enumerate(validate_workers)
+                if shards[idx]
+            ]
+
+            # Start progress monitoring
+            progress_task = None
+            if assigned_workers:
+                progress_task = asyncio.create_task(
+                    self._monitor_validate_progress(
+                        assigned_workers,
+                        total_samples=total_samples,
+                        chunk_samples=total_samples,
+                        done_offset=0,
                     )
-                try:
-                    results = await asyncio.gather(*futures) if futures else []
-                finally:
-                    if progress_task is not None:
-                        try:
-                            await asyncio.wait_for(progress_task, timeout=max(PROGRESS_POLL_INTERVAL_S * 2, 2.0))
-                        except asyncio.TimeoutError:
-                            logger.warning(
-                                f"Validate progress monitor timeout after chunk "
-                                f"step={self.global_steps}, dispatched={dispatched}, chunk={chunk_samples}"
-                            )
-                            progress_task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await progress_task
-
-                for samples, _ in results:
-                    all_samples.extend(samples)
-
-                dispatched += chunk_samples
-                self._set_validate_progress_state(
-                    active=dispatched < total_samples,
-                    total=total_samples,
-                    done=dispatched,
-                    workers_active=0,
-                    workers_total=len(assigned_workers),
                 )
-                train_step = rollout_to_train_step(self.global_steps)
-                message = (
-                    f"Validate@step{train_step} chunk done: "
-                    f"{dispatched}/{total_samples} ({100 * dispatched / total_samples:.1f}%), "
-                    f"rollout_index={self.global_steps}"
-                )
-                if dispatched >= total_samples:
-                    logger.info(message)
-                else:
-                    logger.debug(message)
+
+            # Wait for all validation tasks to complete
+            try:
+                results = await asyncio.gather(*futures) if futures else []
+            finally:
+                if progress_task is not None:
+                    try:
+                        await asyncio.wait_for(progress_task, timeout=max(PROGRESS_POLL_INTERVAL_S * 2, 2.0))
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Validate progress monitor timeout at step {self.global_steps}")
+                        progress_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await progress_task
+
+            # Collect results
+            all_samples = []
+            all_val_time_metrics = {}
+            for samples, val_time_metrics in results:
+                all_samples.extend(samples)
+                # Aggregate val_time_metrics from all workers
+                if val_time_metrics:
+                    for key, value in val_time_metrics.items():
+                        if key not in all_val_time_metrics:
+                            all_val_time_metrics[key] = []
+                        all_val_time_metrics[key].append(value)
+
+            train_step = rollout_to_train_step(self.global_steps)
+            logger.info(
+                f"Validate@step{train_step} completed: {len(all_samples)}/{total_samples} samples, rollout_index={self.global_steps}"
+            )
             raw_val_metrics = aggregate_and_log_validation_metrics(all_samples)
+
+            # Merge val_time_metrics into raw_val_metrics BEFORE metric_worker processing
+            if all_val_time_metrics:
+                import numpy as np
+
+                for key, values in all_val_time_metrics.items():
+                    # Average metrics across all chunks
+                    if isinstance(values[0], (int, float)):
+                        raw_val_metrics[key] = float(np.mean(values))
+
             val_metrics = raw_val_metrics
             if self.metric_worker is not None and raw_val_metrics:
                 await self.metric_worker.submit_metric.remote(raw_val_metrics, 1)
@@ -1380,8 +1375,9 @@ class RolloutManager:
                 from siirl.utils.metrics import restore_weighted_metrics
 
                 val_metrics = restore_weighted_metrics(val_metrics)
-            train_step = rollout_to_train_step(self.global_steps)
-            self.message_queue.append((val_metrics, train_step))
+            # Use current global_steps as the log step, which corresponds to the training step
+            # that this validation is for. This ensures validation metrics align with training metrics.
+            self.message_queue.append((val_metrics, self.global_steps))
         finally:
             self._reset_validate_reuse_sync_state()
             self._destroy_validate_reuse_pool()

@@ -47,6 +47,13 @@ def global_initialize_model_parallel(config: TrainingArguments):
     """Initialize Megatron model parallel groups"""
     megatron_config = config
 
+    # Disable MultiStorageClient for CPFS compatibility
+    from megatron.core.msc_utils import MultiStorageClientFeature
+
+    if MultiStorageClientFeature.is_enabled():
+        MultiStorageClientFeature.disable()
+        logger.info("[MSC] Disabled MultiStorageClient for CPFS compatibility")
+
     rank = int(os.environ["LOCAL_RANK"])
     if not torch.distributed.is_initialized():
         torch.distributed.init_process_group(
@@ -63,7 +70,6 @@ def global_initialize_model_parallel(config: TrainingArguments):
             tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
             pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
             virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
             use_sharp=False,
             context_parallel_size=megatron_config.context_parallel_size,
             expert_model_parallel_size=megatron_config.expert_model_parallel_size,
@@ -1188,10 +1194,29 @@ class Trainer:
 
                 checkpoint_save_time = 0.0
                 if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
-                    logger.info(f"[Trainer rank={self.rank}] Saving checkpoint at step {self.global_step}")
-                    with Timer("save_checkpoint") as save_checkpoint_timer:
-                        self.checkpoint_manager.save_checkpoint(self.global_step)
-                    checkpoint_save_time = save_checkpoint_timer.elapsed
+                    if self._is_colocate:
+                        # In colocate mode, manually offload rollout before checkpoint save
+                        # to prevent OOM when load_megatron_model_to_gpu allocates GPU memory
+                        checkpoint_trace_id = self._build_colocate_trace_id("checkpoint", bump_weight_version=False)
+                        self._log_colocate_trace("checkpoint_offload_start", trace_id=checkpoint_trace_id)
+                        logger.info(f"[Trainer rank={self.rank}] Offloading rollout for checkpoint save at step {self.global_step}")
+
+                        self._colocate_offload(trace_id=checkpoint_trace_id)
+                        try:
+                            with Timer("save_checkpoint") as save_checkpoint_timer:
+                                self.checkpoint_manager.save_checkpoint(self.global_step)
+                            checkpoint_save_time = save_checkpoint_timer.elapsed
+                            self._log_colocate_trace("checkpoint_save_done", trace_id=checkpoint_trace_id)
+                        finally:
+                            # Always resume rollout, even if save fails
+                            self._colocate_resume(trace_id=checkpoint_trace_id)
+                            self._log_colocate_trace("checkpoint_resume_done", trace_id=checkpoint_trace_id)
+                            logger.info(f"[Trainer rank={self.rank}] Rollout resumed after checkpoint save at step {self.global_step}")
+                    else:
+                        logger.info(f"[Trainer rank={self.rank}] Saving checkpoint at step {self.global_step}")
+                        with Timer("save_checkpoint") as save_checkpoint_timer:
+                            self.checkpoint_manager.save_checkpoint(self.global_step)
+                        checkpoint_save_time = save_checkpoint_timer.elapsed
 
                 # Carry save time into next-step exclusion.
                 self._pending_ckpt_excluded_time = checkpoint_save_time

@@ -265,7 +265,9 @@ class PartitionedRLHFDataset(Dataset):
                 else:
                     start = remainder * (rows_per_rank + 1) + (self.ddp_rank - remainder) * rows_per_rank
                     end = start + rows_per_rank
-                    self.is_trailing_rank = True  # There is one less sample compared to the previous ranks.
+                    # Only mark as trailing rank if there's a remainder (data not evenly divisible)
+                    # When remainder=0, all ranks have the same number of samples, so no rank should be trailing
+                    self.is_trailing_rank = remainder > 0  # There is one less sample compared to the previous ranks.
 
             if start >= end:
                 raise RuntimeError(f"Rank {self.ddp_rank} assigned empty partition: start={start}, end={end}, total_rows={total_rows}")

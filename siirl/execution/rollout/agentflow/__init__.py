@@ -8,15 +8,17 @@ __all__ = ["Model", "AgentFlow", "Sample", "ModelResponse", "load_agentflow"]
 BUILTIN_FLOW = {"swe": ".swe:agentflow"}
 
 
-def load_agentflow(config: dict, model: Model) -> AgentFlow:
+def load_agentflow(config: dict) -> AgentFlow:
     """使用配置加载 TaskFlow
 
     Args:
         config (dict): 整合在 RL 框架的配置管理中（例如配置文件 `scaffold` 键的值）
-        model (Model): Language Model （例如 SGLang router）
 
     Returns:
         TaskFlow: 一个 TaskFlow 实例
+
+    Note:
+        Model 不在这里传入，而是在 preprocess(sample, model) 时传入。
 
 
     示例 Config structure:
@@ -35,11 +37,8 @@ def load_agentflow(config: dict, model: Model) -> AgentFlow:
     generate_fn = import_any(config.get("generate_fn"), path=python_path)
     reward_fn = import_any(config.get("reward_fn"), path=python_path)
 
-    # Instantiate agent
-    agent: AgentFlow = agent_class(
-        config,
-        model,
-    )
+    # Instantiate agent without model (model will be provided per sample)
+    agent: AgentFlow = agent_class(config)
 
     # compose it
     if preprocess_fn is not None:

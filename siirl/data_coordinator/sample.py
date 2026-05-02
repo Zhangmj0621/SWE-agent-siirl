@@ -182,6 +182,7 @@ def Dict2Samples(data: TensorDict, async_mode: bool = False) -> list[Sample] | a
         if "multi_modal_inputs" in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
         local_sample.uid = data["uid"][index].item() if isinstance(data["uid"][index], torch.Tensor) else data["uid"][index]
+        local_sample.timing_info = data["timing_info"][index] if "timing_info" in data else None
         return local_sample
 
     async def async_wrapper(data):
