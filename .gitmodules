@@ -1,0 +1,6 @@
+[submodule "SWE-bench"]
+	path = siirl/3rdparty/SWE-bench
+	url = https://github.com/Zhangmj0621/SWE-bench.git
+[submodule "swe-agent"]
+	path = siirl/3rdparty/swe-agent
+	url = https://github.com/Zhangmj0621/SWE-agent-siirl.git
