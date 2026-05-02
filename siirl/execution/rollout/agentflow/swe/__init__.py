@@ -1,3 +1,9 @@
+import asyncio
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Coroutine
+
 from loguru import logger
 
 from siirl.execution.rollout.utils import EnvCreateError
@@ -8,6 +14,66 @@ from .agent import AgentBuilder
 from .base import SWEAgentMeta, SWESample
 from .environment import ContainerEnvBuilder
 from .runtime import RuntimeBuilder
+
+
+# ---------------------------------------------------------------------------
+# Flow thread pool (Plan D — pod-ops isolation)
+#
+# Under Ray, ``RolloutWorker`` shares a single event loop with Sglang, MetricWorker,
+# data coordinator RPC, etc.  If any of those co-residents stalls the loop, every
+# ``await`` here — including ``asyncio.wait_for`` timers inside swerex's
+# ``kubectl`` subprocess calls — stalls along with it.  That's what caused the
+# "4 pods stuck for 8 min, then all timeout at once" failure we saw.
+#
+# To restore the isolation the old ``_generate_sync`` pool used to provide, we
+# run ``generate`` / ``reward`` bodies on a dedicated worker thread in a brand
+# new event loop.  The rollout main loop merely awaits the worker-thread future;
+# any stall on the main loop no longer poisons the kubectl / httpx timers used
+# by SWEEnv.
+#
+# Concurrency:
+#   - ``SWE_FLOW_THREADS`` env var controls pool size; default mirrors what the
+#     old ``thread_pool.max_workers`` config expected (256).
+#   - The pool is lazily created on first use and shared across flow instances.
+# ---------------------------------------------------------------------------
+
+_FLOW_EXECUTOR: ThreadPoolExecutor | None = None
+_FLOW_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_flow_executor() -> ThreadPoolExecutor:
+    """Lazy-initialise the per-process flow thread pool."""
+    global _FLOW_EXECUTOR
+    if _FLOW_EXECUTOR is None:
+        with _FLOW_EXECUTOR_LOCK:
+            if _FLOW_EXECUTOR is None:
+                max_workers = int(os.getenv("SWE_FLOW_THREADS", "256"))
+                _FLOW_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=max_workers,
+                    thread_name_prefix="sweagentflow",
+                )
+                logger.info(f"[SWEAgentFlow] flow executor created, max_workers={max_workers}")
+    return _FLOW_EXECUTOR
+
+
+def _run_async_in_thread(coro_fn: Callable[..., Coroutine[Any, Any, Any]], *args: Any, **kwargs: Any) -> Any:
+    """Worker-thread entrypoint: build a fresh event loop, run ``coro_fn(*args)`` on it, close.
+
+    Constructing the coroutine inside the worker keeps it bound to the loop
+    that will actually drive it — avoids the "coroutine attached to a different
+    loop" / cross-loop httpx failures you'd otherwise get when SWEEnv's HTTP
+    client is created on one loop and used on another.
+    """
+    thread_loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(thread_loop)
+        return thread_loop.run_until_complete(coro_fn(*args, **kwargs))
+    finally:
+        try:
+            thread_loop.close()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
+        asyncio.set_event_loop(None)
 
 
 def _should_eval(exit_status: str | None, is_validate: bool) -> tuple[bool, "SWESample.Status | None"]:
@@ -219,11 +285,25 @@ class SWEAgentFlow(AgentFlow):
         return s
 
     async def generate(self, sample: SWESample):
-        """运行 scaffold rollout / patch generation (async).
+        """Dispatch the full rollout to a worker-thread event loop.
 
-        Multiple agents sharing the same event loop interleave at every
-        ``await`` (HTTP / runtime / env IO), giving step-level concurrency.
+        The actual rollout body (``_generate_async``) runs in isolation — its
+        SWEEnv/httpx/kubectl timers can't be starved by Sglang or Ray activity
+        on the rollout main loop.  See the module header comment for background.
         """
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            _get_flow_executor(), _run_async_in_thread, self._generate_async, sample
+        )
+
+    async def reward(self, sample: SWESample):
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            _get_flow_executor(), _run_async_in_thread, self._reward_async, sample
+        )
+
+    async def _generate_async(self, sample: SWESample):
+        """rollout body — runs inside the worker thread's event loop."""
         m = sample.m
         logger.warning("[SWEAgentFlow.generate] Running agent.run")
         logger.debug(f"[SWEAgentFlow.generate] m.agent type: {type(m.agent)}")
@@ -258,8 +338,8 @@ class SWEAgentFlow(AgentFlow):
                 f"exit_status={m.rollout.exit_status!r}, is_validate={m.rollout.is_validate})"
             )
 
-    async def reward(self, sample: SWESample):
-        """运行 evaluate / verification (async)."""
+    async def _reward_async(self, sample: SWESample):
+        """reward body — runs inside the worker thread's event loop."""
         m = sample.m
 
         # 与 generate 对齐的 exit_status 过滤：不合格样本跳过 eval，但设置 reward=0
