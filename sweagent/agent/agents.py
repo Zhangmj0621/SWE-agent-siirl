@@ -1238,7 +1238,7 @@ class DefaultAgent(AbstractAgent):
                 "extra_info": step.extra_info,
                 "reasoning_content": step.reasoning_content,
                 "output_tokens": step.output_tokens,
-                "rollout_1og_probs": step.rollout_log_probs,
+                "rollout_log_probs": step.rollout_log_probs,
                 "rollout_routed_experts": step.rollout_routed_experts,
             },
         )
