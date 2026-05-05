@@ -1671,3 +1671,76 @@ class RLTokenAgent(DefaultAgent):
         data["info"]["error_logs"] = self._error_logs
         data["info"]["response_turn"] = len(self.trajectory)
         return AgentRunResult(info=data["info"], trajectory=data["trajectory"])
+
+    # ------------------------------------------------------------------ #
+    # Partial rollout: state snapshot / restore + resume entry point.
+    #
+    # Used by siirl's SWEAgentFlow when an in-flight rollout is aborted
+    # (e.g., by param_sync's abort_generation) so the worker that picks
+    # the sample back up can continue the trajectory instead of starting
+    # over. Tokens/logprobs live on model.token_manager, which the caller
+    # snapshots separately; these methods cover only agent-internal state.
+    # ------------------------------------------------------------------ #
+
+    def dump_state(self) -> dict[str, Any]:
+        """Snapshot mutable state accumulated across steps.
+
+        Fields here are the ones that ``setup()`` clears or that the step
+        loop mutates. External refs (env/model/tools/hooks) are rebound
+        per-run by ``setup``, so they're intentionally left out.
+        """
+        return {
+            "history": copy.deepcopy(self.history),
+            "trajectory": copy.deepcopy(self._trajectory),
+            "info": copy.deepcopy(dict(self.info)),
+            "init_input_ids": list(self.init_input_ids or []),
+            "error_logs": copy.deepcopy(self._error_logs),
+            "total_execution_time": float(self._total_execution_time),
+            "n_consecutive_timeouts": int(self._n_consecutive_timeouts),
+            "routed_experts_raw": self._routed_experts_raw,
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        """Inverse of ``dump_state``.
+
+        Call order on the resuming worker: construct agent → ``await
+        self.setup(env, problem_statement, output_dir)`` → ``restore_state(state)``.
+        ``setup`` would otherwise clear ``init_input_ids / _error_logs /
+        info / _routed_experts_raw``; we overwrite its fresh values with
+        the snapshot.
+        """
+        self.history = list(state["history"])
+        self._trajectory = list(state["trajectory"])
+        # self.info is an AgentInfo TypedDict at runtime — a plain dict.
+        # Preserve the dict identity so any existing reference stays valid.
+        self.info.clear()
+        self.info.update(state["info"])
+        self.init_input_ids = list(state["init_input_ids"])
+        self._error_logs = list(state["error_logs"])
+        self._total_execution_time = float(state["total_execution_time"])
+        self._n_consecutive_timeouts = int(state["n_consecutive_timeouts"])
+        self._routed_experts_raw = state["routed_experts_raw"]
+
+    async def resume(
+        self,
+        env: SWEEnv,
+        problem_statement: ProblemStatement | ProblemStatementConfig,
+        output_dir: Path = Path("."),
+    ) -> AgentRunResult:
+        """Partial-rollout entry point. Mirrors ``run`` minus setup / on_run_start.
+
+        The caller must have called ``setup`` AND ``restore_state`` before
+        this. We skip ``on_run_start`` so hooks don't double-initialise
+        their own per-run state (e.g. timers, log files) — this is a
+        continuation, not a new run.
+        """
+        step_output = StepOutput()
+        while not step_output.done:
+            step_output = await self.step()
+            self.save_trajectory()
+        self._chook.on_run_done(trajectory=self.trajectory, info=self.info)
+
+        data = self.get_trajectory_data()
+        data["info"]["error_logs"] = self._error_logs
+        data["info"]["response_turn"] = len(self.trajectory)
+        return AgentRunResult(info=data["info"], trajectory=data["trajectory"])
