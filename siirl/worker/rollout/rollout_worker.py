@@ -459,9 +459,9 @@ class RolloutWorker:
         return result
 
     def resume_generation(self):
-        self.engine.resume_generation_dispatch()
         if self.executor is not None:
             self.executor.resume_dispatch()
+        self.engine.resume_generation_dispatch()
         return True
 
     def offload_memory(self, tags: list[str] | None = None):

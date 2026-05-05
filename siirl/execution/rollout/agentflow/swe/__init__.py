@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -6,7 +7,7 @@ from typing import Any, Callable, Coroutine
 
 from loguru import logger
 
-from siirl.execution.rollout.utils import EnvCreateError
+from siirl.execution.rollout.utils import EnvCreateError, SglangGenerationAborted
 
 from ..base import AgentFlow, Model
 from ..utils import import_any
@@ -97,6 +98,29 @@ def _run_async_in_thread(coro_fn: Callable[..., Coroutine[Any, Any, Any]], *args
         except Exception:  # pragma: no cover - defensive cleanup
             pass
         asyncio.set_event_loop(None)
+
+
+def _inject_resume_handle(runtime_meta: Any, handle: dict) -> Any:
+    """Return a runtime_meta variant carrying ``_resume_handle=handle``.
+
+    K8sEnvAdapter's builder reads ``_resume_handle`` from runtime_meta and
+    switches into attach-to-existing-pod mode. This helper preserves the
+    shape of runtime_meta (dict vs dataclass) and avoids mutating the
+    caller's object.
+    """
+    if runtime_meta is None:
+        return {"_resume_handle": handle}
+    if isinstance(runtime_meta, dict):
+        return {**runtime_meta, "_resume_handle": handle}
+    # Non-frozen dataclass (e.g. SBSample): attach attribute in-place.
+    try:
+        object.__setattr__(runtime_meta, "_resume_handle", handle)
+    except Exception:
+        logger.warning(
+            "[SWEAgentFlow._inject_resume_handle] Could not set _resume_handle on "
+            f"runtime_meta type={type(runtime_meta).__name__}; resume may fall back to fresh pod"
+        )
+    return runtime_meta
 
 
 def _should_eval(exit_status: str | None, is_validate: bool) -> tuple[bool, "SWESample.Status | None"]:
@@ -304,6 +328,20 @@ class SWEAgentFlow(AgentFlow):
             meta.weight_version = sample["weight_version"]
             logger.debug(f"[SWEAgentFlow.preprocess] Set weight_version={sample['weight_version']} for sample")
 
+        # Partial-rollout inbound: if AgentFlowCallable forwarded a
+        # ``partial_agent_data`` from the siirl Sample into this dict,
+        # record it on the rollout meta. ``_generate_async`` picks it up
+        # and branches into the resume path.
+        partial = sample.get("partial_agent_data") if isinstance(sample, dict) else None
+        if partial:
+            meta.rollout.partial_state = partial
+            # 置空出口字段，防止和本轮 _generate_async 新写入的 partial 互相污染
+            meta.rollout.partial_agent_data = None
+            logger.info(
+                f"[SWEAgentFlow.preprocess] Resuming from partial "
+                f"(rid={partial.get('rid')}, assistant_turns={partial.get('assistant_turns')})"
+            )
+
         logger.debug(f"[SWEAgentFlow.preprocess] is_validate={is_validate}, agent type: {type(meta.agent)}")
         return s
 
@@ -326,31 +364,108 @@ class SWEAgentFlow(AgentFlow):
         )
 
     async def _generate_async(self, sample: SWESample):
-        """rollout body — runs inside the worker thread's event loop."""
+        """rollout body — runs inside the worker thread's event loop.
+
+        Abort / partial-rollout semantics (aligned with naive_flow):
+          - If the agent's ``engine.generate`` sees ``finish_reason=abort``,
+            it raises ``SglangGenerationAborted``. Because that's a
+            ``BaseException`` subclass, upstream ``except Exception`` paths
+            inside ``RLTokenAgent.forward_with_handling`` don't swallow it.
+          - The wrapper (``RLTokenAgentWrapper.run``) catches it, snapshots
+            agent + model state into ``m.agent.partial_state``, and re-raises.
+          - We catch it here, pack the wrapper snapshot + env handle into
+            ``m.rollout.partial_agent_data``, then ``detach`` — the pod
+            stays alive so the next worker's resume can attach. The outer
+            ``AgentFlowCallable.__call__`` copies ``partial_agent_data``
+            onto the siirl Sample and raises ``RolloutGenerationAborted``.
+          - If ``get_handle`` or ``detach`` fails, we fall through to
+            ``cleanup`` and invalidate ``partial_agent_data`` — a stale pod
+            handle would be worse than losing the partial progress.
+        """
         m = sample.m
-        logger.warning("[SWEAgentFlow.generate] Running agent.run")
+        partial = getattr(m.rollout, "partial_state", None)
+        logger.warning(
+            "[SWEAgentFlow.generate] Running agent.%s", "resume" if partial else "run"
+        )
         logger.debug(f"[SWEAgentFlow.generate] m.agent type: {type(m.agent)}")
+
+        # Inject the resume handle into runtime_meta so K8sEnvAdapter's
+        # builder attaches to the existing pod instead of creating a new one.
+        runtime_meta = m.data.runtime_meta
+        if partial and partial.get("swe_env_handle"):
+            runtime_meta = _inject_resume_handle(runtime_meta, partial["swe_env_handle"])
 
         env = None
         try:
-            env = await self.env.start(m.data.container_args, m.data.runtime_meta)
+            env = await self.env.start(m.data.container_args, runtime_meta)
         except Exception as start_exc:
             logger.error(f"[SWEAgentFlow.generate] Failed to start environment: {start_exc}", exc_info=True)
             raise EnvCreateError(f"env start failed: {start_exc}") from start_exc
 
+        aborted = False
         try:
-            await m.runtime.bootstrap(env)
-            await m.agent.run(env)
+            await m.runtime.bootstrap(env)  # idempotent — resume path is a no-op
+            if partial:
+                await m.agent.resume(env, partial)
+            else:
+                await m.agent.run(env)
             await m.runtime.diff(env)
+        except SglangGenerationAborted:
+            # Build the outbound partial_agent_data. wrapper.partial_state is
+            # populated by RLTokenAgentWrapper.run/resume in its own except.
+            wrapper_partial = getattr(m.agent, "partial_state", None) or {}
+            env_handle = None
+            try:
+                env_handle = env.get_handle() if env is not None else None
+            except Exception as e:
+                logger.error(
+                    f"[SWEAgentFlow.generate] get_handle failed: {e}; "
+                    "will fall through to cleanup and drop partial",
+                    exc_info=True,
+                )
+            if env_handle is None or not wrapper_partial:
+                # Can't resume without env handle or agent snapshot — let the
+                # finally cleanup the pod and don't publish partial data.
+                logger.warning(
+                    f"[SWEAgentFlow.generate] Abort without usable partial "
+                    f"(env_handle={bool(env_handle)}, wrapper_partial={bool(wrapper_partial)}); "
+                    "releasing pod"
+                )
+                m.rollout.partial_agent_data = None
+            else:
+                m.rollout.partial_agent_data = {
+                    **wrapper_partial,
+                    "swe_env_handle": env_handle,
+                    "swe_runtime_bootstrapped": True,
+                }
+                aborted = True
+            raise
         finally:
             if env is not None:
-                try:
-                    await env.cleanup()
-                except Exception as e:
-                    logger.warning(f"[SWEAgentFlow.generate] cleanup failed: {e}")
+                if aborted:
+                    # Keep pod alive; close Python client only. Fallback to
+                    # full cleanup if detach itself fails — we'd rather lose
+                    # the partial than leak a pod into the cluster.
+                    try:
+                        await env.detach()
+                    except Exception as e:
+                        logger.error(
+                            f"[SWEAgentFlow.generate] detach failed: {e}; "
+                            "falling back to cleanup",
+                            exc_info=True,
+                        )
+                        with contextlib.suppress(Exception):
+                            await env.cleanup()
+                        m.rollout.partial_agent_data = None
+                else:
+                    try:
+                        await env.cleanup()
+                    except Exception as e:
+                        logger.warning(f"[SWEAgentFlow.generate] cleanup failed: {e}")
 
         # 按 exit_status 决定是否让该样本进入 eval 阶段（与 Agentic_RL 对齐）
         # 注意：TRUNCATED 样本依然会跑 eval（仅预置 status=TRUNCATED，训练时由上层按 status 排除）。
+        # Abort 路径不会到这里（上面 raise 已经离开了函数）。
         do_eval, status_override = _should_eval(m.rollout.exit_status, m.rollout.is_validate)
         if status_override is not None:
             sample.status = status_override

@@ -27,6 +27,7 @@ import asyncio
 import base64
 import copy
 import time
+import uuid
 from typing import Any
 
 import numpy as np
@@ -98,6 +99,11 @@ class SweSglangModel:
         # siirl-specific: per-sample state
         self.last_query_time = 0.0
         self._current_sample = None
+        # Stable request id for the SGLang server. One uuid per sample,
+        # preserved across every engine.generate() within the same rollout
+        # and across partial-rollout abort/resume. Assigned in set_sample.
+        # Matches naive_flow's agent_data.rid convention.
+        self._rid: str = ""
 
     # ------------------------------------------------------------------ #
     # siirl-side compatibility surface
@@ -108,8 +114,15 @@ class SweSglangModel:
         return self.engine.tokenizer
 
     def set_sample(self, sample) -> None:
-        """Called by AgentFlowCallable to inject per-sample context (seed)."""
+        """Called by AgentFlowCallable to inject per-sample context (seed + rid).
+
+        For partial-rollout resume, the sample carries the original rid in
+        ``sample.partial_agent_data["rid"]``; reuse it so the SGLang server
+        keeps correlating the continued turns as one logical request.
+        """
         self._current_sample = sample
+        partial = getattr(sample, "partial_agent_data", None) or {}
+        self._rid = partial.get("rid") or uuid.uuid4().hex
 
     def reset_stats(self) -> None:
         self.stats = InstanceStats()
@@ -355,12 +368,15 @@ class SweSglangModel:
         # Engine replaces upstream's httpx POST — same semantics, in-process.
         # Engine returns: text, output_ids (list[int]), rollout_log_prob (list[float]),
         # routed_experts (np.ndarray[int32] or None).
+        # rid is stable for this sample's lifetime (see set_sample) so abort /
+        # resume correlates turns of the same logical request on the server.
         text, output_tokens, rollout_log_probs, routed_experts_raw = await self.engine.generate(
             input_ids=input_ids,
             is_validate=self.is_validate,
             sampling_params=sampling_params,
             request_seed=request_seed,
             return_routed_experts=return_routed_experts,
+            rid=self._rid,
         )
 
         output_tokens = list(output_tokens or [])
@@ -442,6 +458,96 @@ class SweSglangModel:
         if n is None or n == 1:
             return result[0]
         return result
+
+    # ------------------------------------------------------------------ #
+    # Partial rollout: model-side dump / restore.
+    #
+    # naive_flow stores a flat (prompts_ids / response_mask / rollout_log_prob)
+    # view of the rollout tokens. We expose the same shape so the wrapper can
+    # build ``sample.partial_agent_data`` using naive_flow's field names, and
+    # rehydrate the TokenManager segments on resume.
+    # ------------------------------------------------------------------ #
+
+    def dump_state(self) -> dict[str, Any]:
+        """Snapshot model-side state for ``sample.partial_agent_data``.
+
+        ``prompts_ids / response_mask / rollout_log_prob`` match naive_flow's
+        key names. ``swe_*`` keys are SWE-specific extras that the wrapper
+        merges into the final partial dict.
+        """
+        tm = self.token_manager
+        return {
+            # naive_flow-aligned (flat) token view
+            "prompts_ids": list(tm.token_ids),
+            "response_ids": [
+                tid for seg in tm._segments if seg.is_response for tid in seg.token_ids
+            ],
+            "response_mask": list(tm.loss_mask),
+            "rollout_log_prob": list(tm.logprobs),
+            # SWE-specific model state
+            "swe_model_stats": self.stats.model_dump(),
+            "swe_processed_message_count": int(self._processed_message_count),
+            # rid — same convention as naive_flow agent_data.rid
+            "rid": self._rid,
+        }
+
+    def restore_state(self, partial: dict[str, Any]) -> None:
+        """Rehydrate TokenManager + stats + counters from ``partial_agent_data``.
+
+        TokenManager gets reconstructed from the flat view by splitting
+        ``prompts_ids`` along ``response_mask`` 0/1 runs — each contiguous
+        run becomes a ``TokenSegment``.
+        """
+        self.token_manager.reset()
+        self._rehydrate_token_manager(
+            prompts_ids=partial["prompts_ids"],
+            response_mask=partial["response_mask"],
+            rollout_log_prob=partial["rollout_log_prob"],
+        )
+        self._processed_message_count = int(partial["swe_processed_message_count"])
+        stats_dict = partial["swe_model_stats"]
+        # InstanceStats is a pydantic model; construct from the dumped dict.
+        self.stats = type(self.stats)(**stats_dict)
+        # _rid already restored by set_sample; partial["rid"] is authoritative.
+        self._rid = partial.get("rid") or self._rid
+
+    def _rehydrate_token_manager(
+        self,
+        *,
+        prompts_ids: list[int],
+        response_mask: list[int],
+        rollout_log_prob: list[float],
+    ) -> None:
+        """Split the flat token view back into TokenSegments by mask runs."""
+        if not prompts_ids:
+            return
+        if not (len(prompts_ids) == len(response_mask) == len(rollout_log_prob)):
+            raise ValueError(
+                "[SweSglangModel._rehydrate_token_manager] length mismatch: "
+                f"prompts_ids={len(prompts_ids)}, mask={len(response_mask)}, "
+                f"logprob={len(rollout_log_prob)}"
+            )
+        cur_mask = response_mask[0]
+        buf_ids: list[int] = []
+        buf_lp: list[float] = []
+
+        def _flush() -> None:
+            if not buf_ids:
+                return
+            if cur_mask:
+                self.token_manager.add_response(buf_ids, buf_lp)
+            else:
+                self.token_manager.add_prompt(buf_ids, buf_lp)
+
+        for tid, mask, lp in zip(prompts_ids, response_mask, rollout_log_prob):
+            if mask != cur_mask:
+                _flush()
+                buf_ids = []
+                buf_lp = []
+                cur_mask = mask
+            buf_ids.append(int(tid))
+            buf_lp.append(float(lp))
+        _flush()
 
 
 def _parse_response_local(

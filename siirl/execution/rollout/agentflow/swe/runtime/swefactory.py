@@ -25,7 +25,7 @@ class SWEFactoryRuntime(Runtime):
         self.sample = sample
         self.m = sample.m
 
-    async def bootstrap(self, env: ContainerEnv):
+    async def _do_bootstrap(self, env: ContainerEnv):
         await env.execute(f"git checkout {self.sfsample.base_commit}")
         # Note: we avoid stdin=BytesIO(...) because K8sEnvAdapter.execute does not
         # support stdin; use write_file + git apply <file> instead.

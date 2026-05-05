@@ -34,7 +34,7 @@ class SWEBenchRuntime(Runtime):
         self.sample = sample
         self.m = sample.m
 
-    async def bootstrap(self, env: ContainerEnv):
+    async def _do_bootstrap(self, env: ContainerEnv):
         pass
 
     async def diff(self, env: ContainerEnv):

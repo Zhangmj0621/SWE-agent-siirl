@@ -13,7 +13,12 @@ from siirl.data_coordinator.sample import Sample
 from siirl.engine.rollout.sglang_engine import SglangEngine
 
 from ..agentflow import AgentFlow, ModelResponse, load_agentflow
-from ..utils import ContextWindowExceededError, EnvCreateError
+from ..utils import (
+    ContextWindowExceededError,
+    EnvCreateError,
+    RolloutGenerationAborted,
+    SglangGenerationAborted,
+)
 
 LLMEngine = Any  # siirl.engine.rollout.sglang_engine.SglangEngine
 
@@ -598,13 +603,39 @@ class AgentFlowCallable:
         sample.extra_info["weight_version"] = self.engine._weight_version
         logger.debug(f"[AgentFlowCallable] Set weight_version={self.engine._weight_version} for sample {getattr(sample, 'uid', 'unknown')}")
 
-        # Preprocess the sample with this sample's model
-        sample_data = sample.extra_info
+        # Preprocess the sample with this sample's model.
+        # Partial-rollout inbound: propagate ``sample.partial_agent_data``
+        # into the dict passed to preprocess so SWEAgentFlow can switch
+        # into the resume branch (attach to pod, restore agent state).
+        sample_data = dict(sample.extra_info) if isinstance(sample.extra_info, dict) else {}
+        if getattr(sample, "partial_agent_data", None):
+            sample_data["partial_agent_data"] = sample.partial_agent_data
         s = await self.flow.preprocess(sample_data, model=model, is_validate=is_validate)
 
         try:
             await self.flow.generate(s)
             await self.flow.reward(s)
+        except RolloutGenerationAborted:
+            # Already wrapped — just let NaiveExecutor.generate see it and
+            # put_partial the sample.
+            raise
+        except SglangGenerationAborted:
+            # SWEAgentFlow writes partial_agent_data onto ``s.m.rollout``;
+            # move it onto the siirl Sample before handing off.
+            partial = (
+                getattr(getattr(s, "m", None), "rollout", None)
+                and getattr(s.m.rollout, "partial_agent_data", None)
+            )
+            if partial:
+                sample.partial_agent_data = partial
+                raise RolloutGenerationAborted(sample)
+            # No usable partial (env detach failed, or abort hit before we
+            # got a snapshot). Fall through to the generic fail path so the
+            # sample still makes it into the batch with reward=0.
+            logger.warning(
+                "[AgentFlowCallable] Abort without partial; falling through to fail"
+            )
+            s.reward = 0.0
         except EnvCreateError as e:
             logger.warning(f"Create Env Failed, set sample to default None {e}", exc_info=True)
             logger.warning(f"EnvCreateError type: {type(e).__name__}, message: {str(e)}")
@@ -622,6 +653,10 @@ class AgentFlowCallable:
 
             logger.error(f"Detailed traceback:\n{traceback.format_exc()}")
             s.reward = 0.0
+        else:
+            # Normal completion: clear any stale partial so a future retry
+            # of this sample doesn't accidentally resume from old state.
+            sample.partial_agent_data = None
 
         # Check if rollout generated any tokens
         if len(s.tokens) == 0:

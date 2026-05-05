@@ -186,7 +186,7 @@ class SWEBenchK8sEvalRuntime(Runtime):
         # This shouldn't happen in normal GRPO training, but provides safety
         return f"obj_{id(self.sample)}"
 
-    async def bootstrap(self, env: ContainerEnv):
+    async def _do_bootstrap(self, env: ContainerEnv):
         """Bootstrap environment - minimal to avoid resource exhaustion.
 
         IMPORTANT: With 64 concurrent samples, executing git commands here creates

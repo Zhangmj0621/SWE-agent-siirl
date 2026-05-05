@@ -61,6 +61,7 @@ from siirl.execution.rollout.utils import (
     ContextWindowExceededError,
     CostLimitExceededError,
     FormatError,
+    SglangGenerationAborted,
     TotalCostLimitExceededError,
 )
 
@@ -164,6 +165,11 @@ class RLTokenAgentWrapper(AbstractAgent):
         self.trajectory = self._agent.trajectory
         self.info = self._agent.info
 
+        # Populated by ``run`` / ``resume`` when SglangGenerationAborted
+        # propagates — SWEAgentFlow reads this in the abort branch to build
+        # ``sample.partial_agent_data`` and delay env cleanup.
+        self.partial_state: dict[str, Any] | None = None
+
     @property
     def templates(self):
         """Access to agent's template configuration."""
@@ -191,12 +197,69 @@ class RLTokenAgentWrapper(AbstractAgent):
         """Run the agent on a problem instance (async).
 
         Awaits upstream ``RLTokenAgent.run`` directly, so step-level concurrency
-        between rollouts is preserved at every ``await`` point.
+        between rollouts is preserved at every ``await`` point. If rollout is
+        aborted mid-step by ``SglangGenerationAborted``, snapshot state for
+        partial-rollout resume and re-raise so upper layers can hand the
+        sample back to the shared partial queue.
         """
         swe_env = env._env if hasattr(env, "_env") else env
 
-        result = await self._agent.run(env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir)
+        try:
+            result = await self._agent.run(
+                env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
+            )
+        except SglangGenerationAborted:
+            self.partial_state = self._snapshot()
+            raise
 
+        self._backfill_sample(result)
+        return result
+
+    async def resume(
+        self,
+        env: ContainerEnv,
+        partial: dict[str, Any],
+        output_dir: Path = Path("."),
+    ) -> AgentRunResult:
+        """Partial-rollout entry point. Pairs with ``run``'s snapshot path.
+
+        Call order: this method ``setup``s the upstream agent, restores
+        model-side TokenManager state from ``partial``, restores upstream
+        agent state, then calls ``upstream_agent.resume`` which skips
+        ``setup``/``on_run_start`` and jumps straight into the step loop.
+        """
+        swe_env = env._env if hasattr(env, "_env") else env
+
+        # 1) setup is still required — it binds env/problem_statement/tools on
+        #    the upstream agent, installs tools on the pod, and seeds
+        #    info/history. restore_state below overwrites the bits that
+        #    setup would otherwise discard (history, trajectory, info, ...).
+        await self._agent.setup(
+            env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
+        )
+
+        # 2) model side first: TokenManager / _rid / stats / _processed_message_count
+        self.model.restore_state(partial)
+
+        # 3) upstream agent state
+        self._agent.restore_state(partial["swe_agent_state"])
+
+        try:
+            result = await self._agent.resume(
+                env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
+            )
+        except SglangGenerationAborted:
+            self.partial_state = self._snapshot()
+            raise
+
+        self._backfill_sample(result)
+        return result
+
+    def _backfill_sample(self, result: AgentRunResult) -> None:
+        """Write rollout outputs back onto the siirl Sample.
+
+        Shared by both normal-completion paths in ``run`` and ``resume``.
+        """
         # CRITICAL: Assign token tracking data to sample for RL training
         self.sample.prompts = self._agent.init_input_ids
         self.sample.tokens = self._agent.input_ids[len(self._agent.init_input_ids) :]
@@ -213,7 +276,41 @@ class RLTokenAgentWrapper(AbstractAgent):
         info = agent_info if agent_info else (result.info or {})
         self.sample.m.rollout.patch = info.get("submission", None)
         self.sample.m.rollout.exit_status = info.get("exit_status", None)
-        return result
+
+    def _snapshot(self) -> dict[str, Any]:
+        """Build the partial_agent_data dict (naive_flow-aligned shape).
+
+        naive_flow key convention (see naive_flow._save_partial_agent_data):
+            rid / messages / prompts_ids / response_ids / response_mask /
+            rollout_log_prob / assistant_turns / env_turns /
+            env_rewards / env_kwargs / routed_experts
+        SWE-specific additions: swe_agent_state, swe_model_stats,
+        swe_processed_message_count. ``swe_env_handle`` and
+        ``swe_runtime_bootstrapped`` are filled in by SWEAgentFlow.
+        """
+        model_state = self.model.dump_state()
+        upstream_trajectory = getattr(self._agent, "_trajectory", None) or list(self._agent.trajectory)
+        env_turns = sum(
+            1 for step in upstream_trajectory if step.get("tool_calls")
+        )
+        return {
+            # naive_flow-aligned
+            "rid": model_state["rid"],
+            "messages": copy.deepcopy(self._agent.history),
+            "prompts_ids": model_state["prompts_ids"],
+            "response_ids": model_state["response_ids"],
+            "response_mask": model_state["response_mask"],
+            "rollout_log_prob": model_state["rollout_log_prob"],
+            "assistant_turns": len(upstream_trajectory),
+            "env_turns": env_turns,
+            "env_rewards": [],
+            "env_kwargs": {},
+            "routed_experts": getattr(self._agent, "routed_experts_raw", "") or "",
+            # SWE-specific
+            "swe_agent_state": self._agent.dump_state(),
+            "swe_model_stats": model_state["swe_model_stats"],
+            "swe_processed_message_count": model_state["swe_processed_message_count"],
+        }
 
 
 class RLTokenAgentBuilder(AgentBuilder):

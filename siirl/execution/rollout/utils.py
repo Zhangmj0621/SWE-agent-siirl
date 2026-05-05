@@ -12,8 +12,15 @@ class RolloutGenerationAborted(Exception):
         self.sample = sample
 
 
-class SglangGenerationAborted(Exception):
-    """Raised when SGLang returns an aborted generation with partial tokens."""
+class SglangGenerationAborted(BaseException):
+    """Raised when SGLang returns an aborted generation with partial tokens.
+
+    Inherits BaseException (not Exception) so upstream ``except Exception``
+    handlers — notably ``RLTokenAgent.forward_with_handling`` in swe-agent —
+    don't swallow it into autosubmission paths. This matches the asyncio
+    convention for cancellation-style exceptions: they must propagate to a
+    handler that explicitly knows how to clean up partial state.
+    """
 
     def __init__(
         self,

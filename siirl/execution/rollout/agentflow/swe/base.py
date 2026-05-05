@@ -30,6 +30,12 @@ class SWERolloutMeta(Generic[Patch]):
     exit_status: str | None = None
     # 当前样本是否为 validate 阶段，用于在 reward 阶段决定过滤规则
     is_validate: bool = False
+    # Partial rollout (aligned with naive_flow semantics):
+    #   partial_state —  inbound, preprocess 写入；_generate_async 读后走 resume 路径
+    #   partial_agent_data — outbound, _generate_async abort 分支写入；
+    #                        AgentFlowCallable.__call__ 搬到 siirl Sample 上
+    partial_state: dict | None = None
+    partial_agent_data: dict | None = None
 
 
 @dataclass

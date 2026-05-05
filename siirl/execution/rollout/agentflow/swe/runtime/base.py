@@ -40,9 +40,25 @@ class Runtime(ABC):
     """A Runtime enables dataset-related operation by one sample. It specifies
     container args, parse sample, generate and apply patch, run eval"""
 
-    @abstractmethod
+    # Set by ``bootstrap`` after ``_do_bootstrap`` succeeds. Guards against
+    # redundant bootstrap when partial rollout resumes into the same pod.
+    _bootstrapped: bool = False
+
     async def bootstrap(self, env: ContainerEnv):
-        """Bootstrap environment so agent can work on it"""
+        """Idempotent bootstrap. Subclasses implement ``_do_bootstrap``.
+
+        Partial rollout resume calls ``bootstrap`` again on the same runtime
+        instance when attaching to a still-live pod; we must skip the real
+        bootstrap body in that case (repo already cloned, env already warm).
+        """
+        if self._bootstrapped:
+            return
+        await self._do_bootstrap(env)
+        self._bootstrapped = True
+
+    @abstractmethod
+    async def _do_bootstrap(self, env: ContainerEnv):
+        """Actual bootstrap body; called once per runtime by ``bootstrap``."""
         raise NotImplementedError
 
     @abstractmethod

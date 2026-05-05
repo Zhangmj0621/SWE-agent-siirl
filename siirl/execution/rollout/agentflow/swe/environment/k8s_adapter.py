@@ -24,7 +24,8 @@ from typing import Any
 
 from sweagent.environment.swe_env import SWEEnv
 from swerex.deployment.config import K8sDeploymentConfig
-from swerex.runtime.abstract import BashAction
+from swerex.deployment.k8s import K8sDeployment
+from swerex.runtime.abstract import BashAction, CreateBashSessionRequest
 
 from .base import ContainerBuildArgs, ContainerEnv, ContainerEnvBuilder, ContainerOutput, ContainerStartArgs
 
@@ -51,6 +52,7 @@ class K8sEnvAdapter(ContainerEnv):
         config: dict | None = None,
         deployment_config: K8sDeploymentConfig | None = None,
         skip_reset: bool = False,  # Eval pods skip reset() to keep the image state.
+        resume_handle: dict | None = None,  # Partial rollout: attach to existing pod.
     ):
         self.args = args
         self._instance = instance or {}
@@ -59,6 +61,10 @@ class K8sEnvAdapter(ContainerEnv):
         self._config = config or {}
         self._deployment_config = deployment_config
         self._skip_reset = skip_reset
+        # Partial rollout: when set, ``_start_swe_env`` attaches to the existing
+        # pod described by ``resume_handle`` instead of creating a new one.
+        # Shape: {"pod_name", "namespace", "auth_token", "pod_ip": optional}.
+        self._resume_handle = resume_handle
         self._swe_env: SWEEnv | None = None
         self._closed = False
 
@@ -117,7 +123,16 @@ class K8sEnvAdapter(ContainerEnv):
 
         Replicates ``SWEEnv.start()`` but honours ``skip_reset`` by calling
         ``_init_deployment()`` and then optionally ``reset()``.
+
+        If ``self._resume_handle`` is set, attach to the existing pod
+        described by the handle instead of creating a new one — used by
+        SWEAgentFlow's partial-rollout resume path so that accumulated
+        filesystem state (edits, test artefacts) from the previous attempt
+        is preserved.
         """
+        if self._resume_handle is not None:
+            return await self._attach_to_existing_pod()
+
         deployment = self._build_deployment_config().get_deployment()
         repo = self._create_repo_config()
         logger.info(
@@ -131,6 +146,83 @@ class K8sEnvAdapter(ContainerEnv):
             logger.info("[K8sEnvAdapter] Skipping reset() for eval pod")
         else:
             await swe_env.reset()
+        return swe_env
+
+    async def _attach_to_existing_pod(self) -> SWEEnv:
+        """Reconnect to an already-running pod (no pod create, no repo init).
+
+        Replaces ``_init_deployment`` / ``reset`` for the resume path. We:
+          1. Build a ``K8sDeployment`` that points at the existing pod via
+             ``K8sDeployment.from_existing_pod`` (swerex upstream addition).
+          2. Skip all pod-creation / binary-install / repo-clone steps — the
+             pod's filesystem already has what the previous attempt left.
+          3. Open a fresh bash session (the old Python client's session is
+             gone; the swerex server inside the pod is still running and
+             accepts a new ``create_session`` call).
+          4. Re-apply the env variables ``SWEEnv._init_deployment`` would
+             normally set, so subsequent ``run_in_session`` calls behave the
+             same as a fresh SWEEnv.
+        """
+        handle = self._resume_handle
+        assert handle is not None  # guarded by caller
+        pod_name = handle.get("pod_name")
+        namespace = handle.get("namespace") or self._namespace or "default"
+        auth_token = handle.get("auth_token")
+        pod_ip = handle.get("pod_ip")  # optional — from_existing_pod fetches if None
+
+        if not pod_name or not auth_token:
+            raise RuntimeError(
+                f"[K8sEnvAdapter] resume_handle missing required fields: "
+                f"pod_name={pod_name!r}, auth_token={'<set>' if auth_token else None!r}"
+            )
+
+        startup_timeout = float(
+            self._config.get("startup_timeout", getattr(self.args, "startup_timeout", 1800.0))
+        )
+        runtime_timeout = float(self._config.get("runtime_timeout", 1800.0))
+
+        logger.info(f"[K8sEnvAdapter] Attaching to existing pod {pod_name} in namespace {namespace}")
+        deployment = await K8sDeployment.from_existing_pod(
+            pod_name=pod_name,
+            namespace=namespace,
+            auth_token=auth_token,
+            pod_ip=pod_ip,
+            startup_timeout=startup_timeout,
+            runtime_timeout=runtime_timeout,
+        )
+
+        # Build SWEEnv pointing at this deployment. Repo is intentionally None
+        # so SWEEnv won't try to re-clone — filesystem is already warm.
+        swe_env = SWEEnv(
+            deployment=deployment,
+            repo=None,
+            post_startup_commands=[],
+            name="swe_task",
+        )
+
+        # Open a fresh bash session — swe_env._init_deployment would normally
+        # do this. Match the params that SWEEnv uses internally.
+        await deployment.runtime.create_session(
+            CreateBashSessionRequest(
+                startup_source=["/root/.bashrc"],
+                startup_timeout=10,
+            )
+        )
+        # Re-apply the env vars that SWEEnv._init_deployment sets. Accessed
+        # via swe_env (wraps `deployment.runtime.run_in_session`) so we don't
+        # have to reach into the runtime API directly.
+        try:
+            await swe_env.set_env_variables(
+                {
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "PIP_PROGRESS_BAR": "off",
+                    "PAGER": "cat",
+                }
+            )
+        except Exception as e:
+            logger.warning(f"[K8sEnvAdapter] Failed to re-apply env vars on attach: {e}")
+
         return swe_env
 
     async def _ensure_initialized(self) -> SWEEnv:
@@ -210,6 +302,65 @@ class K8sEnvAdapter(ContainerEnv):
         await swe_env.write_file(str(path), content)
 
     # ----- cleanup -----------------------------------------------------------
+
+    def get_handle(self) -> dict | None:
+        """Snapshot pod identity for partial-rollout resume.
+
+        Returned dict feeds ``K8sEnvAdapter(resume_handle=...)`` on the next
+        attempt — see ``_attach_to_existing_pod``. Call this BEFORE ``detach``
+        while the deployment still holds references to pod_name / auth_token.
+        Returns None if the env wasn't initialised (nothing to resume from).
+        """
+        if self._swe_env is None:
+            return None
+        pod_name, namespace = self._capture_pod_identity()
+        if not pod_name:
+            return None
+        deployment = getattr(self._swe_env, "deployment", None)
+        auth_token = getattr(deployment, "_token", None) if deployment is not None else None
+        pod_ip = getattr(deployment, "_pod_ip", None) if deployment is not None else None
+        if not auth_token:
+            # Without auth_token the attached worker can't talk to the swerex
+            # server. Refuse to produce a half-usable handle.
+            logger.warning(
+                f"[K8sEnvAdapter] get_handle: pod {pod_name} has no captured auth_token; "
+                "partial-rollout resume will be impossible"
+            )
+            return None
+        return {
+            "pod_name": pod_name,
+            "namespace": namespace or "default",
+            "auth_token": auth_token,
+            "pod_ip": pod_ip,
+        }
+
+    async def detach(self) -> None:
+        """Close Python-side runtime state but LEAVE THE POD RUNNING.
+
+        Used by SWEAgentFlow on the ``SglangGenerationAborted`` path so the
+        next worker that picks up the sample can attach (see
+        ``_attach_to_existing_pod``). Pair with ``get_handle`` called just
+        before this so the handle is still populated.
+
+        NOT symmetric with ``cleanup`` — ``cleanup`` deletes the pod.
+        """
+        if self._swe_env is None:
+            return
+        self._closed = True
+        try:
+            deployment = getattr(self._swe_env, "deployment", None)
+            runtime = getattr(deployment, "runtime", None) if deployment is not None else None
+            if runtime is not None and hasattr(runtime, "close"):
+                with contextlib.suppress(Exception):
+                    await runtime.close()
+            # Null out deployment's runtime ref so subsequent ``.runtime``
+            # access raises ``DeploymentNotStartedError`` instead of handing
+            # back a closed client. Mirrors what K8sDeployment.stop does,
+            # minus the kubectl delete.
+            if deployment is not None:
+                deployment._runtime = None
+        finally:
+            self._swe_env = None
 
     async def cleanup(self):
         """Async close with hard timeout + detached ``kubectl delete`` fallback.
@@ -329,6 +480,19 @@ def _extract_sample_and_eval_flag(runtime_meta: Any) -> tuple[dict, bool]:
     return sample, is_eval_pod
 
 
+def _extract_resume_handle(runtime_meta: Any) -> dict | None:
+    """Extract ``_resume_handle`` (partial-rollout pod identity) from runtime_meta.
+
+    Set by SWEAgentFlow before calling env.start when ``sample.partial_agent_data``
+    carries a ``swe_env_handle``. ``None`` means "no resume, start a fresh pod."
+    """
+    if runtime_meta is None:
+        return None
+    if isinstance(runtime_meta, dict):
+        return runtime_meta.get("_resume_handle")
+    return getattr(runtime_meta, "_resume_handle", None)
+
+
 def _resolve_image_name(sample: dict) -> str:
     """Prefer the dataset's ``image_name`` (covers swerebench / swefactory prefixes);
     fall back to SWE-bench's ``make_test_spec`` only when the sample lacks one."""
@@ -362,9 +526,16 @@ class K8sEnvAdapterBuilder(ContainerEnvBuilder):
 
     def _make_adapter(self, runtime_meta: Any) -> K8sEnvAdapter:
         sample, is_eval_pod = _extract_sample_and_eval_flag(runtime_meta)
+        resume_handle = _extract_resume_handle(runtime_meta)
         image_name = _resolve_image_name(sample)
         if is_eval_pod:
             logger.info("[K8sEnvAdapterBuilder] Starting eval pod (skip_reset=True)")
+        if resume_handle is not None:
+            logger.info(
+                f"[K8sEnvAdapterBuilder] Partial-rollout resume: attaching to "
+                f"pod {resume_handle.get('pod_name')} in namespace "
+                f"{resume_handle.get('namespace')}"
+            )
 
         container = ContainerStartArgs(
             image=image_name,
@@ -378,6 +549,7 @@ class K8sEnvAdapterBuilder(ContainerEnvBuilder):
             namespace=self.config.get("namespace", "swe"),
             config=self.config,
             skip_reset=is_eval_pod,
+            resume_handle=resume_handle,
         )
 
     async def start(self, args: ContainerStartArgs, runtime_meta: Any = None) -> K8sEnvAdapter:
