@@ -573,7 +573,15 @@ class AgentFlowCallable:
 
     async def __call__(self, sample: Sample, reward_fn=None, is_validate=False, request_seed: int | None = None):
         # is_generate is actually is_validate flag (passed from NaiveExecutor)
-        model = SglangModel(self.engine, self.model_config, self.swe_cfg, is_validate=is_validate)
+        # For SWE flows we use the upstream-compatible variant so swe-agent's
+        # RLTokenAgent / DefaultAgent can consume ``model`` directly without an
+        # adapter (token_manager, reset_rollout_state, upstream-shaped query dict).
+        if self.swe_cfg and self.swe_cfg.get("agent"):
+            from .swe_sglang_model import SweSglangModel
+
+            model = SweSglangModel(self.engine, self.model_config, self.swe_cfg, is_validate=is_validate)
+        else:
+            model = SglangModel(self.engine, self.model_config, self.swe_cfg, is_validate=is_validate)
         # Set the current sample for seed extraction
         model.set_sample(sample)
 

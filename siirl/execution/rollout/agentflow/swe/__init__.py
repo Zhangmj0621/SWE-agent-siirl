@@ -63,12 +63,35 @@ def _run_async_in_thread(coro_fn: Callable[..., Coroutine[Any, Any, Any]], *args
     that will actually drive it — avoids the "coroutine attached to a different
     loop" / cross-loop httpx failures you'd otherwise get when SWEEnv's HTTP
     client is created on one loop and used on another.
+
+    Stale httpx client purge: ``GlobalAsyncHTTPClient`` caches its
+    ``httpx.AsyncClient`` in a ``threading.local()`` slot that is NEVER
+    cleaned up. Because our executor reuses threads across rollouts and each
+    rollout gets a brand-new event loop that we close here, a cached client
+    from a previous call is bound to an already-closed loop; the next call
+    on the same thread then raises ``RuntimeError('Event loop is closed')``
+    the instant it hits SGLang (see test12 at ~20:52). So: drop the cache
+    on entry, drop+``aclose()`` on exit.
     """
+    # Lazy import to avoid pulling http_utils at module import time.
+    from siirl.utils.net_utils.http_utils import _thread_local as _http_tl
+
+    if hasattr(_http_tl, "client"):
+        # Client bound to a previous loop (now closed). aclose() would need
+        # that dead loop — just drop the reference; httpx sockets close on GC.
+        del _http_tl.client
+
     thread_loop = asyncio.new_event_loop()
     try:
         asyncio.set_event_loop(thread_loop)
         return thread_loop.run_until_complete(coro_fn(*args, **kwargs))
     finally:
+        if hasattr(_http_tl, "client"):
+            try:
+                thread_loop.run_until_complete(_http_tl.client.aclose())
+            except Exception:
+                pass
+            del _http_tl.client
         try:
             thread_loop.close()
         except Exception:  # pragma: no cover - defensive cleanup

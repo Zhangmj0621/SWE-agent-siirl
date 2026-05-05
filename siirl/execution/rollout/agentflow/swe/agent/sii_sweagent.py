@@ -93,98 +93,6 @@ class StateWithTokenizer:
         self.tokenizer = tokenizer
 
 
-class ModelAdapterForSWE:
-    """
-    Adapter to make siirl Model compatible with SWE-agent's AbstractModel.
-
-    This adapter wraps a siirl Model and exposes the async ``query()`` method
-    that upstream ``RLTokenAgent.forward`` awaits directly (no sync bridge,
-    no nested event loop).
-    """
-
-    def __init__(self, siirl_model: Model):
-        """
-        Initialize the adapter.
-
-        Args:
-            siirl_model: siirl Model instance with async ``query()``.
-        """
-        self._model = siirl_model
-
-        # Create stats object with model_dump() method for compatibility
-        # swe-agent expects stats.model_dump() to serialize stats
-        class ModelStats:
-            def __init__(self):
-                self.total_cost = 0.0
-
-            def model_dump(self):
-                """Return stats as a dict for serialization."""
-                return {"total_cost": self.total_cost}
-
-        self.stats = ModelStats()
-
-    @property
-    def tokenizer(self):
-        return getattr(self._model, "tokenizer", None)
-
-    @property
-    def config(self):
-        """Return a minimal config object for compatibility."""
-        return type(
-            "obj",
-            (object,),
-            {
-                "model_name": getattr(self._model, "name", str(type(self._model).__name__)),
-                "provider": "siirl",
-            },
-        )()
-
-    async def query(
-        self,
-        history: list[int] | list[dict],
-        action_prompt: str = "> ",
-    ) -> dict:
-        """Query method matching upstream SWE-agent ``AbstractModel.query`` (async).
-
-        Awaits the siirl ``Model.query`` and packages the response in the dict
-        shape expected by upstream ``RLTokenAgent.forward`` /
-        ``DefaultAgent.forward``.
-        """
-        # Normalise history into the (input_tokens, messages) pair siirl Model expects.
-        if isinstance(history, list) and history and isinstance(history[0], int):
-            input_tokens = list(history)
-            messages: list[dict] = []
-        else:
-            messages = history if isinstance(history, list) else []
-            input_tokens = []
-
-        response = await self._model.query(
-            input_tokens=input_tokens,
-            messages=messages,
-            max_tokens=None,
-            timeout=None,
-        )
-
-        raw = response.raw if isinstance(response.raw, dict) else {}
-        result: dict[str, Any] = {
-            "message": response.output,
-            "output_tokens": response.output_tokens,
-            "log_probs": response.log_probs,
-            # Upstream RLTokenAgent.forward reads `rollout_log_probs` directly.
-            # siirl Model reuses `log_probs` for the same purpose; some backends
-            # also surface it under `raw["rollout_log_probs"]`.
-            "rollout_log_probs": raw.get("rollout_log_probs") or response.log_probs or [],
-            "rollout_routed_experts": raw.get("rollout_routed_experts", "") or "",
-        }
-        if response.tool_calls:
-            result["tool_calls"] = response.tool_calls
-        if response.reasoning_content:
-            result["reasoning_content"] = response.reasoning_content
-        if response.thinking_blocks:
-            result["thinking_blocks"] = response.thinking_blocks
-        return result
-
-
 class RLTokenAgentWrapper(AbstractAgent):
     """
     Wrapper that uses the original RLTokenAgent from Agentic_RL.
@@ -222,9 +130,6 @@ class RLTokenAgentWrapper(AbstractAgent):
         else:
             raise ValueError(f"Model {type(model).__name__} must have 'tokenizer' attribute for RLTokenAgent")
 
-        # Wrap siirl Model to AbstractModel interface
-        wrapped_model = ModelAdapterForSWE(model)
-
         # Create original RLTokenAgent with state
         # Note: original RLTokenAgent uses ToolHandler, not SiiToolHandler
         # We need to convert ToolHandler config to ToolHandler
@@ -232,11 +137,18 @@ class RLTokenAgentWrapper(AbstractAgent):
 
         tool_handler = ToolHandler(tools.config)
 
+        # ``model`` is a ``SweSglangModel`` — a faithful async port of the
+        # pre-6564c63 ``query_for_swe`` wrapper. Upstream ``RLTokenAgent``
+        # reads ``output.get("new_prompt_token_ids", [])`` etc. with defaults,
+        # so missing keys (we don't set them) degrade cleanly to empty
+        # ``sample.tokens / loss_mask``. Enabling proper RL token tracking is
+        # a separate workstream — do NOT bolt it onto this wrapper, the
+        # incremental-tokenise attempt is what caused the reward regression.
         self._agent = OriginalRLTokenAgent(
             templates=templates,
             tools=tool_handler,
             history_processors=history_processors,
-            model=wrapped_model,  # Use wrapped model compatible with AbstractModel
+            model=model,
             max_requeries=max_requeries,
             name=name,
             _catch_errors=_catch_errors,
