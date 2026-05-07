@@ -59,6 +59,8 @@ class SGLangModelConfig(BaseModel):
 
     tool_parser: str | None = None
 
+    message_separator: str = "\n"
+
 
 @dataclass
 class InstanceStats:

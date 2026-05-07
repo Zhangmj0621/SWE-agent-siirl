@@ -138,6 +138,35 @@ class SweSglangModel:
         self._processed_message_count = 0
         self.reset_stats()
 
+    def commit_step_tokens(
+        self,
+        *,
+        new_prompt_token_ids: list[int] | None,
+        new_prompt_logprobs: list[float] | None,
+        output_tokens: list[int] | None,
+        output_logprobs: list[float] | None,
+        history_len_at_query: int | None,
+    ) -> None:
+        """Promote a successful _single_query's tokens into token_manager.
+
+        Called exactly once per step from RLTokenAgent.add_step_to_history —
+        i.e., after forward_with_handling returned a final StepOutput, so
+        retried (failed) attempts never reach this path and token_manager
+        stays consistent with self.history.
+        """
+        new_prompt_token_ids = list(new_prompt_token_ids or [])
+        output_tokens = list(output_tokens or [])
+        if new_prompt_token_ids:
+            if not new_prompt_logprobs or len(new_prompt_logprobs) != len(new_prompt_token_ids):
+                new_prompt_logprobs = [0.0] * len(new_prompt_token_ids)
+            self.token_manager.add_prompt(new_prompt_token_ids, list(new_prompt_logprobs))
+        if output_tokens:
+            if not output_logprobs or len(output_logprobs) != len(output_tokens):
+                output_logprobs = [0.0] * len(output_tokens)
+            self.token_manager.add_response(output_tokens, list(output_logprobs))
+        if history_len_at_query is not None:
+            self._processed_message_count = int(history_len_at_query) + 1
+
     # ------------------------------------------------------------------ #
     # Limits / delays / seed — siirl-native
     # ------------------------------------------------------------------ #
@@ -279,10 +308,32 @@ class SweSglangModel:
                 fake_messages,
                 add_generation_prompt=False,
             )
-            # siirl's SGLangModelConfig has no message_separator; default "".
-            return full_ids[len(prefix_ids) :]
+            # Prepend message_separator so the boundary between token_manager's
+            # end (which finishes at <|im_end|> from the sampler) and the new
+            # delta's start (<|im_start|>...) matches the chat-template format.
+            # Sampler does not emit the trailing \n after <|im_end|>, so we put
+            # it back here. Config default is "\n"; set to "" to disable.
+            separator_ids: list[int] = []
+            sep = getattr(self.config, "message_separator", "\n")
+            if sep:
+                separator_ids = list(
+                    self.tokenizer.encode(sep, add_special_tokens=False)
+                )
+            return separator_ids + full_ids[len(prefix_ids) :]
 
         return None
+
+    def _validate_incremental_tokens(self, history: History, new_prompt_token_ids: list[int] | None) -> None:
+        # if not self.config.debug_check_incremental_tokens:
+        #     return
+        expected = self._tokenize_messages(
+            self._history_to_messages(history), add_generation_prompt=True, tools=self.tools.tools
+        )
+        actual = self.token_manager.token_ids + (new_prompt_token_ids or [])
+        if expected != actual:
+            raise AssertionError(
+                f"Incremental tokenization drift detected: expected {len(expected)} tokens, got {len(actual)}"
+            )
 
     # ------------------------------------------------------------------ #
     # Response parsing
@@ -296,16 +347,151 @@ class SweSglangModel:
     # token strings, which are hardcoded anyway.
     # ------------------------------------------------------------------ #
 
-    _THINK_START = "<think>"
-    _THINK_END = "</think>"
+    def parse_tools(self, response: str, tools: list[dict[str, Any]], parser: str = "qwen25"):
+        """
+        This function mimics the function call parser API from
+        https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/http_server.py#L952
+        But running locally
+        """
+        import uuid
+
+        from sglang.srt.function_call.function_call_parser import FunctionCallParser
+        from sglang.srt.managers.io_struct import Function as SGLangFunction
+        from sglang.srt.managers.io_struct import Tool
+
+        tools_list = [
+            Tool(
+                function=SGLangFunction(
+                    name=tool["function"]["name"],
+                    description=tool["function"]["description"],
+                    parameters=tool["function"]["parameters"],
+                ),
+                type=tool["type"],
+            )
+            for tool in tools
+        ]
+        parser = FunctionCallParser(tools=tools_list, tool_call_parser=parser)
+
+        # Strip leading whitespace to fix parser issues
+        response = response.lstrip()
+
+        normal_text, calls = parser.parse_non_stream(response)
+
+        tool_calls: list[dict[str, Any]] = []
+
+        for call in calls:
+            # SGLang parser output may vary a bit; normalize defensively.
+            # Handle Pydantic v2 (model_dump), Pydantic v1 (dict), and plain dict
+            if hasattr(call, "model_dump"):
+                d = call.model_dump()
+            elif hasattr(call, "dict"):
+                d = call.dict()
+            elif isinstance(call, dict):
+                d = call
+            else:
+                logger.warning(f"[SglangModel] Unexpected call type: {type(call)}, skipping")
+                continue
+            fn_block = d.get("function") if isinstance(d.get("function"), dict) else {}
+            if not isinstance(fn_block, dict):
+                fn_block = {}
+
+            name = None
+            if isinstance(fn_block.get("name"), str) and fn_block.get("name"):
+                name = fn_block.get("name")
+            elif isinstance(d.get("name"), str) and d.get("name"):
+                name = d.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+
+            args = None
+            if "arguments" in fn_block:
+                args = fn_block.get("arguments")
+            elif "parameters" in fn_block:
+                args = fn_block.get("parameters")
+            elif "arguments" in d:
+                args = d.get("arguments")
+            elif "parameters" in d:
+                args = d.get("parameters")
+            if args is None:
+                args = "{}"
+            if isinstance(args, dict):
+                args = json.dumps(args, ensure_ascii=False)
+            if not isinstance(args, str):
+                args = str(args)
+
+            tool_index = -1
+            if isinstance(fn_block.get("tool_index"), int):
+                tool_index = fn_block["tool_index"]
+            elif isinstance(d.get("tool_index"), int):
+                tool_index = d["tool_index"]
+            elif isinstance(d.get("index"), int):
+                tool_index = d["index"]
+
+            call_id = d.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                call_id = f"call_{uuid.uuid4().hex[:24]}"
+
+            tool_calls.append(
+                {
+                    "index": tool_index,
+                    "function": {"name": name, "arguments": args},
+                    "id": call_id,
+                    "type": "function",
+                }
+            )
+
+        result = {"normal_text": normal_text, "calls": tool_calls}
+
+        return result
+
+    def parse_normal_text(self, text: str, parser: str = "qwen25") -> tuple[str | None, str | None]:
+        """Parse model normal text into (content, reasoning_content).
+
+        For parser == "qwen25":
+        - reasoning_content: content inside the first <think> block (if present)
+        - content: text after the closing </think> tag (if present)
+
+        Either field may be missing.
+        """
+        assert parser in ["qwen25"], f"Unsupported parser: {parser}"
+
+        if not isinstance(text, str) or not text:
+            return None, None
+
+        if parser == "qwen25":
+            open_tag = "<think>"
+            close_tag = "</think>"
+            start = text.find(open_tag)
+            if start == -1:
+                # No think tag: treat the whole text as content.
+                return text, None
+
+            # Extract reasoning
+            after_open = start + len(open_tag)
+            end = text.find(close_tag, after_open)
+            if end == -1:
+                # Unterminated think: everything after <think> is reasoning; no content.
+                reasoning = text[after_open:].strip()
+                return None, (reasoning if reasoning else None)
+
+            reasoning = text[after_open:end].strip()
+            after_close = end + len(close_tag)
+            # If </think> exists, content starts from the first non-newline char after it.
+            while after_close < len(text) and text[after_close] in ("\n", "\r"):
+                after_close += 1
+            content = text[after_close:]
+
+            return (content if content else None), (reasoning if reasoning else None)
+
+        # Unreachable due to assert; keep for future extension.
+        return text, None
 
     def parse_response(self, text: str) -> dict[str, Any]:
-        parsed = _parse_response_local(
+        parsed = parse_tool_calls_with_sglang(
             text=text,
-            tools=self.tools.tools if self.tools is not None else [],
+            tools=self.tools.tools,
             tool_call_parser=self.tool_call_parser,
-            think_start=self._THINK_START,
-            think_end=self._THINK_END,
+            reasoning_parser=self.reasoning_parser,
         )
         output: dict[str, Any] = {"message": parsed["message"]}
         if parsed.get("tool_calls"):
@@ -345,6 +531,7 @@ class SweSglangModel:
     ) -> list[dict[str, Any]]:
         await self._sleep()
         new_prompt_token_ids = self.tokenize_prompt_messages(history)
+        # self._validate_incremental_tokens(history, new_prompt_token_ids)
         input_ids = self.token_manager.token_ids + (new_prompt_token_ids or [])
         input_tokens = len(input_ids)
 
@@ -381,34 +568,27 @@ class SweSglangModel:
 
         output_tokens = list(output_tokens or [])
         output_logprobs = list(rollout_log_probs or [])
-        if len(output_logprobs) < len(output_tokens):
-            output_logprobs.extend([0.0] * (len(output_tokens) - len(output_logprobs)))
-        elif len(output_logprobs) > len(output_tokens):
-            output_logprobs = output_logprobs[: len(output_tokens)]
 
-        # siirl engine doesn't surface input_token_logprobs — fill zeros,
-        # matching upstream's fallback (models.py:1180).
-        new_prompt_logprobs = (
-            [0.0] * len(new_prompt_token_ids) if new_prompt_token_ids else None
-        )
+        # zmj TODO: only return fake new_prompt_logprobs now since it is not used
+        new_prompt_logprobs = [0.0] * len(new_prompt_token_ids) if new_prompt_token_ids else []
 
-        if new_prompt_token_ids:
-            self.token_manager.add_prompt(new_prompt_token_ids, new_prompt_logprobs)
-        if output_tokens:
-            self.token_manager.add_response(output_tokens, output_logprobs)
+        # NOTE: Do NOT commit token_manager here — that used to happen inline and
+        # caused retries (FormatError etc.) to see a token_manager contaminated
+        # by the failed turn, with no <|im_start|>assistant\n tail. Instead,
+        # RLTokenAgent.add_step_to_history calls commit_step_tokens() after
+        # forward_with_handling returns successfully. Retries remain idempotent
+        # because token_manager / _processed_message_count are untouched here.
 
-        # Routed experts type: upstream keeps base64 string; engine already
-        # decoded to ndarray — re-encode for upstream parity.
         routed_experts = _routed_experts_to_b64(routed_experts_raw)
 
-        text = text if isinstance(text, str) else str(text)
         parsed = self.parse_response(text)
-        self._processed_message_count = len(history) + 1
 
         output: dict[str, Any] = {
             "message": parsed["message"],
+            "output": parsed["message"],
             "new_prompt_token_ids": new_prompt_token_ids or [],
-            "new_prompt_logprobs": new_prompt_logprobs or [],
+            "new_prompt_logprobs": new_prompt_logprobs,
+            "history_len_at_query": len(history),
             "output_tokens": output_tokens,
             "rollout_log_probs": output_logprobs,
             "rollout_routed_experts": routed_experts,
@@ -417,9 +597,12 @@ class SweSglangModel:
             output["tool_calls"] = parsed["tool_calls"]
         if parsed.get("reasoning_content"):
             output["reasoning_content"] = parsed["reasoning_content"]
+            output["thinking_blocks"] = parsed["reasoning_content"]
+
+        # Update statisticsxw
+        self.last_query_time = time.time()
 
         await self._update_stats(input_tokens=input_tokens, output_tokens=len(output_tokens), cost=0.0)
-        self.last_query_time = time.time()
         return [output]
 
     async def _query(
@@ -549,152 +732,6 @@ class SweSglangModel:
             buf_lp.append(float(lp))
         _flush()
 
-
-def _parse_response_local(
-    text: str,
-    tools: list[dict],
-    tool_call_parser: str,
-    think_start: str,
-    think_end: str,
-) -> dict[str, Any]:
-    """Parse assistant output into ``{message, tool_calls, reasoning_content}``.
-
-    Structure mirrors upstream ``parse_tool_calls_with_sglang``
-    (sweagent/agent/response_parsing.py:31). Two deviations:
-
-    1. ``<think>`` / ``</think>`` tokens are hardcoded instead of being
-       fetched from ``sglang.srt.parser.reasoning_parser.ReasoningParser``
-       — siirl's sglang build rejects ``qwen25`` there.
-    2. Tool-call parsing uses the **old sglang API path**
-       (``sglang.srt.managers.io_struct.{Tool, Function}``) with the
-       defensive ``model_dump() / dict() / isinstance(dict)`` fallback for
-       call shape — lifted verbatim from siirl's legacy
-       ``SglangModel.parse_tools`` (agent_flow.py:212-309), which was known
-       to work across sglang versions in this environment. Upstream's
-       ``sglang.srt.entrypoints.openai.protocol`` path is the "new" API and
-       not guaranteed stable on the training image.
-    """
-    import json
-    import uuid
-
-    if not isinstance(text, str) or not text:
-        return {"message": "", "tool_calls": None, "reasoning_content": None}
-
-    reasoning_content, content_text = _detect_think_and_return_ori_think(text, think_start, think_end)
-
-    if reasoning_content:
-        reasoning_content = reasoning_content.replace(think_start, "", 1)
-        if reasoning_content.endswith(think_end):
-            reasoning_content = reasoning_content[: -len(think_end)]
-        reasoning_content = reasoning_content.strip() or None
-    else:
-        reasoning_content = None
-
-    if not tools or not content_text:
-        return {
-            "message": content_text,
-            "tool_calls": None,
-            "reasoning_content": reasoning_content,
-        }
-
-    try:
-        from sglang.srt.function_call.function_call_parser import FunctionCallParser
-        from sglang.srt.managers.io_struct import Function as SGLangFunction
-        from sglang.srt.managers.io_struct import Tool
-    except ImportError as exc:
-        logger.warning(f"[SweSglangModel] tool-call parser unavailable: {exc}")
-        return {
-            "message": content_text,
-            "tool_calls": None,
-            "reasoning_content": reasoning_content,
-        }
-
-    tools_list = [
-        Tool(
-            function=SGLangFunction(
-                name=tool["function"]["name"],
-                description=tool["function"]["description"],
-                parameters=tool["function"]["parameters"],
-            ),
-            type=tool["type"],
-        )
-        for tool in tools
-    ]
-    parser = FunctionCallParser(tools=tools_list, tool_call_parser=tool_call_parser)
-
-    # lstrip like legacy parse_tools (avoids parser quirks on leading ws)
-    stripped = content_text.lstrip()
-
-    try:
-        normal_text, call_info_list = parser.parse_non_stream(stripped)
-    except Exception as exc:
-        logger.error(f"[SweSglangModel] tool-call parsing error: {exc}")
-        return {
-            "message": content_text,
-            "tool_calls": None,
-            "reasoning_content": reasoning_content,
-        }
-
-    tool_calls: list[dict[str, Any]] = []
-    for call in call_info_list:
-        # Defensive: call shape differs across sglang versions — pydantic
-        # (v2 model_dump / v1 dict) or plain dict.
-        if hasattr(call, "model_dump"):
-            d = call.model_dump()
-        elif hasattr(call, "dict"):
-            d = call.dict()
-        elif isinstance(call, dict):
-            d = call
-        else:
-            logger.warning(f"[SweSglangModel] unexpected call type: {type(call)}, skipping")
-            continue
-        fn_block = d.get("function") if isinstance(d.get("function"), dict) else {}
-        if not isinstance(fn_block, dict):
-            fn_block = {}
-
-        name = None
-        if isinstance(fn_block.get("name"), str) and fn_block.get("name"):
-            name = fn_block["name"]
-        elif isinstance(d.get("name"), str) and d.get("name"):
-            name = d["name"]
-        if not isinstance(name, str) or not name:
-            continue
-
-        args: Any = None
-        if "arguments" in fn_block:
-            args = fn_block.get("arguments")
-        elif "parameters" in fn_block:
-            args = fn_block.get("parameters")
-        elif "arguments" in d:
-            args = d.get("arguments")
-        elif "parameters" in d:
-            args = d.get("parameters")
-        if args is None:
-            args = "{}"
-        if isinstance(args, dict):
-            args = json.dumps(args, ensure_ascii=False)
-        if not isinstance(args, str):
-            args = str(args)
-
-        call_id = d.get("id")
-        if not isinstance(call_id, str) or not call_id:
-            call_id = f"call_{uuid.uuid4().hex[:24]}"
-
-        tool_calls.append(
-            {
-                "type": "function",
-                "id": call_id,
-                "function": {"name": name, "arguments": args},
-            }
-        )
-
-    return {
-        "message": normal_text if tool_calls else content_text,
-        "tool_calls": tool_calls or None,
-        "reasoning_content": reasoning_content,
-    }
-
-
 def _routed_experts_to_b64(routed_experts: Any) -> str:
     """Engine decodes routed_experts to ndarray; upstream carries it as base64 str."""
     if routed_experts is None:
@@ -706,3 +743,90 @@ def _routed_experts_to_b64(routed_experts: Any) -> str:
     if isinstance(routed_experts, (bytes, bytearray)):
         return base64.b64encode(bytes(routed_experts)).decode("ascii")
     return ""
+
+def parse_tool_calls_with_sglang(
+    text: str,
+    tools: list[dict],
+    tool_call_parser: str,
+    reasoning_parser: str,
+) -> dict:
+    from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
+    from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
+    from sglang.srt.function_call.function_call_parser import FunctionCallParser
+    
+    import json, traceback, uuid
+
+    if not isinstance(text, str) or not text:
+        return {"message": "", "tool_calls": None, "reasoning_content": None}
+
+    think_start_token = "<think>"
+    think_end_token = "</think>"
+
+    reasoning_content, content_text = _detect_think_and_return_ori_think(
+        text,
+        think_start_token,
+        think_end_token,
+    )
+
+    if reasoning_content:
+        if think_start_token:
+            reasoning_content = reasoning_content.replace(think_start_token, "", 1)
+        if reasoning_content.endswith(think_end_token):
+            reasoning_content = reasoning_content[: -len(think_end_token)]
+        reasoning_content = reasoning_content.strip() or None
+    else:
+        reasoning_content = None
+
+    if not tools or not content_text:
+        return {
+            "message": content_text,
+            "tool_calls": None,
+            "reasoning_content": reasoning_content,
+        }
+
+    sgl_tools = [
+        SglTool(type=tool.get("type", "function"), function=SglFunction(**tool["function"]))
+        for tool in tools
+    ]
+    parser = FunctionCallParser(sgl_tools, tool_call_parser)
+
+    try:
+        if parser.has_tool_call(content_text):
+            message_text, call_info_list = parser.parse_non_stream(content_text)
+            tool_calls = []
+            for call in call_info_list:
+                name = call.function.name if hasattr(call, "function") else call.name
+                arguments = (
+                    call.function.arguments
+                    if hasattr(call, "function") and hasattr(call.function, "arguments")
+                    else getattr(call, "arguments", getattr(call, "parameters", "{}"))
+                )
+                if isinstance(arguments, dict):
+                    arguments = json.dumps(arguments, ensure_ascii=False)
+                elif not isinstance(arguments, str):
+                    arguments = str(arguments)
+                tool_calls.append(
+                    {
+                        "type": "function",
+                        "id": getattr(call, "id", None) or f"call_{uuid.uuid4().hex[:24]}",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments,
+                        },
+                    }
+                )
+            return {
+                "message": message_text,
+                "tool_calls": tool_calls or None,
+                "reasoning_content": reasoning_content,
+            }
+    except Exception as exc:
+        logger.error("Tool call parsing error: %s", exc)
+        traceback.print_exc()
+
+    return {
+        "message": content_text,
+        "tool_calls": None,
+        "reasoning_content": reasoning_content,
+    }
+    
