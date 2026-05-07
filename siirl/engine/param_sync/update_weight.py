@@ -157,7 +157,7 @@ class ParamSyncDistributed(ParamSyncInterface):
         self._sync_failure_count = 0
 
     def _rpc_timeout_s(self) -> int:
-        return max(1, int(getattr(self.config.trainer, "param_sync_rpc_timeout_s", 120)))
+        return 1200
 
     def _sync_metric_group_name(self) -> str:
         return getattr(self, "_group_name", self.__class__.__name__)
