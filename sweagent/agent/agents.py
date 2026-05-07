@@ -1392,6 +1392,20 @@ class RLTokenAgent(DefaultAgent):
         await super().setup(env=env, problem_statement=problem_statement, output_dir=output_dir)
 
     def add_step_to_history(self, step: StepOutput) -> None:
+        # Deferred token_manager commit: only runs once per step, after
+        # forward_with_handling has converged on a final StepOutput. Retried
+        # (failed) forward attempts never reach here, so token_manager and
+        # _processed_message_count stay consistent with self.history.
+        commit = step.extra_info.pop("_token_commit", None) if step.extra_info else None
+        if commit and getattr(self.model, "commit_step_tokens", None) is not None:
+            self.model.commit_step_tokens(
+                new_prompt_token_ids=commit.get("new_prompt_token_ids") or [],
+                new_prompt_logprobs=commit.get("new_prompt_logprobs") or [],
+                output_tokens=commit.get("output_tokens") or [],
+                output_logprobs=commit.get("output_logprobs") or [],
+                history_len_at_query=commit.get("history_len_at_query"),
+            )
+
         content = step.output if not step.tool_calls else (step.thought or step.output)
         if content is None:
             content = ""
@@ -1457,10 +1471,11 @@ class RLTokenAgent(DefaultAgent):
             else:
                 output = await self.model.query(history)  # type: ignore[arg-type]
             step.output = output["message"]
+            new_prompt_token_ids = output.get("new_prompt_token_ids", []) or []
+            if not isinstance(new_prompt_token_ids, list):
+                new_prompt_token_ids = []
             if not self.init_input_ids:
-                new_prompt_token_ids = output.get("new_prompt_token_ids", []) or []
-                if isinstance(new_prompt_token_ids, list):
-                    self.init_input_ids = list(new_prompt_token_ids)
+                self.init_input_ids = list(new_prompt_token_ids)
             step.output_tokens = output.get("output_tokens", []) or []
             step.thinking_blocks = output.get("thinking_blocks", [])
             step.reasoning_content = output.get("reasoning_content", None)
@@ -1468,6 +1483,15 @@ class RLTokenAgent(DefaultAgent):
             raw_experts = output.get("rollout_routed_experts", "") or ""
             if raw_experts:
                 self._routed_experts_raw = raw_experts
+            # Stash the data needed to commit this turn into model.token_manager.
+            # Deferred until add_step_to_history so retries don't pollute state.
+            step.extra_info["_token_commit"] = {
+                "new_prompt_token_ids": list(new_prompt_token_ids),
+                "new_prompt_logprobs": list(output.get("new_prompt_logprobs", []) or []),
+                "output_tokens": list(step.output_tokens),
+                "output_logprobs": list(step.rollout_log_probs),
+                "history_len_at_query": output.get("history_len_at_query"),
+            }
             step.thought, step.action = self.tools.parse_actions(output)
             if output.get("tool_calls") is not None:
                 step.tool_call_ids = [call["id"] for call in output["tool_calls"]]

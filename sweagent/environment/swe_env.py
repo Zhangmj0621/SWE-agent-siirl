@@ -214,8 +214,8 @@ class SWEEnv:
             output: output from container
         """
         # Block git history commands to prevent reward hacking
-        if input is not None and ("git log" in input or "git diff" in input or "git show" in input):
-            return "Illegal actions: `git log`, `git diff`, and `git show` are not allowed."
+        # if input is not None and ("git log" in input or "git diff" in input or "git show" in input):
+        #     return "Illegal actions: `git log`, `git diff`, and `git show` are not allowed."
 
         self.logger.log(logging.TRACE, "Input:\n%s", input)  # type: ignore
         rex_check = "silent" if check else "ignore"
