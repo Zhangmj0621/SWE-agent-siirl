@@ -94,6 +94,28 @@ class RolloutWorker:
             "updated_at": 0.0,
         }
 
+    def _logical_engine_rank(self, num_engine: int) -> int:
+        tp_size = max(1, int(self.config.rollout.tensor_model_parallel_size))
+        n_gpus_per_node = max(1, int(self.config.trainer.n_gpus_per_node))
+        gpus_per_rollout = min(tp_size, n_gpus_per_node)
+        rollout_per_tp_group = max(1, tp_size // gpus_per_rollout)
+        # In cross-node TP, executor-running TP0 workers have strided worker ranks.
+        engine_rank = self.rank // rollout_per_tp_group
+        if engine_rank >= num_engine:
+            engine_rank = self.rank % num_engine
+        return engine_rank
+
+    def _train_batch_size_for_engine(self, num_engine: int) -> int:
+        num_engine = int(num_engine)
+        if num_engine <= 0:
+            raise ValueError(f"num_engine must be positive, got {num_engine}")
+
+        train_batch_size = int(self.config.data.train_batch_size)
+        base_batch_size = train_batch_size // num_engine
+        remainder = train_batch_size % num_engine
+        extra = 1 if self._logical_engine_rank(num_engine) < remainder else 0
+        return base_batch_size + extra
+
     def _build_executor(self, data_coordinator, num_engine):
         executor_path = self.config.rollout.executor_module
         if executor_path == "naive":
@@ -108,7 +130,7 @@ class RolloutWorker:
             self.config,
             data_coordinator,
             self.engine,
-            self.config.data.train_batch_size // num_engine,
+            self._train_batch_size_for_engine(num_engine),
             dp_rank=self.rank,
         )
 
