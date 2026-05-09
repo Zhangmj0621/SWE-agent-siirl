@@ -307,8 +307,10 @@ class E2BSWEEnvShim:
             cmds = [f"cd /{rn}", "export ROOT=$(pwd -P)", *self.repo.get_reset_commands()]
             await self.communicate(" && ".join(cmds), check="raise", timeout=180.0, error_msg="Failed to clean repository")
             self._cwd = f"/{rn}"
+            self._exports["ROOT"] = f"/{rn}"
         else:
             self._cwd = "/testbed"
+            self._exports["ROOT"] = "/testbed"
 
 
 class E2BRLContainerEnv(ContainerEnv):
