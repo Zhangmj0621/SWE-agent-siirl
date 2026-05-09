@@ -6,6 +6,12 @@
   "runtime_timeout": 1800.0
   "close_timeout": 30.0
   "install_sweagent_tools_adapter": true
+  "install_sweagent_tools": true
+  "sweagent_tools_host_path": "siirl/3rdparty/swe-agent/tools"
+  "sweagent_bundles":
+    - "registry"
+    - "edit_anthropic"
+    - "review_on_submit_m"
   "template_map":
     "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest": "sweb-eval-x86-64-astropy-1776-astropy-12907"
     "swebench/sweb.eval.x86_64.astropy_1776_astropy-13033:latest": "sweb-eval-x86-64-astropy-1776-astropy-13033"
