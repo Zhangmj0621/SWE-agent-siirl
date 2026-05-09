@@ -103,10 +103,10 @@ def _run_async_in_thread(coro_fn: Callable[..., Coroutine[Any, Any, Any]], *args
 def _inject_resume_handle(runtime_meta: Any, handle: dict) -> Any:
     """Return a runtime_meta variant carrying ``_resume_handle=handle``.
 
-    K8sEnvAdapter's builder reads ``_resume_handle`` from runtime_meta and
-    switches into attach-to-existing-pod mode. This helper preserves the
-    shape of runtime_meta (dict vs dataclass) and avoids mutating the
-    caller's object.
+    ``K8sEnvAdapterBuilder`` / ``E2BEnvBuilder`` read ``_resume_handle`` from
+    runtime_meta and reattach (same pod / ``Sandbox.connect``) instead of
+    provisioning a fresh environment. This helper preserves the shape of
+    runtime_meta (dict vs dataclass) and avoids mutating the caller's object.
     """
     if runtime_meta is None:
         return {"_resume_handle": handle}
@@ -173,6 +173,7 @@ BUILTIN_PROVIDERS = {
         # Legacy K8sEnvBuilder (custom implementation, 1895 lines)
         "k8s_legacy": ".swe.environment.k8s:K8sEnvBuilder",
         "kr8s": ".swe.environment.kr8s:Kr8sEnvBuilder",
+        "e2b": ".swe.environment.e2b:E2BEnvBuilder",
     },
     "runtime": {
         "swefactory": ".swe.runtime.swefactory:SWEFactoryBuiler",
@@ -201,7 +202,7 @@ def agentflow(config: dict) -> AgentFlow:
         "name": "swe.agentflow",  # name or path; must be specified
         "agent": {"name":"sweagent"},  # train 时使用的 agent
         "validate_agent": {"name":"litellm_agent"},  # validate 时使用的 agent（可选）
-        "environment": {"name":"k8s"},  # environment config
+        "environment": {"name":"e2b"},  # or "k8s"; see example sweagent_config_train.yaml
         "runtime": {"name":"swebench_agent"},  # runtime config
         "thread_pool": {"max_workers": 128},  # optional thread pool config
         "python_path": ["/root/math/custom_agents"],  # optional import paths
@@ -374,8 +375,9 @@ class SWEAgentFlow(AgentFlow):
           - The wrapper (``RLTokenAgentWrapper.run``) catches it, snapshots
             agent + model state into ``m.agent.partial_state``, and re-raises.
           - We catch it here, pack the wrapper snapshot + env handle into
-            ``m.rollout.partial_agent_data``, then ``detach`` — the pod
-            stays alive so the next worker's resume can attach. The outer
+            ``m.rollout.partial_agent_data``, then ``detach`` — the remote
+            environment stays alive (K8s pod / E2B sandbox) so the next worker's
+            resume can attach. The outer
             ``AgentFlowCallable.__call__`` copies ``partial_agent_data``
             onto the siirl Sample and raises ``RolloutGenerationAborted``.
           - If ``get_handle`` or ``detach`` fails, we fall through to
@@ -389,8 +391,8 @@ class SWEAgentFlow(AgentFlow):
         )
         logger.debug(f"[SWEAgentFlow.generate] m.agent type: {type(m.agent)}")
 
-        # Inject the resume handle into runtime_meta so K8sEnvAdapter's
-        # builder attaches to the existing pod instead of creating a new one.
+        # Inject the resume handle into runtime_meta so the env builder reattaches:
+        # K8sEnvAdapter → existing pod; E2BEnvBuilder → ``Sandbox.connect(sandbox_id)``.
         runtime_meta = m.data.runtime_meta
         if partial and partial.get("swe_env_handle"):
             runtime_meta = _inject_resume_handle(runtime_meta, partial["swe_env_handle"])
@@ -443,9 +445,9 @@ class SWEAgentFlow(AgentFlow):
         finally:
             if env is not None:
                 if aborted:
-                    # Keep pod alive; close Python client only. Fallback to
+                    # Keep remote env alive; close Python client only. Fallback to
                     # full cleanup if detach itself fails — we'd rather lose
-                    # the partial than leak a pod into the cluster.
+                    # the partial than leak a pod / stray sandbox.
                     try:
                         await env.detach()
                     except Exception as e:
