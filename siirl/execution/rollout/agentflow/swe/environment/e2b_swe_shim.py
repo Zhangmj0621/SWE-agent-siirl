@@ -194,7 +194,7 @@ class E2BSWEEnvShim:
         self.repo = repo
         self.name = "main"
         self._cwd = initial_cwd
-        self._exports: dict[str, str] = {}
+        self._exports: dict[str, str] = {"ROOT": initial_cwd}
         self.deployment = _E2BDeploymentShim(self)
 
     @property
