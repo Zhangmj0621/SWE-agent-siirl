@@ -7,6 +7,13 @@
   "close_timeout": 30.0
   "template_map":
     "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest": "sweb-eval-x86-64-astropy-1776-astropy-12907"
+    "swebench/sweb.eval.x86_64.astropy_1776_astropy-13033:latest": "sweb-eval-x86-64-astropy-1776-astropy-13033"
+    "swebench/sweb.eval.x86_64.astropy_1776_astropy-13236:latest": "sweb-eval-x86-64-astropy-1776-astropy-13236"
+    "swebench/sweb.eval.x86_64.astropy_1776_astropy-13398:latest": "sweb-eval-x86-64-astropy-1776-astropy-13398"
+    "swebench/sweb.eval.x86_64.astropy_1776_astropy-13453:latest": "sweb-eval-x86-64-astropy-1776-astropy-13453"
+    "swebench/sweb.eval.x86_64.astropy_1776_astropy-13579:latest": "sweb-eval-x86-64-astropy-1776-astropy-13579"
+    "swebench/sweb.eval.x86_64.astropy_1776_astropy-13977:latest": "sweb-eval-x86-64-astropy-1776-astropy-13977"
+    "swebench/sweb.eval.x86_64.astropy_1776_astropy-14096:latest": "sweb-eval-x86-64-astropy-1776-astropy-14096"
 "runtime":
   "name": swebench_agent
   "use_acr": false
