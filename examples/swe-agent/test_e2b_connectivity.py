@@ -6,7 +6,7 @@ Just verifies: can we create a sandbox, run commands, and clean up?
 Usage:
     export E2B_API_KEY=<your-key>
     # For private deployment:
-    # export E2B_API_URL=https://your-private-e2b-endpoint
+    export E2B_API_URL=http://e2b-api.sii.edu.cn
     python examples/swe-agent/test_e2b_connectivity.py
 """
 
@@ -14,11 +14,14 @@ import os
 import sys
 import time
 
+
 def main():
     api_key = os.environ.get("E2B_API_KEY")
     if not api_key:
         print("ERROR: E2B_API_KEY not set", file=sys.stderr)
         return 1
+
+    api_url = os.environ.get("E2B_API_URL", "")
 
     try:
         from e2b import Sandbox
@@ -28,15 +31,32 @@ def main():
 
     template = "sweb-eval-x86-64-astropy-1776-astropy-12907"
     print(f"[1/5] Creating sandbox from template: {template}")
+    print(f"       api_url: {api_url or '(default)'}")
     t0 = time.time()
 
+    create_kwargs = {"template": template, "timeout": 300}
+    if api_key:
+        create_kwargs["api_key"] = api_key
+    if api_url:
+        create_kwargs["api_url"] = api_url
+
     try:
-        sandbox = Sandbox(template=template, timeout=300)
+        sandbox = Sandbox.beta_create(**create_kwargs)
+    except TypeError:
+        # Fallback: some SDK versions don't accept all kwargs
+        for key in ("timeout",):
+            create_kwargs.pop(key, None)
+        try:
+            sandbox = Sandbox.beta_create(**create_kwargs)
+        except (TypeError, AttributeError):
+            # Final fallback: try constructor directly
+            sandbox = Sandbox(**create_kwargs)
     except Exception as e:
         print(f"FAILED to create sandbox: {e}", file=sys.stderr)
         return 1
 
-    print(f"      Sandbox created in {time.time() - t0:.1f}s, id={sandbox.sandbox_id}")
+    sid = getattr(sandbox, "sandbox_id", "unknown")
+    print(f"      Sandbox created in {time.time() - t0:.1f}s, id={sid}")
 
     print("[2/5] Running: echo HELLO_E2B")
     result = sandbox.commands.run("echo HELLO_E2B", timeout=30)
@@ -50,11 +70,18 @@ def main():
         for line in result.stdout.strip().split("\n")[:5]:
             print(f"        {line}")
     else:
-        print(f"      /testbed does NOT exist (exit_code={result.exit_code})")
+        print(f"      WARNING: /testbed does NOT exist (exit_code={result.exit_code})")
+        print(f"      stderr: {result.stderr.strip()}")
+        print("      Checking root filesystem instead:")
+        result2 = sandbox.commands.run("ls /", timeout=30)
+        print(f"      {result2.stdout.strip()}")
 
     print("[4/5] Checking git repo status")
     result = sandbox.commands.run("cd /testbed && git rev-parse --short HEAD && git status -sb | head -5", timeout=30)
-    print(f"      {result.stdout.strip()}")
+    if result.exit_code == 0:
+        print(f"      {result.stdout.strip()}")
+    else:
+        print(f"      git check failed: {result.stderr.strip()}")
 
     print("[5/5] Cleanup")
     sandbox.kill()
