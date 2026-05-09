@@ -5,6 +5,7 @@
   "startup_timeout": 600.0
   "runtime_timeout": 1800.0
   "close_timeout": 30.0
+  "install_sweagent_tools_adapter": true
   "template_map":
     "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest": "sweb-eval-x86-64-astropy-1776-astropy-12907"
     "swebench/sweb.eval.x86_64.astropy_1776_astropy-13033:latest": "sweb-eval-x86-64-astropy-1776-astropy-13033"
