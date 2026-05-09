@@ -351,15 +351,24 @@ class E2BEnv(ContainerEnv):
             kwargs: dict[str, Any] = {"timeout": int(timeout), "user": "root"}
             if self.request_timeout is not None:
                 kwargs["request_timeout"] = self.request_timeout
+
+            def _do_run(**kw: Any) -> Any:
+                try:
+                    return self.sandbox.commands.run(script, **kw)
+                except Exception as exc:
+                    if type(exc).__name__ == "CommandExitException":
+                        return exc
+                    raise
+
             try:
-                return self.sandbox.commands.run(script, **kwargs)
+                return _do_run(**kwargs)
             except TypeError:
                 kwargs.pop("request_timeout", None)
                 try:
-                    return self.sandbox.commands.run(script, **kwargs)
+                    return _do_run(**kwargs)
                 except TypeError:
                     kwargs.pop("user", None)
-                    return self.sandbox.commands.run(script, **kwargs)
+                    return _do_run(**kwargs)
 
         result = await asyncio.to_thread(_run)
         stdout = _to_text(getattr(result, "stdout", ""))
