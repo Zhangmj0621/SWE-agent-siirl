@@ -189,6 +189,8 @@ async def _install_sweagent_tool_bundles(env: "E2BEnv", conf: dict) -> None:
     )
 
     env.default_env["PATH"] = ":".join(bin_prefixes + [base_path])
+    python_paths = [f"{container_tools_root.rstrip('/')}/{name}" for name in bundle_names]
+    env.default_env["PYTHONPATH"] = ":".join(python_paths)
     env.default_env.setdefault("PAGER", "cat")
     env.default_env.setdefault("MANPAGER", "cat")
     env.default_env.setdefault("GIT_PAGER", "cat")
