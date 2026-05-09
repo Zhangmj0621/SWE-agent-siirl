@@ -644,6 +644,12 @@ class E2BEnvBuilder(ContainerEnvBuilder):
             except Exception:
                 pass
 
+        if not skip_tool_install:
+            await env.execute(
+                "git config --global --add safe.directory /testbed",
+                check=False, timeout=30.0,
+            )
+
         if args.cmd:
             await env.execute(args.cmd, cwd=args.cwd, env=args.env, forward_env=args.forward_env, timeout=120.0)
         if not skip_tool_install:
