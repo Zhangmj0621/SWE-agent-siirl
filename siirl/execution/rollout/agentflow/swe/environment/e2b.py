@@ -248,12 +248,14 @@ async def _install_sweagent_tools_adapter(env: "E2BEnv", conf: dict) -> None:
         )
         await env.execute(cmd, timeout=60.0, check=True)
 
-    base_path = (await env.execute("bash -lc 'echo -n \"$PATH\"'", timeout=60.0, check=True)).output.decode(
-        "utf-8", errors="replace"
-    )
-    base_path = base_path.strip() or "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-    if bin_dir not in base_path.split(":"):
-        env.default_env["PATH"] = f"{bin_dir}:{base_path}"
+    existing_path = env.default_env.get("PATH", "")
+    if not existing_path:
+        existing_path = (await env.execute("bash -lc 'echo -n \"$PATH\"'", timeout=60.0, check=True)).output.decode(
+            "utf-8", errors="replace"
+        )
+        existing_path = existing_path.strip() or "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    if bin_dir not in existing_path.split(":"):
+        env.default_env["PATH"] = f"{bin_dir}:{existing_path}"
     env.default_env.setdefault("PAGER", "cat")
     env.default_env.setdefault("MANPAGER", "cat")
     env.default_env.setdefault("GIT_PAGER", "cat")
