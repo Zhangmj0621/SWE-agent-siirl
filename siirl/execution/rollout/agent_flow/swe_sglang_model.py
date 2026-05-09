@@ -104,6 +104,16 @@ class SweSglangModel:
         # and across partial-rollout abort/resume. Assigned in set_sample.
         # Matches naive_flow's agent_data.rid convention.
         self._rid: str = ""
+        # Stashed across engine.generate call; see _single_query for details.
+        # Set at the top of _single_query from _pop_sample_partial() (carry
+        # popped off the current sample), cleared after the generate returns
+        # and the partial has been merged into output_tokens. If the
+        # generate aborts, the wrapper's ``_save_abort_partial`` reads this
+        # back off the model — together with ``abort.responses`` — and
+        # persists the merged carry on the sample so the next resume's
+        # ``_pop_sample_partial`` picks it up.
+        self._pending_partial_resp: list[int] = []
+        self._pending_partial_lp: list[float] = []
 
     # ------------------------------------------------------------------ #
     # siirl-side compatibility surface
@@ -127,6 +137,25 @@ class SweSglangModel:
     def reset_stats(self) -> None:
         self.stats = InstanceStats()
         self.last_query_time = 0.0
+
+    def _pop_sample_partial(self) -> tuple[list[int], list[float]]:
+        """Read (and consume) partial assistant tokens left on the current sample.
+
+        Populated by ``RLTokenAgentWrapper._save_abort_partial`` when a
+        previous ``model.query`` was aborted mid-generation. Returns the
+        saved response token ids + logprobs and clears them on the sample
+        so they're used exactly once.
+        """
+        s = self._current_sample
+        if s is None:
+            return [], []
+        resp = list(getattr(s, "partial_response_ids", []) or [])
+        lp = list(getattr(s, "partial_rollout_log_prob", []) or [])
+        if resp:
+            s.partial_response_ids = []
+            s.partial_rollout_log_prob = []
+            s.partial_loss_mask = []
+        return resp, lp
 
     # ------------------------------------------------------------------ #
     # upstream AbstractModel hook
@@ -533,6 +562,20 @@ class SweSglangModel:
         new_prompt_token_ids = self.tokenize_prompt_messages(history)
         # self._validate_incremental_tokens(history, new_prompt_token_ids)
         input_ids = self.token_manager.token_ids + (new_prompt_token_ids or [])
+        # Auto-pickup partial tokens from a previous aborted generation on the
+        # same sample. Appended as prompt tail so SGLang's prefix cache hits.
+        partial_resp, partial_lp = self._pop_sample_partial()
+        if partial_resp:
+            input_ids = input_ids + partial_resp
+            # Stash on self so the wrapper's ``_save_abort_partial`` can
+            # re-persist these on the sample if engine.generate aborts
+            # before we finish. Cleared below once we've successfully
+            # consumed them into output_tokens.
+            self._pending_partial_resp = partial_resp
+            self._pending_partial_lp = partial_lp
+        else:
+            self._pending_partial_resp = []
+            self._pending_partial_lp = []
         input_tokens = len(input_ids)
 
         if (
@@ -568,6 +611,13 @@ class SweSglangModel:
 
         output_tokens = list(output_tokens or [])
         output_logprobs = list(rollout_log_probs or [])
+        # Prepend previously-aborted partial output so caller sees the full turn.
+        if partial_resp:
+            output_tokens = list(partial_resp) + output_tokens
+            output_logprobs = list(partial_lp) + output_logprobs
+        # Successfully consumed — clear the stash so a future abort doesn't double-count.
+        self._pending_partial_resp = []
+        self._pending_partial_lp = []
 
         # zmj TODO: only return fake new_prompt_logprobs now since it is not used
         new_prompt_logprobs = [0.0] * len(new_prompt_token_ids) if new_prompt_token_ids else []
@@ -581,7 +631,14 @@ class SweSglangModel:
 
         routed_experts = _routed_experts_to_b64(routed_experts_raw)
 
-        parsed = self.parse_response(text)
+        # If partial was spliced, re-decode the full token sequence so the
+        # tool-call parser sees the complete assistant turn instead of only
+        # the fresh tail from this generate() call.
+        if partial_resp:
+            full_text = self.tokenizer.decode(output_tokens, skip_special_tokens=True)
+        else:
+            full_text = text
+        parsed = self.parse_response(full_text)
 
         output: dict[str, Any] = {
             "message": parsed["message"],
@@ -657,6 +714,15 @@ class SweSglangModel:
         ``prompts_ids / response_mask / rollout_log_prob`` match naive_flow's
         key names. ``swe_*`` keys are SWE-specific extras that the wrapper
         merges into the final partial dict.
+
+        NOTE: aborted-turn partial response tokens do NOT ride through
+        ``dump_state`` — they live on the siirl Sample as
+        ``partial_response_ids`` / ``partial_rollout_log_prob`` /
+        ``partial_loss_mask`` (set by ``RLTokenAgentWrapper._save_abort_partial``,
+        consumed by ``_pop_sample_partial`` on the next rollout attempt).
+        The siirl Sample itself survives abort → resume via Ray's pickle of
+        the ``put_partial`` / ``get_sample`` round-trip, so no serialisation
+        through ``partial_agent_data`` is required.
         """
         tm = self.token_manager
         return {

@@ -208,7 +208,8 @@ class RLTokenAgentWrapper(AbstractAgent):
             result = await self._agent.run(
                 env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
             )
-        except SglangGenerationAborted:
+        except SglangGenerationAborted as abort:
+            self._save_abort_partial(abort)
             self.partial_state = self._snapshot()
             raise
 
@@ -248,12 +249,34 @@ class RLTokenAgentWrapper(AbstractAgent):
             result = await self._agent.resume(
                 env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
             )
-        except SglangGenerationAborted:
+        except SglangGenerationAborted as abort:
+            self._save_abort_partial(abort)
             self.partial_state = self._snapshot()
             raise
 
         self._backfill_sample(result)
         return result
+
+    def _save_abort_partial(self, abort: SglangGenerationAborted) -> None:
+        carried_resp = list(getattr(self.model, "_pending_partial_resp", None) or [])
+        carried_lp = list(getattr(self.model, "_pending_partial_lp", None) or [])
+
+        new_resp = list(getattr(abort, "responses", None) or [])
+        new_lp = list(getattr(abort, "rollout_log_prob", None) or [])
+
+        merged_resp = carried_resp + new_resp
+        merged_lp = carried_lp + new_lp
+
+        siirl_sample = getattr(self.model, "_current_sample", None)
+        if siirl_sample is not None:
+            siirl_sample.partial_response_ids = merged_resp
+            siirl_sample.partial_rollout_log_prob = merged_lp
+            siirl_sample.partial_loss_mask = [1] * len(merged_resp)
+
+        # Clear model-side stash — it's ephemeral (one-_single_query-call)
+        # state and must not leak into a later unrelated generate.
+        self.model._pending_partial_resp = []
+        self.model._pending_partial_lp = []
 
     def _backfill_sample(self, result: AgentRunResult) -> None:
         """Write rollout outputs back onto the siirl Sample.
