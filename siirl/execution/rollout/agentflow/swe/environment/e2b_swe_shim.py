@@ -281,20 +281,16 @@ class E2BSWEEnvShim:
         await self._ensure_resumed()
         enc = encoding or "utf-8"
         err = errors or "strict"
-        result = await self._e2b.read_file(str(path), encoding=enc, errors=err)
-        await self._maybe_pause()
-        return result
+        return await self._e2b.read_file(str(path), encoding=enc, errors=err)
 
     async def write_file(self, path: str | PurePath, content: str) -> None:
         await self._ensure_resumed()
         await self._e2b.write_file(str(path), content)
-        await self._maybe_pause()
 
     async def upload(self, *, source_path: str, target_path: str, timeout: float = 600.0) -> None:
         """Host → sandbox copy; used by ``SiiToolHandler._upload_bundles``."""
         await self._ensure_resumed()
         await self._e2b.copy(source_path, target_path, upload=True, timeout=timeout)
-        await self._maybe_pause()
 
     async def execute(
         self,
