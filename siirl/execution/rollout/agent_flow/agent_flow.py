@@ -665,7 +665,23 @@ class AgentFlowCallable:
             if not s.reward:
                 s.reward = 0.0
                 s.status = s.Status.FAILED
-                logger.warning("[AgentFlowCallable] No tokens generated for sample, skipping")
+                uid = getattr(sample, "uid", "?")
+                # Was this sample resumed from a partial? preprocess stashes
+                # the inbound partial on m.rollout.partial_state; the
+                # outbound partial_agent_data on the pydantic Sample is
+                # cleared only on success (above `else:` branch), so its
+                # presence here also implies resume.
+                rollout_meta = getattr(getattr(s, "m", None), "rollout", None)
+                was_resume = (
+                    getattr(rollout_meta, "partial_state", None) is not None
+                    or getattr(sample, "partial_agent_data", None) is not None
+                )
+                exit_status = getattr(rollout_meta, "exit_status", None)
+                logger.warning(
+                    "[AgentFlowCallable] EMPTY-ROLLOUT-FALLBACK uid=%s "
+                    "was_resume=%s exit_status=%s prompts_len=%s tokens_len=0",
+                    uid, was_resume, exit_status, len(s.prompts),
+                )
             # Return minimal valid data to avoid TransformerEngine crash
             # Use pad_token_id if available, otherwise use 0
             pad_token_id = getattr(s.model.tokenizer, "pad_token_id", 0)

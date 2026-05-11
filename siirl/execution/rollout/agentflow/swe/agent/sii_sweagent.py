@@ -231,19 +231,41 @@ class RLTokenAgentWrapper(AbstractAgent):
         """
         swe_env = env._env if hasattr(env, "_env") else env
 
-        # 1) setup is still required — it binds env/problem_statement/tools on
-        #    the upstream agent, installs tools on the pod, and seeds
-        #    info/history. restore_state below overwrites the bits that
-        #    setup would otherwise discard (history, trajectory, info, ...).
-        await self._agent.setup(
-            env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
-        )
+        # Preflight (setup + restore). Wrapped only for diagnostics — the
+        # re-raise keeps original semantics. If this phase fails silently the
+        # exception reaches AgentFlowCallable's generic handler and the sample
+        # enters the batch as prompt=1/response=0; this log makes that
+        # situation visible.
+        try:
+            # 1) setup is still required — it binds env/problem_statement/tools on
+            #    the upstream agent, installs tools on the pod, and seeds
+            #    info/history. restore_state below overwrites the bits that
+            #    setup would otherwise discard (history, trajectory, info, ...).
+            await self._agent.setup(
+                env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
+            )
 
-        # 2) model side first: TokenManager / _rid / stats / _processed_message_count
-        self.model.restore_state(partial)
+            # 2) model side first: TokenManager / _rid / stats / _processed_message_count
+            self.model.restore_state(partial)
 
-        # 3) upstream agent state
-        self._agent.restore_state(partial["swe_agent_state"])
+            # 3) upstream agent state
+            self._agent.restore_state(partial["swe_agent_state"])
+        except Exception as e:
+            self._agent.logger.exception(
+                "[RLTokenAgentWrapper.resume] PREFLIGHT FAILED "
+                "exc_type=%s rid=%s assistant_turns=%s env_turns=%s has_env_handle=%s "
+                "prompts_ids_len=%s swe_processed_message_count=%s init_input_ids_len=%s: %s",
+                type(e).__name__,
+                partial.get("rid", "?"),
+                partial.get("assistant_turns", "?"),
+                partial.get("env_turns", "?"),
+                partial.get("swe_env_handle") is not None,
+                len(partial.get("prompts_ids", []) or []),
+                partial.get("swe_processed_message_count", "?"),
+                len((partial.get("swe_agent_state") or {}).get("init_input_ids", []) or []),
+                e,
+            )
+            raise
 
         try:
             result = await self._agent.resume(
