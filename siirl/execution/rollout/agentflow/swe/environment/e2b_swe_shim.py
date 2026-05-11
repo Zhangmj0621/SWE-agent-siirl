@@ -92,12 +92,16 @@ class _E2BRuntimeShim(AbstractRuntime):
             return BashObservation(output=out, exit_code=0, session_type="bash")
 
         await self._env._ensure_resumed()
-        inner = action.command
-        script = self._env._bash_one_shot(inner)
-        tout = float(action.timeout) if action.timeout is not None else 1800.0
-        r = await self._env._e2b.execute(script, check=False, timeout=tout)
-        await self._env._sync_cwd()
-        text = r.output.decode("utf-8", errors="replace")
+        self._env._inflight += 1
+        try:
+            inner = action.command
+            script = self._env._bash_one_shot(inner)
+            tout = float(action.timeout) if action.timeout is not None else 1800.0
+            r = await self._env._e2b.execute(script, check=False, timeout=tout)
+            await self._env._sync_cwd()
+            text = r.output.decode("utf-8", errors="replace")
+        finally:
+            self._env._inflight -= 1
         await self._env._maybe_pause()
         if action.check == "ignore":
             return BashObservation(output=text, exit_code=None, session_type="bash")
@@ -148,7 +152,11 @@ class _E2BRuntimeShim(AbstractRuntime):
 
     async def upload(self, request: UploadRequest) -> UploadResponse:
         await self._env._ensure_resumed()
-        await self._env._e2b.copy(request.source_path, request.target_path, upload=True, timeout=600.0)
+        self._env._inflight += 1
+        try:
+            await self._env._e2b.copy(request.source_path, request.target_path, upload=True, timeout=600.0)
+        finally:
+            self._env._inflight -= 1
         return UploadResponse()
 
     async def close(self) -> CloseResponse:
@@ -199,6 +207,8 @@ class E2BSWEEnvShim:
         self._cwd = initial_cwd
         self._exports: dict[str, str] = {"ROOT": initial_cwd}
         self._step_pause_enabled = False
+        self._inflight = 0
+        self._resume_lock = asyncio.Lock()
         self.deployment = _E2BDeploymentShim(self)
 
     @property
@@ -214,17 +224,23 @@ class E2BSWEEnvShim:
         self._step_pause_enabled = False
 
     async def _ensure_resumed(self) -> None:
-        if self._step_pause_enabled and self._e2b.is_paused:
-            _log.debug("[E2BSWEEnvShim] Resuming sandbox before command execution")
-            await self._e2b.resume_sandbox()
+        if not self._step_pause_enabled or not self._e2b.is_paused:
+            return
+        async with self._resume_lock:
+            if self._e2b.is_paused:
+                _log.debug("[E2BSWEEnvShim] Resuming sandbox before command execution")
+                await self._e2b.resume_sandbox()
 
     async def _maybe_pause(self) -> None:
-        if self._step_pause_enabled and not self._e2b.is_paused:
-            try:
-                await self._e2b.pause_sandbox()
-            except Exception as exc:
-                _log.warning(f"[E2BSWEEnvShim] pause_sandbox() failed ({exc}); disabling step-pause")
-                self._step_pause_enabled = False
+        if not self._step_pause_enabled or self._e2b.is_paused:
+            return
+        if self._inflight > 0:
+            return
+        try:
+            await self._e2b.pause_sandbox()
+        except Exception as exc:
+            _log.warning(f"[E2BSWEEnvShim] pause_sandbox() failed ({exc}); disabling step-pause")
+            self._step_pause_enabled = False
 
     def _bash_one_shot(self, inner: str) -> str:
         export_prefix = ""
@@ -261,15 +277,19 @@ class E2BSWEEnvShim:
             return "Illegal actions: `git log`, `git diff`, and `git show` are not allowed."
 
         await self._ensure_resumed()
-        script = self._bash_one_shot(input)
-        out = await self._e2b.execute(script, check=False, timeout=float(timeout))
-        await self._sync_cwd()
-        text = out.output.decode("utf-8", errors="replace")
-        if check != "ignore" and out.returncode != 0:
-            _log.error("%s:\n%s", error_msg, text[:2000])
-            msg = f"Command {input!r} failed (exit_code={out.returncode}): {error_msg}"
-            if check == "raise":
-                raise RuntimeError(msg)
+        self._inflight += 1
+        try:
+            script = self._bash_one_shot(input)
+            out = await self._e2b.execute(script, check=False, timeout=float(timeout))
+            await self._sync_cwd()
+            text = out.output.decode("utf-8", errors="replace")
+            if check != "ignore" and out.returncode != 0:
+                _log.error("%s:\n%s", error_msg, text[:2000])
+                msg = f"Command {input!r} failed (exit_code={out.returncode}): {error_msg}"
+                if check == "raise":
+                    raise RuntimeError(msg)
+        finally:
+            self._inflight -= 1
         await self._maybe_pause()
         return text
 
@@ -280,18 +300,30 @@ class E2BSWEEnvShim:
 
     async def read_file(self, path: str | PurePath, encoding: str | None = None, errors: str | None = None) -> str:
         await self._ensure_resumed()
-        enc = encoding or "utf-8"
-        err = errors or "strict"
-        return await self._e2b.read_file(str(path), encoding=enc, errors=err)
+        self._inflight += 1
+        try:
+            enc = encoding or "utf-8"
+            err = errors or "strict"
+            return await self._e2b.read_file(str(path), encoding=enc, errors=err)
+        finally:
+            self._inflight -= 1
 
     async def write_file(self, path: str | PurePath, content: str) -> None:
         await self._ensure_resumed()
-        await self._e2b.write_file(str(path), content)
+        self._inflight += 1
+        try:
+            await self._e2b.write_file(str(path), content)
+        finally:
+            self._inflight -= 1
 
     async def upload(self, *, source_path: str, target_path: str, timeout: float = 600.0) -> None:
         """Host → sandbox copy; used by ``SiiToolHandler._upload_bundles``."""
         await self._ensure_resumed()
-        await self._e2b.copy(source_path, target_path, upload=True, timeout=timeout)
+        self._inflight += 1
+        try:
+            await self._e2b.copy(source_path, target_path, upload=True, timeout=timeout)
+        finally:
+            self._inflight -= 1
 
     async def execute(
         self,
