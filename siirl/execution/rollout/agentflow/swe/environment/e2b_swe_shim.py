@@ -147,6 +147,7 @@ class _E2BRuntimeShim(AbstractRuntime):
         return WriteFileResponse()
 
     async def upload(self, request: UploadRequest) -> UploadResponse:
+        await self._env._ensure_resumed()
         await self._env._e2b.copy(request.source_path, request.target_path, upload=True, timeout=600.0)
         return UploadResponse()
 
