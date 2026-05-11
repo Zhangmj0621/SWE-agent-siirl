@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import contextlib
 import json
@@ -279,6 +278,7 @@ class E2BEnv(ContainerEnv):
         default_env: dict[str, str] | None = None,
         default_forward_env: list[str] | None = None,
         request_timeout: float | None = None,
+        resume_kwargs: dict[str, Any] | None = None,
     ):
         self.sandbox = sandbox
         self.default_cwd = default_cwd
@@ -286,6 +286,56 @@ class E2BEnv(ContainerEnv):
         self.default_forward_env = default_forward_env or []
         self.request_timeout = request_timeout
         self._closed = False
+        self._resume_kwargs: dict[str, Any] = resume_kwargs or {}
+        self._paused_sandbox_id: str | None = None
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused_sandbox_id is not None and self.sandbox is None
+
+    async def pause_sandbox(self) -> str | None:
+        """Pause sandbox (snapshot state, free resources). Returns sandbox_id."""
+        if self._closed or self.sandbox is None:
+            return self._paused_sandbox_id
+        if self._paused_sandbox_id:
+            return self._paused_sandbox_id
+
+        sid = getattr(self.sandbox, "sandbox_id", None)
+        if not sid:
+            return None
+
+        await self.sandbox.beta_pause()
+        self._paused_sandbox_id = str(sid)
+        self.sandbox = None
+        logger.debug(f"[E2BEnv] sandbox paused (id={sid})")
+        return self._paused_sandbox_id
+
+    async def resume_sandbox(self) -> None:
+        """Resume a paused sandbox. No-op if already running."""
+        if self._closed:
+            raise RuntimeError("E2B sandbox is closed (cleaned up)")
+        if self.sandbox is not None:
+            return
+        if not self._paused_sandbox_id:
+            raise RuntimeError("No paused sandbox to resume")
+
+        from e2b import AsyncSandbox
+
+        _patch_e2b_sdk_parse_http200_create_sandbox()
+        sid = self._paused_sandbox_id
+        kwargs = dict(self._resume_kwargs)
+        if self.request_timeout is not None:
+            kwargs["request_timeout"] = self.request_timeout
+
+        try:
+            self.sandbox = await AsyncSandbox.connect(sid, **kwargs)
+        except TypeError:
+            for key in ("force_http", "request_timeout", "timeout"):
+                kwargs.pop(key, None)
+            self.sandbox = await AsyncSandbox.connect(sid, **kwargs)
+
+        self._paused_sandbox_id = None
+        logger.debug(f"[E2BEnv] sandbox resumed (id={sid})")
 
     def _merge_env(self, env: dict[str, str], forward_env: list[str]) -> dict[str, str]:
         merged_env = {}
@@ -321,6 +371,8 @@ class E2BEnv(ContainerEnv):
     ) -> ContainerOutput:
         if self._closed:
             raise RuntimeError("E2B sandbox is closed")
+        if self.is_paused:
+            raise RuntimeError("E2B sandbox is paused; call resume_sandbox() first")
 
         env = env or {}
         forward_env = forward_env or []
@@ -347,30 +399,27 @@ class E2BEnv(ContainerEnv):
             f"[E2BEnv] running command in sandbox cwd={effective_cwd or '<default>'} timeout={timeout}s cmd={cmd_preview}"
         )
 
-        def _run() -> Any:
-            kwargs: dict[str, Any] = {"timeout": int(timeout), "user": "root"}
-            if self.request_timeout is not None:
-                kwargs["request_timeout"] = self.request_timeout
-
-            def _do_run(**kw: Any) -> Any:
-                try:
-                    return self.sandbox.commands.run(script, **kw)
-                except Exception as exc:
-                    if type(exc).__name__ == "CommandExitException":
-                        return exc
-                    raise
-
+        async def _do_run(**kw: Any) -> Any:
             try:
-                return _do_run(**kwargs)
-            except TypeError:
-                kwargs.pop("request_timeout", None)
-                try:
-                    return _do_run(**kwargs)
-                except TypeError:
-                    kwargs.pop("user", None)
-                    return _do_run(**kwargs)
+                return await self.sandbox.commands.run(script, **kw)
+            except Exception as exc:
+                if type(exc).__name__ == "CommandExitException":
+                    return exc
+                raise
 
-        result = await asyncio.to_thread(_run)
+        kwargs: dict[str, Any] = {"timeout": int(timeout), "user": "root"}
+        if self.request_timeout is not None:
+            kwargs["request_timeout"] = self.request_timeout
+
+        try:
+            result = await _do_run(**kwargs)
+        except TypeError:
+            kwargs.pop("request_timeout", None)
+            try:
+                result = await _do_run(**kwargs)
+            except TypeError:
+                kwargs.pop("user", None)
+                result = await _do_run(**kwargs)
         stdout = _to_text(getattr(result, "stdout", ""))
         stderr = _to_text(getattr(result, "stderr", ""))
         output = (stdout + stderr).encode("utf-8", errors="replace")
@@ -383,10 +432,9 @@ class E2BEnv(ContainerEnv):
         return ContainerOutput(output=output, returncode=returncode)
 
     def get_handle(self) -> dict[str, Any] | None:
-        """Return sandbox identity for partial-rollout resume (``Sandbox.connect``).
-
-        Must be called before ``detach`` while ``self.sandbox`` is still held.
-        """
+        """Return sandbox identity for partial-rollout resume."""
+        if self._paused_sandbox_id:
+            return {"sandbox_id": self._paused_sandbox_id}
         if self._closed or self.sandbox is None:
             return None
         sid = getattr(self.sandbox, "sandbox_id", None)
@@ -396,38 +444,29 @@ class E2BEnv(ContainerEnv):
         return {"sandbox_id": str(sid)}
 
     async def detach(self) -> None:
-        """Pause the sandbox (snapshot state, free resources) then release the local handle.
+        """Pause the sandbox and release local handle for partial-rollout resume.
 
-        On resume the ``E2BEnvBuilder`` calls ``Sandbox.resume(sandbox_id)`` to restore
-        the paused sandbox — no idle resource consumption between abort and resume.
-
-        Falls back to the old behaviour (keep sandbox running) if the SDK lacks ``pause()``.
+        If sandbox is already paused (per-step auto-pause), just marks closed.
         """
         if self._closed:
             return
         self._closed = True
+        if self._paused_sandbox_id:
+            self.sandbox = None
+            _log.info("[E2BEnv] detach: sandbox already paused, just marking closed")
+            return
         sb = self.sandbox
         self.sandbox = None
         if sb is None:
             return
 
-        def _pause_and_release() -> None:
-            pause_fn = getattr(sb, "pause", None)
-            if callable(pause_fn):
-                try:
-                    pause_fn()
-                    _log.info("[E2BEnv] detach: sandbox paused (snapshot saved, resources freed)")
-                    return
-                except Exception as exc:
-                    _log.warning(f"[E2BEnv] detach: sandbox.pause() failed ({exc}), falling back to keep-alive")
-            for name in ("close", "aclose", "_close"):
-                fn = getattr(sb, name, None)
-                if callable(fn):
-                    with contextlib.suppress(Exception):
-                        fn()
-                    return
-
-        await asyncio.to_thread(_pause_and_release)
+        try:
+            await sb.beta_pause()
+            _log.info("[E2BEnv] detach: sandbox paused (snapshot saved, resources freed)")
+        except Exception as exc:
+            _log.warning(f"[E2BEnv] detach: beta_pause() failed ({exc}), falling back to kill")
+            with contextlib.suppress(Exception):
+                await sb.kill()
 
     async def read_file(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
         out = await self.execute(f"cat {shlex.quote(path)}", check=True, timeout=120.0)
@@ -486,16 +525,23 @@ class E2BEnv(ContainerEnv):
         if self._closed:
             return
         try:
-
-            def _kill() -> Any:
+            if self._paused_sandbox_id and self.sandbox is None:
+                from e2b import AsyncSandbox
+                sid = self._paused_sandbox_id
+                kwargs = dict(self._resume_kwargs)
                 try:
-                    return self.sandbox.kill()
+                    sb = await AsyncSandbox.connect(sid, **kwargs)
+                    await sb.kill()
                 except Exception:
-                    return None
-
-            await asyncio.to_thread(_kill)
+                    pass
+            elif self.sandbox is not None:
+                try:
+                    await self.sandbox.kill()
+                except Exception:
+                    pass
         finally:
             self._closed = True
+            self._paused_sandbox_id = None
 
     @property
     def alive(self) -> bool:
@@ -566,10 +612,10 @@ class E2BEnvBuilder(ContainerEnvBuilder):
         """Start sandbox. When ``args`` is None (SWE RL flow), resolve image from ``runtime_meta`` like K8s adapter.
 
         Partial-rollout resume: when ``runtime_meta`` carries ``_resume_handle`` with
-        ``sandbox_id`` (from ``E2BEnv.get_handle``), reconnect via ``Sandbox.connect`` instead
+        ``sandbox_id`` (from ``E2BEnv.get_handle``), reconnect via ``AsyncSandbox.connect`` instead
         of ``beta_create``, skip tool installs, and restore ``swe_cwd`` on the shim.
         """
-        from e2b import Sandbox
+        from e2b import AsyncSandbox
 
         resume_handle = _extract_resume_handle(runtime_meta) if runtime_meta is not None else None
         sandbox_id: str | None = None
@@ -593,74 +639,39 @@ class E2BEnvBuilder(ContainerEnvBuilder):
                 startup_timeout=float(self.config.get("startup_timeout", 1800.0)),
             )
 
-        def _connect_existing(sid: str) -> Any:
-            _patch_e2b_sdk_parse_http200_create_sandbox()
-            kwargs: dict[str, Any] = {**self._connect_kwargs(), "timeout": self.timeout}
-            if self.request_timeout is not None:
-                kwargs["request_timeout"] = self.request_timeout
-
-            resume_fn = getattr(Sandbox, "resume", None)
-            if callable(resume_fn):
-                logger.info(f"[E2BEnvBuilder] Resuming paused sandbox via Sandbox.resume({sid!r})")
-                try:
-                    return resume_fn(sid, **kwargs)
-                except TypeError:
-                    for key in ("force_http", "request_timeout", "timeout"):
-                        kwargs.pop(key, None)
-                    try:
-                        return resume_fn(sid, **kwargs)
-                    except TypeError:
-                        return resume_fn(sid, **self._connect_kwargs())
-                except Exception as exc:
-                    logger.warning(
-                        f"[E2BEnvBuilder] Sandbox.resume() failed ({exc}), falling back to Sandbox.connect()"
-                    )
-                    kwargs = {**self._connect_kwargs(), "timeout": self.timeout}
-                    if self.request_timeout is not None:
-                        kwargs["request_timeout"] = self.request_timeout
-
-            connect = getattr(Sandbox, "connect", None)
-            if connect is None:
-                raise EnvCreateError("E2B SDK Sandbox has no connect() or resume(); cannot resume partial rollout")
-            try:
-                return connect(sid, **kwargs)
-            except TypeError:
-                for key in ("force_http", "request_timeout", "timeout"):
-                    kwargs.pop(key, None)
-                try:
-                    return connect(sid, **kwargs)
-                except TypeError:
-                    return connect(sid, **self._connect_kwargs())
-
         template = self._resolve_template(args.image)
-        create_kwargs = {
-            **self._connect_kwargs(),
-            "template": template,
-            "timeout": self.timeout,
-            "auto_pause": self.auto_pause,
-            "allow_internet_access": self.allow_internet_access,
-        }
-
-        def _create() -> Any:
-            _patch_e2b_sdk_parse_http200_create_sandbox()
-            kwargs = dict(create_kwargs)
-            if self.request_timeout is not None:
-                kwargs["request_timeout"] = self.request_timeout
-            try:
-                return Sandbox.beta_create(**kwargs)
-            except TypeError:
-                for key in ("force_http", "request_timeout", "auto_pause", "allow_internet_access"):
-                    kwargs.pop(key, None)
-                return Sandbox.beta_create(**kwargs)
 
         skip_tool_install = False
+        _patch_e2b_sdk_parse_http200_create_sandbox()
         try:
             if sandbox_id:
-                logger.info(f"[E2BEnvBuilder] Partial-rollout resume: Sandbox.connect({sandbox_id!r})")
-                sandbox = await asyncio.to_thread(_connect_existing, sandbox_id)
+                logger.info(f"[E2BEnvBuilder] Partial-rollout resume: AsyncSandbox.connect({sandbox_id!r})")
+                connect_kwargs: dict[str, Any] = {**self._connect_kwargs(), "timeout": self.timeout}
+                if self.request_timeout is not None:
+                    connect_kwargs["request_timeout"] = self.request_timeout
+                try:
+                    sandbox = await AsyncSandbox.connect(sandbox_id, **connect_kwargs)
+                except TypeError:
+                    for key in ("force_http", "request_timeout", "timeout"):
+                        connect_kwargs.pop(key, None)
+                    sandbox = await AsyncSandbox.connect(sandbox_id, **connect_kwargs)
                 skip_tool_install = True
             else:
-                sandbox = await asyncio.to_thread(_create)
+                create_kwargs: dict[str, Any] = {
+                    **self._connect_kwargs(),
+                    "template": template,
+                    "timeout": self.timeout,
+                    "auto_pause": self.auto_pause,
+                    "allow_internet_access": self.allow_internet_access,
+                }
+                if self.request_timeout is not None:
+                    create_kwargs["request_timeout"] = self.request_timeout
+                try:
+                    sandbox = await AsyncSandbox.beta_create(**create_kwargs)
+                except TypeError:
+                    for key in ("force_http", "request_timeout", "auto_pause", "allow_internet_access"):
+                        create_kwargs.pop(key, None)
+                    sandbox = await AsyncSandbox.beta_create(**create_kwargs)
         except Exception as e:
             err = str(e).lower()
             if (
@@ -682,6 +693,7 @@ class E2BEnvBuilder(ContainerEnvBuilder):
             default_env=args.env,
             default_forward_env=args.forward_env,
             request_timeout=self.request_timeout,
+            resume_kwargs=self._connect_kwargs(),
         )
 
         if skip_tool_install and not resume_cwd:

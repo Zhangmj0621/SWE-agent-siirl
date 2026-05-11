@@ -407,6 +407,8 @@ class SWEAgentFlow(AgentFlow):
         aborted = False
         try:
             await m.runtime.bootstrap(env)  # idempotent — resume path is a no-op
+            if hasattr(env, "enable_step_pause"):
+                env.enable_step_pause()
             if partial:
                 await m.agent.resume(env, partial)
             else:
@@ -436,6 +438,9 @@ class SWEAgentFlow(AgentFlow):
             raise
         finally:
             if env is not None:
+                if hasattr(env, "disable_step_pause"):
+                    with contextlib.suppress(Exception):
+                        env.disable_step_pause()
                 if aborted:
                     # Wrapper already paused the sandbox via env.detach().
                     # If detach failed there, env may still be alive — clean up

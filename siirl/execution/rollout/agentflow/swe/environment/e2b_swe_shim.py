@@ -91,12 +91,14 @@ class _E2BRuntimeShim(AbstractRuntime):
             )
             return BashObservation(output=out, exit_code=0, session_type="bash")
 
+        await self._env._ensure_resumed()
         inner = action.command
         script = self._env._bash_one_shot(inner)
         tout = float(action.timeout) if action.timeout is not None else 1800.0
         r = await self._env._e2b.execute(script, check=False, timeout=tout)
         await self._env._sync_cwd()
         text = r.output.decode("utf-8", errors="replace")
+        await self._env._maybe_pause()
         if action.check == "ignore":
             return BashObservation(output=text, exit_code=None, session_type="bash")
         exit_code = int(r.returncode)
@@ -195,11 +197,33 @@ class E2BSWEEnvShim:
         self.name = "main"
         self._cwd = initial_cwd
         self._exports: dict[str, str] = {"ROOT": initial_cwd}
+        self._step_pause_enabled = False
         self.deployment = _E2BDeploymentShim(self)
 
     @property
     def alive(self) -> bool:
         return self._e2b.alive
+
+    def enable_step_pause(self) -> None:
+        """Enable per-step sandbox pause/resume. Call after bootstrap completes."""
+        self._step_pause_enabled = True
+        _log.info("[E2BSWEEnvShim] Per-step sandbox pause/resume ENABLED")
+
+    def disable_step_pause(self) -> None:
+        self._step_pause_enabled = False
+
+    async def _ensure_resumed(self) -> None:
+        if self._step_pause_enabled and self._e2b.is_paused:
+            _log.debug("[E2BSWEEnvShim] Resuming sandbox before command execution")
+            await self._e2b.resume_sandbox()
+
+    async def _maybe_pause(self) -> None:
+        if self._step_pause_enabled and not self._e2b.is_paused:
+            try:
+                await self._e2b.pause_sandbox()
+            except Exception as exc:
+                _log.warning(f"[E2BSWEEnvShim] pause_sandbox() failed ({exc}); disabling step-pause")
+                self._step_pause_enabled = False
 
     def _bash_one_shot(self, inner: str) -> str:
         export_prefix = ""
@@ -235,8 +259,8 @@ class E2BSWEEnvShim:
         if input is not None and ("git log" in input or "git diff" in input or "git show" in input):
             return "Illegal actions: `git log`, `git diff`, and `git show` are not allowed."
 
+        await self._ensure_resumed()
         script = self._bash_one_shot(input)
-        do_check = check == "raise"
         out = await self._e2b.execute(script, check=False, timeout=float(timeout))
         await self._sync_cwd()
         text = out.output.decode("utf-8", errors="replace")
@@ -245,6 +269,7 @@ class E2BSWEEnvShim:
             msg = f"Command {input!r} failed (exit_code={out.returncode}): {error_msg}"
             if check == "raise":
                 raise RuntimeError(msg)
+        await self._maybe_pause()
         return text
 
     async def set_env_variables(self, env_variables: dict[str, str]) -> None:
@@ -253,16 +278,23 @@ class E2BSWEEnvShim:
         self._exports.update({str(k): str(v) for k, v in env_variables.items()})
 
     async def read_file(self, path: str | PurePath, encoding: str | None = None, errors: str | None = None) -> str:
+        await self._ensure_resumed()
         enc = encoding or "utf-8"
         err = errors or "strict"
-        return await self._e2b.read_file(str(path), encoding=enc, errors=err)
+        result = await self._e2b.read_file(str(path), encoding=enc, errors=err)
+        await self._maybe_pause()
+        return result
 
     async def write_file(self, path: str | PurePath, content: str) -> None:
+        await self._ensure_resumed()
         await self._e2b.write_file(str(path), content)
+        await self._maybe_pause()
 
     async def upload(self, *, source_path: str, target_path: str, timeout: float = 600.0) -> None:
         """Host → sandbox copy; used by ``SiiToolHandler._upload_bundles``."""
+        await self._ensure_resumed()
         await self._e2b.copy(source_path, target_path, upload=True, timeout=timeout)
+        await self._maybe_pause()
 
     async def execute(
         self,
@@ -361,6 +393,12 @@ class E2BRLContainerEnv(ContainerEnv):
 
     async def cleanup(self) -> None:
         await self._inner.cleanup()
+
+    def enable_step_pause(self) -> None:
+        self._shim.enable_step_pause()
+
+    def disable_step_pause(self) -> None:
+        self._shim.disable_step_pause()
 
     @property
     def alive(self) -> bool:
