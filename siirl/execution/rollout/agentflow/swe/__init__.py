@@ -413,31 +413,23 @@ class SWEAgentFlow(AgentFlow):
                 await m.agent.run(env)
             await m.runtime.diff(env)
         except SglangGenerationAborted:
-            # Build the outbound partial_agent_data. wrapper.partial_state is
-            # populated by RLTokenAgentWrapper.run/resume in its own except.
+            # RLTokenAgentWrapper.run/resume already did:
+            #   1. self.partial_state = self._snapshot()
+            #   2. self.partial_state["swe_env_handle"] = env.get_handle()
+            #   3. await env.detach()  (pauses sandbox / snapshots state)
+            # We just need to pack it into partial_agent_data for the cancel queue.
             wrapper_partial = getattr(m.agent, "partial_state", None) or {}
-            env_handle = None
-            try:
-                env_handle = env.get_handle() if env is not None else None
-            except Exception as e:
-                logger.error(
-                    f"[SWEAgentFlow.generate] get_handle failed: {e}; "
-                    "will fall through to cleanup and drop partial",
-                    exc_info=True,
-                )
+            env_handle = wrapper_partial.get("swe_env_handle")
             if env_handle is None or not wrapper_partial:
-                # Can't resume without env handle or agent snapshot — let the
-                # finally cleanup the pod and don't publish partial data.
                 logger.warning(
                     f"[SWEAgentFlow.generate] Abort without usable partial "
                     f"(env_handle={bool(env_handle)}, wrapper_partial={bool(wrapper_partial)}); "
-                    "releasing pod"
+                    "releasing env"
                 )
                 m.rollout.partial_agent_data = None
             else:
                 m.rollout.partial_agent_data = {
                     **wrapper_partial,
-                    "swe_env_handle": env_handle,
                     "swe_runtime_bootstrapped": True,
                 }
                 aborted = True
@@ -445,20 +437,12 @@ class SWEAgentFlow(AgentFlow):
         finally:
             if env is not None:
                 if aborted:
-                    # Keep remote env alive; close Python client only. Fallback to
-                    # full cleanup if detach itself fails — we'd rather lose
-                    # the partial than leak a pod / stray sandbox.
-                    try:
-                        await env.detach()
-                    except Exception as e:
-                        logger.error(
-                            f"[SWEAgentFlow.generate] detach failed: {e}; "
-                            "falling back to cleanup",
-                            exc_info=True,
-                        )
+                    # Wrapper already paused the sandbox via env.detach().
+                    # If detach failed there, env may still be alive — clean up
+                    # as a safety net (detach is a no-op if already closed).
+                    if not getattr(m.rollout, "partial_agent_data", None):
                         with contextlib.suppress(Exception):
                             await env.cleanup()
-                        m.rollout.partial_agent_data = None
                 else:
                     try:
                         await env.cleanup()

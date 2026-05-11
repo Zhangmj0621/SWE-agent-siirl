@@ -198,9 +198,9 @@ class RLTokenAgentWrapper(AbstractAgent):
 
         Awaits upstream ``RLTokenAgent.run`` directly, so step-level concurrency
         between rollouts is preserved at every ``await`` point. If rollout is
-        aborted mid-step by ``SglangGenerationAborted``, snapshot state for
-        partial-rollout resume and re-raise so upper layers can hand the
-        sample back to the shared partial queue.
+        aborted mid-step by ``SglangGenerationAborted``, snapshot agent state,
+        pause the sandbox (E2B snapshot), and re-raise so upper layers can hand
+        the sample back to the shared partial queue.
         """
         swe_env = env._env if hasattr(env, "_env") else env
 
@@ -210,6 +210,8 @@ class RLTokenAgentWrapper(AbstractAgent):
             )
         except SglangGenerationAborted:
             self.partial_state = self._snapshot()
+            self.partial_state["swe_env_handle"] = env.get_handle()
+            await env.detach()
             raise
 
         self._backfill_sample(result)
@@ -250,6 +252,8 @@ class RLTokenAgentWrapper(AbstractAgent):
             )
         except SglangGenerationAborted:
             self.partial_state = self._snapshot()
+            self.partial_state["swe_env_handle"] = env.get_handle()
+            await env.detach()
             raise
 
         self._backfill_sample(result)
