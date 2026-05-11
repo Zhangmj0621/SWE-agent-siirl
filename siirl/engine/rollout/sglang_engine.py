@@ -150,6 +150,7 @@ class SglangEngine:
             "skip_tokenizer_init": False,
             "dist_timeout": 1800,
             "enable_metrics": True,
+            "enable_hierarchical_cache": True,
             "tool_call_parser": "qwen",
         }
 

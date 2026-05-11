@@ -208,7 +208,8 @@ class RLTokenAgentWrapper(AbstractAgent):
             result = await self._agent.run(
                 env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
             )
-        except SglangGenerationAborted:
+        except SglangGenerationAborted as abort:
+            self._save_abort_partial(abort)
             self.partial_state = self._snapshot()
             self.partial_state["swe_env_handle"] = env.get_handle()
             await env.detach()
@@ -232,25 +233,48 @@ class RLTokenAgentWrapper(AbstractAgent):
         """
         swe_env = env._env if hasattr(env, "_env") else env
 
-        # 1) setup is still required — it binds env/problem_statement/tools on
-        #    the upstream agent, installs tools on the pod, and seeds
-        #    info/history. restore_state below overwrites the bits that
-        #    setup would otherwise discard (history, trajectory, info, ...).
-        await self._agent.setup(
-            env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
-        )
+        # Preflight (setup + restore). Wrapped only for diagnostics — the
+        # re-raise keeps original semantics. If this phase fails silently the
+        # exception reaches AgentFlowCallable's generic handler and the sample
+        # enters the batch as prompt=1/response=0; this log makes that
+        # situation visible.
+        try:
+            # 1) setup is still required — it binds env/problem_statement/tools on
+            #    the upstream agent, installs tools on the pod, and seeds
+            #    info/history. restore_state below overwrites the bits that
+            #    setup would otherwise discard (history, trajectory, info, ...).
+            await self._agent.setup(
+                env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
+            )
 
-        # 2) model side first: TokenManager / _rid / stats / _processed_message_count
-        self.model.restore_state(partial)
+            # 2) model side first: TokenManager / _rid / stats / _processed_message_count
+            self.model.restore_state(partial)
 
-        # 3) upstream agent state
-        self._agent.restore_state(partial["swe_agent_state"])
+            # 3) upstream agent state
+            self._agent.restore_state(partial["swe_agent_state"])
+        except Exception as e:
+            self._agent.logger.exception(
+                "[RLTokenAgentWrapper.resume] PREFLIGHT FAILED "
+                "exc_type=%s rid=%s assistant_turns=%s env_turns=%s has_env_handle=%s "
+                "prompts_ids_len=%s swe_processed_message_count=%s init_input_ids_len=%s: %s",
+                type(e).__name__,
+                partial.get("rid", "?"),
+                partial.get("assistant_turns", "?"),
+                partial.get("env_turns", "?"),
+                partial.get("swe_env_handle") is not None,
+                len(partial.get("prompts_ids", []) or []),
+                partial.get("swe_processed_message_count", "?"),
+                len((partial.get("swe_agent_state") or {}).get("init_input_ids", []) or []),
+                e,
+            )
+            raise
 
         try:
             result = await self._agent.resume(
                 env=swe_env, problem_statement=self.problem_statement, output_dir=output_dir
             )
-        except SglangGenerationAborted:
+        except SglangGenerationAborted as abort:
+            self._save_abort_partial(abort)
             self.partial_state = self._snapshot()
             self.partial_state["swe_env_handle"] = env.get_handle()
             await env.detach()
@@ -258,6 +282,27 @@ class RLTokenAgentWrapper(AbstractAgent):
 
         self._backfill_sample(result)
         return result
+
+    def _save_abort_partial(self, abort: SglangGenerationAborted) -> None:
+        carried_resp = list(getattr(self.model, "_pending_partial_resp", None) or [])
+        carried_lp = list(getattr(self.model, "_pending_partial_lp", None) or [])
+
+        new_resp = list(getattr(abort, "responses", None) or [])
+        new_lp = list(getattr(abort, "rollout_log_prob", None) or [])
+
+        merged_resp = carried_resp + new_resp
+        merged_lp = carried_lp + new_lp
+
+        siirl_sample = getattr(self.model, "_current_sample", None)
+        if siirl_sample is not None:
+            siirl_sample.partial_response_ids = merged_resp
+            siirl_sample.partial_rollout_log_prob = merged_lp
+            siirl_sample.partial_loss_mask = [1] * len(merged_resp)
+
+        # Clear model-side stash — it's ephemeral (one-_single_query-call)
+        # state and must not leak into a later unrelated generate.
+        self.model._pending_partial_resp = []
+        self.model._pending_partial_lp = []
 
     def _backfill_sample(self, result: AgentRunResult) -> None:
         """Write rollout outputs back onto the siirl Sample.
