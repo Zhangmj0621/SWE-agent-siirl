@@ -1036,10 +1036,6 @@ class DefaultAgent(AbstractAgent):
             # Forward model and get actions
             self._chook.on_model_query(messages=history, agent=self.name)
 
-            # Pause sandbox during LLM inference to free resources
-            if hasattr(self._env, "pause_sandbox"):
-                await self._env.pause_sandbox()
-
             # todo: Add all options to the extra info
             if self._action_sampler is not None:
                 assert self._problem_statement is not None
@@ -1054,10 +1050,6 @@ class DefaultAgent(AbstractAgent):
             else:
                 output = await self.model.query(history)  # type: ignore
 
-            # Resume sandbox before executing the action
-            if hasattr(self._env, "resume_sandbox"):
-                await self._env.resume_sandbox()
-
             step.output = output["message"]
             # todo: Can't I override the parser in __init__?
             step.thought, step.action = self.tools.parse_actions(output)
@@ -1067,9 +1059,20 @@ class DefaultAgent(AbstractAgent):
                 step.tool_calls = output["tool_calls"]
             self.logger.info(f"💭 THOUGHT\n{step.thought}\n\n🎬 ACTION\n{step.action.strip()}")
             self._chook.on_actions_generated(step=step)
-            return await self.handle_action(step)
+
+            # Resume sandbox right before env interaction
+            if hasattr(self._env, "resume_sandbox"):
+                await self._env.resume_sandbox()
+
+            result = await self.handle_action(step)
+
+            # Pause sandbox immediately after env interaction
+            if hasattr(self._env, "pause_sandbox"):
+                await self._env.pause_sandbox()
+
+            return result
         except Exception as e:
-            # Make sure sandbox is resumed on error path
+            # Make sure sandbox is resumed on error path (for autosubmission)
             if hasattr(self._env, "resume_sandbox"):
                 try:
                     await self._env.resume_sandbox()
