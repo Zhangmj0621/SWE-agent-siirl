@@ -1248,6 +1248,11 @@ class RLTokenAgent(AbstractAgent):
             # Forward model and get actions
             # Hooks/inspectors expect message-shaped history; token ids are the model input.
             self._chook.on_model_query(messages=self.messages, agent=self.name)
+
+            # Pause sandbox during LLM inference to free resources
+            if hasattr(self._env, "pause_sandbox"):
+                await self._env.pause_sandbox()
+
             # todo: Add all options to the extra info
             if self._action_sampler is not None:
                 assert self._problem_statement is not None
@@ -1264,26 +1269,29 @@ class RLTokenAgent(AbstractAgent):
                 # convert modelresponse to dict sweagent needed
                 output = asdict(output)
                 output["message"] = output.pop("output")
+
+            # Resume sandbox before executing the action
+            if hasattr(self._env, "resume_sandbox"):
+                await self._env.resume_sandbox()
+
             step.output = output["message"]
-            # if output.get("tool_calls") is None or output.get("tool_calls") == []:
-            #     self.logger.info(
-            #         f"[hujr-output-{self.uuid}] {output.get('message')} \n tool_parse: "
-            #         f"{self.model.parse_tools(output.get('message'), self.model.tools.tools, parser='qwen25')} \n "
-            #         f"tools:{self.model.tools.tools}"
-            #     )
             # todo: Can't I override the parser in __init__?
             step.thought, step.action = self.tools.parse_actions(output)
             step.thinking_blocks = output.get("thinking_blocks", [])
             step.reasoning_content = output.get("reasoning_content")
             step.output_tokens = output.get("output_tokens", [])
-            # step.reasoning_content = None
             if output.get("tool_calls") is not None:
                 step.tool_call_ids = [call["id"] for call in output["tool_calls"]]
                 step.tool_calls = output["tool_calls"]
-            # self.logger.info(f"💭 THOUGHT\n{step.thought}\n\n🎬 ACTION\n{step.action.strip()}")
             self._chook.on_actions_generated(step=step)
             return await self.handle_action(step)
         except Exception as e:
+            # Make sure sandbox is resumed on error path too
+            if hasattr(self._env, "resume_sandbox"):
+                try:
+                    await self._env.resume_sandbox()
+                except Exception:
+                    pass
             if step.action == step.thought == "":
                 # Probably the parsing failed/no action included. Let's still fill in thought
                 # so that trajectory viewers have something to show us for this step.

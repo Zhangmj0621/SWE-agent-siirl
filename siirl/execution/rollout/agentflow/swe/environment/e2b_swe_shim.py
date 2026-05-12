@@ -77,9 +77,6 @@ class _E2BRuntimeShim(AbstractRuntime):
         return CreateBashSessionResponse(output="".join(out_parts), session_type="bash")
 
     async def run_in_session(self, action: Action) -> Observation:
-        if self._env._step_pause_enabled and not self._env._step_pause_active:
-            self._env._step_pause_active = True
-            _log.info("[_E2BRuntimeShim] Step-pause now ACTIVE (first run_in_session call)")
         if isinstance(action, BashInterruptAction):
             await self._env.interrupt_session()
             return BashObservation(output="", exit_code=0, session_type="bash")
@@ -94,18 +91,12 @@ class _E2BRuntimeShim(AbstractRuntime):
             )
             return BashObservation(output=out, exit_code=0, session_type="bash")
 
-        await self._env._ensure_resumed()
-        self._env._inflight += 1
-        try:
-            inner = action.command
-            script = self._env._bash_one_shot(inner)
-            tout = float(action.timeout) if action.timeout is not None else 1800.0
-            r = await self._env._e2b.execute(script, check=False, timeout=tout)
-            await self._env._sync_cwd()
-            text = r.output.decode("utf-8", errors="replace")
-        finally:
-            self._env._inflight -= 1
-        await self._env._maybe_pause()
+        inner = action.command
+        script = self._env._bash_one_shot(inner)
+        tout = float(action.timeout) if action.timeout is not None else 1800.0
+        r = await self._env._e2b.execute(script, check=False, timeout=tout)
+        await self._env._sync_cwd()
+        text = r.output.decode("utf-8", errors="replace")
         if action.check == "ignore":
             return BashObservation(output=text, exit_code=None, session_type="bash")
         exit_code = int(r.returncode)
@@ -121,25 +112,20 @@ class _E2BRuntimeShim(AbstractRuntime):
         return CloseBashSessionResponse()
 
     async def execute(self, command: RexCommand) -> CommandResponse:
-        await self._env._ensure_resumed()
-        self._env._inflight += 1
-        try:
-            cmd = command.command
-            if isinstance(cmd, list):
-                inner = " ".join(shlex.quote(str(x)) for x in cmd) if command.shell else shlex.join([str(x) for x in cmd])
-            else:
-                inner = str(cmd)
-            script = inner
-            if command.cwd:
-                script = f"cd {shlex.quote(command.cwd)} && ({inner})"
-            if command.env:
-                exports = " && ".join(f"export {k}={shlex.quote(str(v))}" for k, v in command.env.items())
-                script = f"{exports} && {script}"
-            tout = float(command.timeout) if command.timeout is not None else 1800.0
-            r = await self._env._e2b.execute(script, cwd=None, env={}, check=False, timeout=tout)
-            text = r.output.decode("utf-8", errors="replace")
-        finally:
-            self._env._inflight -= 1
+        cmd = command.command
+        if isinstance(cmd, list):
+            inner = " ".join(shlex.quote(str(x)) for x in cmd) if command.shell else shlex.join([str(x) for x in cmd])
+        else:
+            inner = str(cmd)
+        script = inner
+        if command.cwd:
+            script = f"cd {shlex.quote(command.cwd)} && ({inner})"
+        if command.env:
+            exports = " && ".join(f"export {k}={shlex.quote(str(v))}" for k, v in command.env.items())
+            script = f"{exports} && {script}"
+        tout = float(command.timeout) if command.timeout is not None else 1800.0
+        r = await self._env._e2b.execute(script, cwd=None, env={}, check=False, timeout=tout)
+        text = r.output.decode("utf-8", errors="replace")
         if command.check and r.returncode != 0:
             msg = f"Command failed (exit code: {r.returncode}): {text[:2000]}"
             if command.error_msg:
@@ -159,12 +145,7 @@ class _E2BRuntimeShim(AbstractRuntime):
         return WriteFileResponse()
 
     async def upload(self, request: UploadRequest) -> UploadResponse:
-        await self._env._ensure_resumed()
-        self._env._inflight += 1
-        try:
-            await self._env._e2b.copy(request.source_path, request.target_path, upload=True, timeout=600.0)
-        finally:
-            self._env._inflight -= 1
+        await self._env._e2b.copy(request.source_path, request.target_path, upload=True, timeout=600.0)
         return UploadResponse()
 
     async def close(self) -> CloseResponse:
@@ -217,8 +198,6 @@ class E2BSWEEnvShim:
         if e2b.default_env.get("PATH"):
             self._exports["PATH"] = e2b.default_env["PATH"]
         self._step_pause_enabled = False
-        self._step_pause_active = False
-        self._inflight = 0
         self._resume_lock = asyncio.Lock()
         self.deployment = _E2BDeploymentShim(self)
 
@@ -227,33 +206,32 @@ class E2BSWEEnvShim:
         return self._e2b.alive
 
     def enable_step_pause(self) -> None:
-        """Enable per-step sandbox pause/resume. Call after bootstrap completes."""
+        """Enable per-step sandbox pause/resume."""
         self._step_pause_enabled = True
         _log.info("[E2BSWEEnvShim] Per-step sandbox pause/resume ENABLED")
 
     def disable_step_pause(self) -> None:
         self._step_pause_enabled = False
-        self._step_pause_active = False
 
-    async def _ensure_resumed(self) -> None:
-        if not self._step_pause_active or not self._e2b.is_paused:
-            return
-        async with self._resume_lock:
-            if self._e2b.is_paused:
-                _log.debug("[E2BSWEEnvShim] Resuming sandbox before command execution")
-                await self._e2b.resume_sandbox()
-
-    async def _maybe_pause(self) -> None:
-        if not self._step_pause_active or self._e2b.is_paused:
-            return
-        if self._inflight > 0:
+    async def pause_sandbox(self) -> None:
+        """Explicitly pause sandbox (called by agent before LLM inference)."""
+        if not self._step_pause_enabled or self._e2b.is_paused:
             return
         try:
             await self._e2b.pause_sandbox()
+            _log.debug("[E2BSWEEnvShim] Sandbox paused for inference")
         except Exception as exc:
             _log.warning(f"[E2BSWEEnvShim] pause_sandbox() failed ({exc}); disabling step-pause")
             self._step_pause_enabled = False
-            self._step_pause_active = False
+
+    async def resume_sandbox(self) -> None:
+        """Explicitly resume sandbox (called by agent before command execution)."""
+        if not self._step_pause_enabled or not self._e2b.is_paused:
+            return
+        async with self._resume_lock:
+            if self._e2b.is_paused:
+                await self._e2b.resume_sandbox()
+                _log.debug("[E2BSWEEnvShim] Sandbox resumed for execution")
 
     def _bash_one_shot(self, inner: str) -> str:
         export_prefix = ""
@@ -289,21 +267,15 @@ class E2BSWEEnvShim:
         if input is not None and ("git log" in input or "git diff" in input or "git show" in input):
             return "Illegal actions: `git log`, `git diff`, and `git show` are not allowed."
 
-        await self._ensure_resumed()
-        self._inflight += 1
-        try:
-            script = self._bash_one_shot(input)
-            out = await self._e2b.execute(script, check=False, timeout=float(timeout))
-            await self._sync_cwd()
-            text = out.output.decode("utf-8", errors="replace")
-            if check != "ignore" and out.returncode != 0:
-                _log.error("%s:\n%s", error_msg, text[:2000])
-                msg = f"Command {input!r} failed (exit_code={out.returncode}): {error_msg}"
-                if check == "raise":
-                    raise RuntimeError(msg)
-        finally:
-            self._inflight -= 1
-        await self._maybe_pause()
+        script = self._bash_one_shot(input)
+        out = await self._e2b.execute(script, check=False, timeout=float(timeout))
+        await self._sync_cwd()
+        text = out.output.decode("utf-8", errors="replace")
+        if check != "ignore" and out.returncode != 0:
+            _log.error("%s:\n%s", error_msg, text[:2000])
+            msg = f"Command {input!r} failed (exit_code={out.returncode}): {error_msg}"
+            if check == "raise":
+                raise RuntimeError(msg)
         return text
 
     async def set_env_variables(self, env_variables: dict[str, str]) -> None:
@@ -312,31 +284,16 @@ class E2BSWEEnvShim:
         self._exports.update({str(k): str(v) for k, v in env_variables.items()})
 
     async def read_file(self, path: str | PurePath, encoding: str | None = None, errors: str | None = None) -> str:
-        await self._ensure_resumed()
-        self._inflight += 1
-        try:
-            enc = encoding or "utf-8"
-            err = errors or "strict"
-            return await self._e2b.read_file(str(path), encoding=enc, errors=err)
-        finally:
-            self._inflight -= 1
+        enc = encoding or "utf-8"
+        err = errors or "strict"
+        return await self._e2b.read_file(str(path), encoding=enc, errors=err)
 
     async def write_file(self, path: str | PurePath, content: str) -> None:
-        await self._ensure_resumed()
-        self._inflight += 1
-        try:
-            await self._e2b.write_file(str(path), content)
-        finally:
-            self._inflight -= 1
+        await self._e2b.write_file(str(path), content)
 
     async def upload(self, *, source_path: str, target_path: str, timeout: float = 600.0) -> None:
         """Host → sandbox copy; used by ``SiiToolHandler._upload_bundles``."""
-        await self._ensure_resumed()
-        self._inflight += 1
-        try:
-            await self._e2b.copy(source_path, target_path, upload=True, timeout=timeout)
-        finally:
-            self._inflight -= 1
+        await self._e2b.copy(source_path, target_path, upload=True, timeout=timeout)
 
     async def execute(
         self,
@@ -349,14 +306,9 @@ class E2BSWEEnvShim:
         check: bool = True,
     ) -> ContainerOutput:
         """One-shot command like ``E2BEnv.execute``; used by ``SiiToolHandler._is_command_available``."""
-        await self._ensure_resumed()
-        self._inflight += 1
-        try:
-            return await self._e2b.execute(
-                cmd, stdin=stdin, cwd=cwd, env=env, forward_env=forward_env, timeout=timeout, check=check
-            )
-        finally:
-            self._inflight -= 1
+        return await self._e2b.execute(
+            cmd, stdin=stdin, cwd=cwd, env=env, forward_env=forward_env, timeout=timeout, check=check
+        )
 
     async def execute_command(
         self,
