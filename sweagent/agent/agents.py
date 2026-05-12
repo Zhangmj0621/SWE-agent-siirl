@@ -1035,6 +1035,11 @@ class DefaultAgent(AbstractAgent):
         try:
             # Forward model and get actions
             self._chook.on_model_query(messages=history, agent=self.name)
+
+            # Pause sandbox during LLM inference to free resources
+            if hasattr(self._env, "pause_sandbox"):
+                await self._env.pause_sandbox()
+
             # todo: Add all options to the extra info
             if self._action_sampler is not None:
                 assert self._problem_statement is not None
@@ -1048,6 +1053,11 @@ class DefaultAgent(AbstractAgent):
                 step.extra_info.update(best.extra_info)
             else:
                 output = await self.model.query(history)  # type: ignore
+
+            # Resume sandbox before executing the action
+            if hasattr(self._env, "resume_sandbox"):
+                await self._env.resume_sandbox()
+
             step.output = output["message"]
             # todo: Can't I override the parser in __init__?
             step.thought, step.action = self.tools.parse_actions(output)
@@ -1059,6 +1069,12 @@ class DefaultAgent(AbstractAgent):
             self._chook.on_actions_generated(step=step)
             return await self.handle_action(step)
         except Exception as e:
+            # Make sure sandbox is resumed on error path
+            if hasattr(self._env, "resume_sandbox"):
+                try:
+                    await self._env.resume_sandbox()
+                except Exception:
+                    pass
             if step.action == step.thought == "":
                 # Probably the parsing failed/no action included. Let's still fill in thought
                 # so that trajectory viewers have something to show us for this step.
