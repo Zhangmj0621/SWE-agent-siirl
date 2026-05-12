@@ -206,6 +206,8 @@ class E2BSWEEnvShim:
         self.name = "main"
         self._cwd = initial_cwd
         self._exports: dict[str, str] = {"ROOT": initial_cwd}
+        if e2b.default_env.get("PATH"):
+            self._exports["PATH"] = e2b.default_env["PATH"]
         self._step_pause_enabled = False
         self._inflight = 0
         self._resume_lock = asyncio.Lock()
