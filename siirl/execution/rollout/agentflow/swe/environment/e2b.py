@@ -561,12 +561,18 @@ class E2BEnvBuilder(ContainerEnvBuilder):
         self.allow_internet_access = bool(conf.get("allow_internet_access", True))
         self.auto_pause = bool(conf.get("auto_pause", False))
         self.template_map = conf.get("template_map", {})
+        self.template_suffix = conf.get("template_suffix", "")
         self.enable_build = bool(conf.get("enable_build", False))
 
     def _resolve_template(self, image_or_template: str) -> str:
         if image_or_template in self.template_map:
             return str(self.template_map[image_or_template])
-        return _e2b_template_alias_for_docker_image(image_or_template)
+        alias = _e2b_template_alias_for_docker_image(image_or_template)
+        if self.template_suffix:
+            alias = alias + self.template_suffix
+        if len(alias) > 64:
+            alias = alias[:64]
+        return alias
 
     def _connect_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
