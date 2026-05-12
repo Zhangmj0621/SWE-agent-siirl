@@ -399,6 +399,12 @@ class E2BRLContainerEnv(ContainerEnv):
     def disable_step_pause(self) -> None:
         self._shim.disable_step_pause()
 
+    async def pause_sandbox(self) -> None:
+        await self._shim.pause_sandbox()
+
+    async def resume_sandbox(self) -> None:
+        await self._shim.resume_sandbox()
+
     @property
     def alive(self) -> bool:
         return self._inner.alive

@@ -409,6 +409,7 @@ class SWEAgentFlow(AgentFlow):
             await m.runtime.bootstrap(env)  # idempotent — resume path is a no-op
             if hasattr(env, "enable_step_pause"):
                 env.enable_step_pause()
+            if hasattr(env, "pause_sandbox"):
                 await env.pause_sandbox()
             if partial:
                 await m.agent.resume(env, partial)
