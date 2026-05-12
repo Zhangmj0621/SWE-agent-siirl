@@ -1249,10 +1249,6 @@ class RLTokenAgent(AbstractAgent):
             # Hooks/inspectors expect message-shaped history; token ids are the model input.
             self._chook.on_model_query(messages=self.messages, agent=self.name)
 
-            # Pause sandbox during LLM inference to free resources
-            if hasattr(self._env, "pause_sandbox"):
-                await self._env.pause_sandbox()
-
             # todo: Add all options to the extra info
             if self._action_sampler is not None:
                 assert self._problem_statement is not None
@@ -1270,10 +1266,6 @@ class RLTokenAgent(AbstractAgent):
                 output = asdict(output)
                 output["message"] = output.pop("output")
 
-            # Resume sandbox before executing the action
-            if hasattr(self._env, "resume_sandbox"):
-                await self._env.resume_sandbox()
-
             step.output = output["message"]
             # todo: Can't I override the parser in __init__?
             step.thought, step.action = self.tools.parse_actions(output)
@@ -1284,9 +1276,20 @@ class RLTokenAgent(AbstractAgent):
                 step.tool_call_ids = [call["id"] for call in output["tool_calls"]]
                 step.tool_calls = output["tool_calls"]
             self._chook.on_actions_generated(step=step)
-            return await self.handle_action(step)
+
+            # Resume sandbox right before env interaction
+            if hasattr(self._env, "resume_sandbox"):
+                await self._env.resume_sandbox()
+
+            result = await self.handle_action(step)
+
+            # Pause sandbox immediately after env interaction
+            if hasattr(self._env, "pause_sandbox"):
+                await self._env.pause_sandbox()
+
+            return result
         except Exception as e:
-            # Make sure sandbox is resumed on error path too
+            # Make sure sandbox is resumed on error path (for autosubmission)
             if hasattr(self._env, "resume_sandbox"):
                 try:
                     await self._env.resume_sandbox()
