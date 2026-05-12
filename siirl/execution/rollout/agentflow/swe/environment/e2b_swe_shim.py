@@ -43,7 +43,7 @@ from swerex.runtime.abstract import (
     WriteFileResponse,
 )
 
-from .base import ContainerEnv
+from .base import ContainerEnv, ContainerOutput
 from .e2b import E2BEnv
 
 _log = logging.getLogger(__name__)
@@ -77,6 +77,9 @@ class _E2BRuntimeShim(AbstractRuntime):
         return CreateBashSessionResponse(output="".join(out_parts), session_type="bash")
 
     async def run_in_session(self, action: Action) -> Observation:
+        if self._env._step_pause_enabled and not self._env._step_pause_active:
+            self._env._step_pause_active = True
+            _log.info("[_E2BRuntimeShim] Step-pause now ACTIVE (first run_in_session call)")
         if isinstance(action, BashInterruptAction):
             await self._env.interrupt_session()
             return BashObservation(output="", exit_code=0, session_type="bash")
@@ -118,20 +121,25 @@ class _E2BRuntimeShim(AbstractRuntime):
         return CloseBashSessionResponse()
 
     async def execute(self, command: RexCommand) -> CommandResponse:
-        cmd = command.command
-        if isinstance(cmd, list):
-            inner = " ".join(shlex.quote(str(x)) for x in cmd) if command.shell else shlex.join([str(x) for x in cmd])
-        else:
-            inner = str(cmd)
-        script = inner
-        if command.cwd:
-            script = f"cd {shlex.quote(command.cwd)} && ({inner})"
-        if command.env:
-            exports = " && ".join(f"export {k}={shlex.quote(str(v))}" for k, v in command.env.items())
-            script = f"{exports} && {script}"
-        tout = float(command.timeout) if command.timeout is not None else 1800.0
-        r = await self._env._e2b.execute(script, cwd=None, env={}, check=False, timeout=tout)
-        text = r.output.decode("utf-8", errors="replace")
+        await self._env._ensure_resumed()
+        self._env._inflight += 1
+        try:
+            cmd = command.command
+            if isinstance(cmd, list):
+                inner = " ".join(shlex.quote(str(x)) for x in cmd) if command.shell else shlex.join([str(x) for x in cmd])
+            else:
+                inner = str(cmd)
+            script = inner
+            if command.cwd:
+                script = f"cd {shlex.quote(command.cwd)} && ({inner})"
+            if command.env:
+                exports = " && ".join(f"export {k}={shlex.quote(str(v))}" for k, v in command.env.items())
+                script = f"{exports} && {script}"
+            tout = float(command.timeout) if command.timeout is not None else 1800.0
+            r = await self._env._e2b.execute(script, cwd=None, env={}, check=False, timeout=tout)
+            text = r.output.decode("utf-8", errors="replace")
+        finally:
+            self._env._inflight -= 1
         if command.check and r.returncode != 0:
             msg = f"Command failed (exit code: {r.returncode}): {text[:2000]}"
             if command.error_msg:
@@ -209,6 +217,7 @@ class E2BSWEEnvShim:
         if e2b.default_env.get("PATH"):
             self._exports["PATH"] = e2b.default_env["PATH"]
         self._step_pause_enabled = False
+        self._step_pause_active = False
         self._inflight = 0
         self._resume_lock = asyncio.Lock()
         self.deployment = _E2BDeploymentShim(self)
@@ -224,9 +233,10 @@ class E2BSWEEnvShim:
 
     def disable_step_pause(self) -> None:
         self._step_pause_enabled = False
+        self._step_pause_active = False
 
     async def _ensure_resumed(self) -> None:
-        if not self._step_pause_enabled or not self._e2b.is_paused:
+        if not self._step_pause_active or not self._e2b.is_paused:
             return
         async with self._resume_lock:
             if self._e2b.is_paused:
@@ -234,7 +244,7 @@ class E2BSWEEnvShim:
                 await self._e2b.resume_sandbox()
 
     async def _maybe_pause(self) -> None:
-        if not self._step_pause_enabled or self._e2b.is_paused:
+        if not self._step_pause_active or self._e2b.is_paused:
             return
         if self._inflight > 0:
             return
@@ -243,6 +253,7 @@ class E2BSWEEnvShim:
         except Exception as exc:
             _log.warning(f"[E2BSWEEnvShim] pause_sandbox() failed ({exc}); disabling step-pause")
             self._step_pause_enabled = False
+            self._step_pause_active = False
 
     def _bash_one_shot(self, inner: str) -> str:
         export_prefix = ""
@@ -338,9 +349,14 @@ class E2BSWEEnvShim:
         check: bool = True,
     ) -> ContainerOutput:
         """One-shot command like ``E2BEnv.execute``; used by ``SiiToolHandler._is_command_available``."""
-        return await self._e2b.execute(
-            cmd, stdin=stdin, cwd=cwd, env=env, forward_env=forward_env, timeout=timeout, check=check
-        )
+        await self._ensure_resumed()
+        self._inflight += 1
+        try:
+            return await self._e2b.execute(
+                cmd, stdin=stdin, cwd=cwd, env=env, forward_env=forward_env, timeout=timeout, check=check
+            )
+        finally:
+            self._inflight -= 1
 
     async def execute_command(
         self,
