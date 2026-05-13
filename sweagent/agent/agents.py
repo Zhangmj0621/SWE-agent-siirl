@@ -1285,7 +1285,11 @@ class DefaultAgent(AbstractAgent):
 
         self.info["submission"] = step_output.submission
         self.info["exit_status"] = step_output.exit_status  # type: ignore
+        if hasattr(self._env, "resume_sandbox"):
+            await self._env.resume_sandbox()
         self.info.update(await self._get_edited_files_with_context(patch=step_output.submission or ""))  # type: ignore
+        if hasattr(self._env, "pause_sandbox"):
+            await self._env.pause_sandbox()
         self.info["model_stats"] = self.model.stats.model_dump()
 
         self.add_step_to_trajectory(step_output)
