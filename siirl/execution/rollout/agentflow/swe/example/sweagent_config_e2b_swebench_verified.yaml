@@ -1,0 +1,117 @@
+"name": swe
+"environment":
+  "name": e2b
+  "repo_name": "testbed"
+  "startup_timeout": 600.0
+  "runtime_timeout": 1800.0
+  "close_timeout": 30.0
+  "install_sweagent_tools_adapter": true
+  "install_sweagent_tools": true
+  "sweagent_tools_host_path": "siirl/3rdparty/swe-agent/tools"
+  "sweagent_bundles":
+    - "registry"
+    - "edit_anthropic"
+    - "review_on_submit_m"
+  "template_strip_prefix": "swebench-"
+  "template_replace_suffix":
+    "-latest": "-2c4g"
+"runtime":
+  "name": swebench_agent
+  "use_acr": false
+  "save_eval_logs": False
+  "timeout": 300.0
+  "allow_partial_patch": False
+  "use_run_instance_k8s_for_rl": False
+
+"thread_pool":
+  "max_workers": 256
+
+agent:
+  name: "sweagent"
+  max_requeries: 5
+  templates:
+    system_template: |-
+      You are a helpful assistant that can interact with a computer to solve tasks.
+    instance_template: |-
+      <uploaded_files>
+      {{working_dir}}
+      </uploaded_files>
+      I've uploaded a python code repository in the directory {{working_dir}}. Consider the following PR description:
+
+      <pr_description>
+      {{problem_statement}}
+      </pr_description>
+
+      Can you help me implement the necessary changes to the repository so that the requirements specified in the <pr_description> are met?
+      I've already taken care of all changes to any of the test files described in the <pr_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+      Your task is to make the minimal changes to non-tests files in the {{working_dir}} directory to ensure the <pr_description> is satisfied.
+      Follow these steps to resolve the issue:
+      1. As a first step, it might be a good idea to find and read code relevant to the <pr_description>
+      2. Create a script to reproduce the error and execute it with `python <filename.py>` using the bash tool, to confirm the error
+      3. Edit the sourcecode of the repo to resolve the issue
+      4. Rerun your reproduce script and confirm that the error is fixed!
+      5. Think about edgecases and make sure your fix handles them as well
+      Your thinking should be thorough and so it's fine if it's very long.
+    next_step_template: |-
+      OBSERVATION:
+      {{observation}}
+    next_step_no_output_template: |-
+      Your command ran successfully and did not produce any output.
+  model:
+    per_instance_cost_limit: 0
+    total_cost_limit: 0
+    per_instance_call_limit: 300
+    completion_kwargs:
+      timeout: 60
+    retry:
+      retries: 5
+      min_wait: 10
+      max_wait: 180
+    max_input_tokens: 126976
+    max_output_tokens: 4096
+    max_workers: 1024
+    tool_parser: qwen25
+    temperature: 0.7
+  tools:
+    execution_timeout: 1800
+    total_execution_timeout: 3600
+    env_variables:
+      PAGER: cat
+      MANPAGER: cat
+      LESS: -R
+      PIP_PROGRESS_BAR: 'off'
+      TQDM_DISABLE: '1'
+      GIT_PAGER: cat
+    bundles:
+      - path: tools/registry
+      - path: tools/edit_anthropic
+      - path: tools/review_on_submit_m
+    registry_variables:
+      USE_FILEMAP: 'true'
+      SUBMIT_REVIEW_MESSAGES:
+        - |
+          Thank you for your work on this issue. Please carefully follow the steps below to help review your changes.
+
+          1. If you made any changes to your code after running the reproduction script, please run the reproduction script again.
+            If the reproduction script is failing, please revisit your changes and make sure they are correct.
+            If you have already removed your reproduction script, please ignore this step.
+          2. Remove your reproduction script (if you haven't done so already).
+          3. If you have modified any TEST files, please revert them to the state they had before you started fixing the issue.
+            You can do this with `git checkout -- /path/to/test/file.py`. Use below <diff> to find the files you need to revert.
+          4. Run the submit command again to confirm.
+
+          Here is a list of all of your changes:
+
+          <diff>
+          {{diff}}
+          </diff>
+    enable_bash_tool: true
+    parse_function:
+      type: function_calling
+  history_processors: []
+"validate_agent":
+  "name": "litellm_agent"
+  "model":
+    "name": "qwen2.5-32b"
+    "api_key": "dummy"
+    "temperature": 0.7

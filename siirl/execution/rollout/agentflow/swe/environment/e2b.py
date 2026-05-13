@@ -562,12 +562,20 @@ class E2BEnvBuilder(ContainerEnvBuilder):
         self.auto_pause = bool(conf.get("auto_pause", False))
         self.template_map = conf.get("template_map", {})
         self.template_suffix = conf.get("template_suffix", "")
+        self.template_strip_prefix = conf.get("template_strip_prefix", "")
+        self.template_replace_suffix = conf.get("template_replace_suffix", {})
         self.enable_build = bool(conf.get("enable_build", False))
 
     def _resolve_template(self, image_or_template: str) -> str:
         if image_or_template in self.template_map:
             return str(self.template_map[image_or_template])
         alias = _e2b_template_alias_for_docker_image(image_or_template)
+        if self.template_strip_prefix and alias.startswith(self.template_strip_prefix):
+            alias = alias[len(self.template_strip_prefix):]
+        for old_suffix, new_suffix in self.template_replace_suffix.items():
+            if alias.endswith(old_suffix):
+                alias = alias[: -len(old_suffix)] + new_suffix
+                break
         if self.template_suffix:
             alias = alias + self.template_suffix
         if len(alias) > 64:
