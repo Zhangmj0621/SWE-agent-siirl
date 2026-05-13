@@ -335,6 +335,21 @@ class E2BEnv(ContainerEnv):
             self.sandbox = await AsyncSandbox.connect(sid, **kwargs)
 
         self._paused_sandbox_id = None
+
+        # Probe command channel to ensure envd stream is fully ready after resume
+        try:
+            await self.sandbox.commands.run("true", timeout=10, user="root")
+        except Exception as probe_exc:
+            logger.warning(f"[E2BEnv] post-resume probe failed ({probe_exc}), retrying connect...")
+            import asyncio
+            await asyncio.sleep(1)
+            try:
+                self.sandbox = await AsyncSandbox.connect(sid, **kwargs)
+                await self.sandbox.commands.run("true", timeout=10, user="root")
+            except Exception as retry_exc:
+                logger.error(f"[E2BEnv] retry connect also failed: {retry_exc}")
+                raise
+
         logger.debug(f"[E2BEnv] sandbox resumed (id={sid})")
 
     def _merge_env(self, env: dict[str, str], forward_env: list[str]) -> dict[str, str]:
