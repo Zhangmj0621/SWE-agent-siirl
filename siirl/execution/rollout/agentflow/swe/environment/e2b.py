@@ -279,6 +279,7 @@ class E2BEnv(ContainerEnv):
         default_forward_env: list[str] | None = None,
         request_timeout: float | None = None,
         resume_kwargs: dict[str, Any] | None = None,
+        sandbox_timeout: int = 3600,
     ):
         self.sandbox = sandbox
         self.default_cwd = default_cwd
@@ -288,6 +289,7 @@ class E2BEnv(ContainerEnv):
         self._closed = False
         self._resume_kwargs: dict[str, Any] = resume_kwargs or {}
         self._paused_sandbox_id: str | None = None
+        self._sandbox_timeout = sandbox_timeout
 
     @property
     def is_paused(self) -> bool:
@@ -324,6 +326,7 @@ class E2BEnv(ContainerEnv):
         _patch_e2b_sdk_parse_http200_create_sandbox()
         sid = self._paused_sandbox_id
         kwargs = dict(self._resume_kwargs)
+        kwargs["timeout"] = self._sandbox_timeout
         if self.request_timeout is not None:
             kwargs["request_timeout"] = self.request_timeout
 
@@ -723,6 +726,7 @@ class E2BEnvBuilder(ContainerEnvBuilder):
             default_forward_env=args.forward_env,
             request_timeout=self.request_timeout,
             resume_kwargs=self._connect_kwargs(),
+            sandbox_timeout=self.timeout,
         )
 
         if skip_tool_install and not resume_cwd:
