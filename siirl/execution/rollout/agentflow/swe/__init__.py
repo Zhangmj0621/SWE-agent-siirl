@@ -413,6 +413,8 @@ class SWEAgentFlow(AgentFlow):
                 await m.agent.resume(env, partial)
             else:
                 await m.agent.run(env)
+            if hasattr(env, "resume_sandbox"):
+                await env.resume_sandbox()
             await m.runtime.diff(env)
         except SglangGenerationAborted:
             # RLTokenAgentWrapper.run/resume already did:
