@@ -1103,6 +1103,11 @@ class DefaultAgent(AbstractAgent):
         async def handle_error_with_autosubmission(exit_status: str, message: str) -> StepOutput:
             """Attempts to autosubmit (extract patch from the environment) and stops the loop."""
             self.logger.warning(message)
+            if hasattr(self._env, "resume_sandbox"):
+                try:
+                    await self._env.resume_sandbox()
+                except Exception:
+                    pass
             return await self.attempt_autosubmission_after_error(
                 StepOutput(
                     thought=message,
@@ -1542,6 +1547,11 @@ class RLTokenAgent(DefaultAgent):
                 }
             )
             self.logger.warning(message)
+            if hasattr(self._env, "resume_sandbox"):
+                try:
+                    await self._env.resume_sandbox()
+                except Exception:
+                    pass
             step = getattr(exception, "step", StepOutput())
             step.thought = message
             step.exit_status = exit_status
@@ -1691,7 +1701,11 @@ class RLTokenAgent(DefaultAgent):
 
         self.info["submission"] = step_output.submission
         self.info["exit_status"] = step_output.exit_status  # type: ignore[index]
+        if hasattr(self._env, "resume_sandbox"):
+            await self._env.resume_sandbox()
         self.info.update(await self._get_edited_files_with_context(patch=step_output.submission or ""))  # type: ignore[arg-type]
+        if hasattr(self._env, "pause_sandbox"):
+            await self._env.pause_sandbox()
         self.info["model_stats"] = self.model.stats.model_dump()
 
         self.add_step_to_trajectory(step_output)
