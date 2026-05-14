@@ -400,7 +400,9 @@ class FunctionCallingParser(AbstractParseFunction, BaseModel):
         if not command:
             msg = f"Command '{name}' not found in list of available commands."
             raise FunctionCallingFormatError(msg, "invalid_command")
-        if not isinstance(tool_call["function"]["arguments"], dict):
+        if isinstance(tool_call["function"]["arguments"], dict):
+            values = tool_call["function"]["arguments"]
+        else:
             try:
                 values = json.loads(tool_call["function"]["arguments"])
             except json.JSONDecodeError:
