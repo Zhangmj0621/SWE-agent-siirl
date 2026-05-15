@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import contextlib
 import json
@@ -330,29 +331,35 @@ class E2BEnv(ContainerEnv):
         if self.request_timeout is not None:
             kwargs["request_timeout"] = self.request_timeout
 
-        try:
-            self.sandbox = await AsyncSandbox.connect(sid, **kwargs)
-        except TypeError:
-            for key in ("force_http", "request_timeout", "timeout"):
-                kwargs.pop(key, None)
-            self.sandbox = await AsyncSandbox.connect(sid, **kwargs)
+        max_retries = 3
+        retry_delays = [5, 10, 20]
+
+        async def _do_connect() -> Any:
+            try:
+                return await AsyncSandbox.connect(sid, **kwargs)
+            except TypeError:
+                kw = {k: v for k, v in kwargs.items() if k not in ("force_http", "request_timeout", "timeout")}
+                return await AsyncSandbox.connect(sid, **kw)
+
+        for attempt in range(max_retries + 1):
+            try:
+                self.sandbox = await _do_connect()
+                # Probe command channel to ensure envd stream is fully ready
+                await self.sandbox.commands.run("true", timeout=10, user="root")
+                break
+            except Exception as e:
+                err = str(e).lower()
+                is_retryable = "deadline exceeded" in err or "timeout" in err or "504" in err or "502" in err
+                if not is_retryable or attempt >= max_retries:
+                    logger.error(f"[E2BEnv] resume_sandbox failed after {attempt + 1} attempts: {e}")
+                    self.sandbox = None
+                    raise
+                delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                logger.warning(f"[E2BEnv] resume_sandbox failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay}s...")
+                self.sandbox = None
+                await asyncio.sleep(delay)
 
         self._paused_sandbox_id = None
-
-        # Probe command channel to ensure envd stream is fully ready after resume
-        try:
-            await self.sandbox.commands.run("true", timeout=10, user="root")
-        except Exception as probe_exc:
-            logger.warning(f"[E2BEnv] post-resume probe failed ({probe_exc}), retrying connect...")
-            import asyncio
-            await asyncio.sleep(1)
-            try:
-                self.sandbox = await AsyncSandbox.connect(sid, **kwargs)
-                await self.sandbox.commands.run("true", timeout=10, user="root")
-            except Exception as retry_exc:
-                logger.error(f"[E2BEnv] retry connect also failed: {retry_exc}")
-                raise
-
         logger.debug(f"[E2BEnv] sandbox resumed (id={sid})")
 
     def _merge_env(self, env: dict[str, str], forward_env: list[str]) -> dict[str, str]:
@@ -675,50 +682,78 @@ class E2BEnvBuilder(ContainerEnvBuilder):
 
         skip_tool_install = False
         _patch_e2b_sdk_parse_http200_create_sandbox()
-        try:
-            if sandbox_id:
-                logger.info(f"[E2BEnvBuilder] Partial-rollout resume: AsyncSandbox.connect({sandbox_id!r})")
-                connect_kwargs: dict[str, Any] = {**self._connect_kwargs(), "timeout": self.timeout}
-                if self.request_timeout is not None:
-                    connect_kwargs["request_timeout"] = self.request_timeout
-                try:
-                    sandbox = await AsyncSandbox.connect(sandbox_id, **connect_kwargs)
-                except TypeError:
-                    for key in ("force_http", "request_timeout", "timeout"):
-                        connect_kwargs.pop(key, None)
-                    sandbox = await AsyncSandbox.connect(sandbox_id, **connect_kwargs)
-                skip_tool_install = True
-            else:
-                create_kwargs: dict[str, Any] = {
-                    **self._connect_kwargs(),
-                    "template": template,
-                    "timeout": self.timeout,
-                    "auto_pause": self.auto_pause,
-                    "allow_internet_access": self.allow_internet_access,
-                }
-                if self.request_timeout is not None:
-                    create_kwargs["request_timeout"] = self.request_timeout
-                try:
-                    sandbox = await AsyncSandbox.beta_create(**create_kwargs)
-                except TypeError:
-                    for key in ("force_http", "request_timeout", "auto_pause", "allow_internet_access"):
-                        create_kwargs.pop(key, None)
-                    sandbox = await AsyncSandbox.beta_create(**create_kwargs)
-        except Exception as e:
-            err = str(e).lower()
-            if (
-                "no address associated with hostname" in err
-                or "name or service not known" in err
-                or type(e).__name__ == "gaierror"
-            ):
-                raise EnvCreateError(
-                    "E2B: cannot resolve the sandbox envd hostname (DNS). "
-                    "E2B_API_URL only reaches the control plane; after create, the SDK connects to "
-                    "`<port>-<sandbox_id>.<sandbox_domain>`. Ensure this machine resolves that host "
-                    "(internal DNS, split-horizon, /etc/hosts, or ops-provided edge — see "
-                    "examples/swe_e2b_smoke/raw_post_sandbox.py header for E2B_DOMAIN / envd notes)."
-                ) from e
-            raise
+
+        max_retries = int(self.config.get("start_retries", 3))
+        retry_delays = [10, 30, 60]  # seconds between retries
+
+        async def _create_sandbox() -> Any:
+            create_kwargs: dict[str, Any] = {
+                **self._connect_kwargs(),
+                "template": template,
+                "timeout": self.timeout,
+                "auto_pause": self.auto_pause,
+                "allow_internet_access": self.allow_internet_access,
+            }
+            if self.request_timeout is not None:
+                create_kwargs["request_timeout"] = self.request_timeout
+            try:
+                return await AsyncSandbox.beta_create(**create_kwargs)
+            except TypeError:
+                for key in ("force_http", "request_timeout", "auto_pause", "allow_internet_access"):
+                    create_kwargs.pop(key, None)
+                return await AsyncSandbox.beta_create(**create_kwargs)
+
+        async def _connect_sandbox(sid: str) -> Any:
+            connect_kwargs: dict[str, Any] = {**self._connect_kwargs(), "timeout": self.timeout}
+            if self.request_timeout is not None:
+                connect_kwargs["request_timeout"] = self.request_timeout
+            try:
+                return await AsyncSandbox.connect(sid, **connect_kwargs)
+            except TypeError:
+                for key in ("force_http", "request_timeout", "timeout"):
+                    connect_kwargs.pop(key, None)
+                return await AsyncSandbox.connect(sid, **connect_kwargs)
+
+        def _is_retryable(exc: Exception) -> bool:
+            err = str(exc).lower()
+            if "no address associated with hostname" in err or "name or service not known" in err:
+                return False
+            if type(exc).__name__ == "gaierror":
+                return False
+            return "deadline exceeded" in err or "timeout" in err or "504" in err or "502" in err
+
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                if sandbox_id:
+                    logger.info(f"[E2BEnvBuilder] Partial-rollout resume: AsyncSandbox.connect({sandbox_id!r}) (attempt {attempt + 1}/{max_retries + 1})")
+                    sandbox = await _connect_sandbox(sandbox_id)
+                    skip_tool_install = True
+                else:
+                    if attempt > 0:
+                        logger.info(f"[E2BEnvBuilder] Retrying beta_create (attempt {attempt + 1}/{max_retries + 1})")
+                    sandbox = await _create_sandbox()
+                break
+            except Exception as e:
+                last_exc = e
+                err = str(e).lower()
+                if (
+                    "no address associated with hostname" in err
+                    or "name or service not known" in err
+                    or type(e).__name__ == "gaierror"
+                ):
+                    raise EnvCreateError(
+                        "E2B: cannot resolve the sandbox envd hostname (DNS). "
+                        "E2B_API_URL only reaches the control plane; after create, the SDK connects to "
+                        "`<port>-<sandbox_id>.<sandbox_domain>`. Ensure this machine resolves that host "
+                        "(internal DNS, split-horizon, /etc/hosts, or ops-provided edge — see "
+                        "examples/swe_e2b_smoke/raw_post_sandbox.py header for E2B_DOMAIN / envd notes)."
+                    ) from e
+                if not _is_retryable(e) or attempt >= max_retries:
+                    raise
+                delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+                logger.warning(f"[E2BEnvBuilder] sandbox start failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay}s...")
+                await asyncio.sleep(delay)
         env = E2BEnv(
             sandbox,
             default_cwd=args.cwd,
