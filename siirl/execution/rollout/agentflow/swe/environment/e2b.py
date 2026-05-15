@@ -332,7 +332,6 @@ class E2BEnv(ContainerEnv):
             kwargs["request_timeout"] = self.request_timeout
 
         max_retries = 3
-        retry_delays = [5, 10, 20]
 
         async def _do_connect() -> Any:
             try:
@@ -344,7 +343,6 @@ class E2BEnv(ContainerEnv):
         for attempt in range(max_retries + 1):
             try:
                 self.sandbox = await _do_connect()
-                # Probe command channel to ensure envd stream is fully ready
                 await self.sandbox.commands.run("true", timeout=10, user="root")
                 break
             except Exception as e:
@@ -354,10 +352,8 @@ class E2BEnv(ContainerEnv):
                     logger.error(f"[E2BEnv] resume_sandbox failed after {attempt + 1} attempts: {e}")
                     self.sandbox = None
                     raise
-                delay = retry_delays[min(attempt, len(retry_delays) - 1)]
-                logger.warning(f"[E2BEnv] resume_sandbox failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay}s...")
+                logger.warning(f"[E2BEnv] resume_sandbox failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying...")
                 self.sandbox = None
-                await asyncio.sleep(delay)
 
         self._paused_sandbox_id = None
         logger.debug(f"[E2BEnv] sandbox resumed (id={sid})")
@@ -684,7 +680,6 @@ class E2BEnvBuilder(ContainerEnvBuilder):
         _patch_e2b_sdk_parse_http200_create_sandbox()
 
         max_retries = int(self.config.get("start_retries", 3))
-        retry_delays = [10, 30, 60]  # seconds between retries
 
         async def _create_sandbox() -> Any:
             create_kwargs: dict[str, Any] = {
@@ -751,9 +746,7 @@ class E2BEnvBuilder(ContainerEnvBuilder):
                     ) from e
                 if not _is_retryable(e) or attempt >= max_retries:
                     raise
-                delay = retry_delays[min(attempt, len(retry_delays) - 1)]
-                logger.warning(f"[E2BEnvBuilder] sandbox start failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay}s...")
-                await asyncio.sleep(delay)
+                logger.warning(f"[E2BEnvBuilder] sandbox start failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying...")
         env = E2BEnv(
             sandbox,
             default_cwd=args.cwd,
