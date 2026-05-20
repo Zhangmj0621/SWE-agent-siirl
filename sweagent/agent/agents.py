@@ -1031,7 +1031,7 @@ class DefaultAgent(AbstractAgent):
         # attributes (e.g., if we want to requery the model for a bash syntax error, we
         # need to have the previous model output to format the requery template)
         step = StepOutput()
-        step.query = copy.deepcopy(history)
+        step.query = await asyncio.to_thread(copy.deepcopy, history)
         try:
             # Forward model and get actions
             self._chook.on_model_query(messages=history, agent=self.name)
@@ -1052,7 +1052,7 @@ class DefaultAgent(AbstractAgent):
 
             step.output = output["message"]
             # todo: Can't I override the parser in __init__?
-            step.thought, step.action = self.tools.parse_actions(output)
+            step.thought, step.action = await asyncio.to_thread(self.tools.parse_actions, output)
             step.thinking_blocks = output.get("thinking_blocks", [])
             if output.get("tool_calls") is not None:
                 step.tool_call_ids = [call["id"] for call in output["tool_calls"]]
