@@ -103,12 +103,16 @@ class E2BPersistentSession:
             "user": "root",
         }
 
-        handle = await sandbox.commands.run("bash -l", **kwargs)
+        # -i forces interactive mode so bash waits for stdin instead of exiting immediately.
+        handle = await sandbox.commands.run("bash -li", **kwargs)
         self._pid = handle.pid
+
+        # Wait for the shell to initialize before sending commands.
+        await asyncio.sleep(0.5)
 
         init_cmds = "export PS1='' PS2='' PS0=''; set +o history"
         await self._raw_send(init_cmds)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         self._buffer.clear()
         self._event.clear()
         self._started = True
