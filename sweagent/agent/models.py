@@ -713,14 +713,13 @@ class LiteLLMModel(AbstractModel):
         self, messages: list[dict[str, str]], n: int | None = None, temperature: float | None = None
     ) -> list[dict]:
         await self._sleep()
-        # Workaround for litellm bug https://github.com/SWE-agent/SWE-agent/issues/1109
-        messages_no_cache_control = copy.deepcopy(messages)
-        for message in messages_no_cache_control:
-            if "cache_control" in message:
-                del message["cache_control"]
-            if "thinking_blocks" in message:
-                del message["thinking_blocks"]
-        input_tokens: int = litellm.utils.token_counter(
+        # deepcopy + cache_control strip is the dominant CPU cost on long
+        # histories; offload to the loop's CPU pool so other in-flight
+        # samples on the shared worker loop can keep progressing.
+        messages_no_cache_control = await asyncio.to_thread(_strip_cache_control, messages)
+        # token_counter calls into tiktoken — pure CPU, hoist off the loop.
+        input_tokens: int = await asyncio.to_thread(
+            litellm.utils.token_counter,
             messages=messages_no_cache_control,
             model=self.custom_tokenizer["identifier"] if self.custom_tokenizer is not None else self.config.name,
             custom_tokenizer=self.custom_tokenizer,
@@ -736,23 +735,22 @@ class LiteLLMModel(AbstractModel):
             raise ContextWindowExceededError(msg)
         extra_args = {}
         if self.config.api_base:
-            # Not assigned a default value in litellm, so only pass this if it's set
             extra_args["api_base"] = self.config.api_base
         if self.tools.use_function_calling:
             extra_args["tools"] = self.tools.tools
-        # We need to always set max_tokens for anthropic models
-        completion_kwargs = copy.deepcopy(self.config.completion_kwargs)
+        completion_kwargs = await asyncio.to_thread(copy.deepcopy, self.config.completion_kwargs)
         if self.lm_provider == "anthropic":
             completion_kwargs["max_tokens"] = self.model_max_output_tokens
 
-        # Add User-Agent header (don't override user-provided headers)
         if "extra_headers" not in completion_kwargs:
             completion_kwargs["extra_headers"] = {}
         if "User-Agent" not in completion_kwargs["extra_headers"]:
             completion_kwargs["extra_headers"]["User-Agent"] = f"swe-agent/{__version__}"
 
         try:
-            response: litellm.types.utils.ModelResponse = litellm.completion(  # type: ignore
+            # Async LiteLLM call — releases the loop for the duration of the
+            # HTTP round-trip so other samples interleave their queries.
+            response: litellm.types.utils.ModelResponse = await litellm.acompletion(  # type: ignore
                 model=self.config.name,
                 messages=messages,
                 temperature=self.config.temperature if temperature is None else temperature,
@@ -774,7 +772,9 @@ class LiteLLMModel(AbstractModel):
             raise
         self.logger.debug(f"Response: {response}")
         try:
-            cost = litellm.cost_calculator.completion_cost(response, model=self.config.name)
+            cost = await asyncio.to_thread(
+                litellm.cost_calculator.completion_cost, response, model=self.config.name
+            )
         except Exception as e:
             self.logger.debug(f"Error calculating cost: {e}, setting cost to 0.")
             if self.config.per_instance_cost_limit > 0 or self.config.total_cost_limit > 0:
@@ -792,7 +792,8 @@ class LiteLLMModel(AbstractModel):
         output_tokens = 0
         for i in range(n_choices):
             output = choices[i].message.content or ""
-            output_tokens += litellm.utils.token_counter(
+            output_tokens += await asyncio.to_thread(
+                litellm.utils.token_counter,
                 text=output,
                 model=self.custom_tokenizer["identifier"] if self.custom_tokenizer is not None else self.config.name,
                 custom_tokenizer=self.custom_tokenizer,
