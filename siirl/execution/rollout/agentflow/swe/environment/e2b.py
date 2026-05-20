@@ -281,16 +281,28 @@ class E2BEnv(ContainerEnv):
         request_timeout: float | None = None,
         resume_kwargs: dict[str, Any] | None = None,
         sandbox_timeout: int = 3600,
+        runtime_timeout: float = 1800.0,
+        close_timeout: float = 30.0,
     ):
         self.sandbox = sandbox
         self.default_cwd = default_cwd
         self.default_env = default_env or {}
+        # Align with K8s SWEEnv._init_deployment: always set locale and pager defaults.
+        self.default_env.setdefault("LANG", "C.UTF-8")
+        self.default_env.setdefault("LC_ALL", "C.UTF-8")
+        self.default_env.setdefault("PAGER", "cat")
+        self.default_env.setdefault("MANPAGER", "cat")
+        self.default_env.setdefault("GIT_PAGER", "cat")
+        self.default_env.setdefault("PIP_PROGRESS_BAR", "off")
+        self.default_env.setdefault("TQDM_DISABLE", "1")
         self.default_forward_env = default_forward_env or []
         self.request_timeout = request_timeout
         self._closed = False
         self._resume_kwargs: dict[str, Any] = resume_kwargs or {}
         self._paused_sandbox_id: str | None = None
         self._sandbox_timeout = sandbox_timeout
+        self.runtime_timeout = runtime_timeout
+        self.close_timeout = close_timeout
 
     @property
     def is_paused(self) -> bool:
@@ -376,7 +388,7 @@ class E2BEnv(ContainerEnv):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         forward_env: list[str] | None = None,
-        timeout: float = 180.0,
+        timeout: float = 900.0,
     ) -> ContainerOutput:
         raise NotImplementedError
 
@@ -387,7 +399,7 @@ class E2BEnv(ContainerEnv):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         forward_env: list[str] | None = None,
-        timeout: float = 180.0,
+        timeout: float = 900.0,
         check: bool = True,
     ) -> ContainerOutput:
         if self._closed:
@@ -414,6 +426,9 @@ class E2BEnv(ContainerEnv):
         if merged_env:
             exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in merged_env.items())
             script = f"env {exports} /bin/sh -c {shlex.quote(script)}"
+
+        # Merge stderr into stdout so output order matches K8s pty behavior.
+        script = f"{{ {script}; }} 2>&1"
 
         cmd_preview = cmd if len(cmd) <= 240 else cmd[:240] + "...<truncated>"
         logger.debug(
@@ -551,14 +566,16 @@ class E2BEnv(ContainerEnv):
                 sid = self._paused_sandbox_id
                 kwargs = dict(self._resume_kwargs)
                 try:
-                    sb = await AsyncSandbox.connect(sid, **kwargs)
-                    await sb.kill()
-                except Exception:
+                    sb = await asyncio.wait_for(
+                        AsyncSandbox.connect(sid, **kwargs), timeout=self.close_timeout
+                    )
+                    await asyncio.wait_for(sb.kill(), timeout=self.close_timeout)
+                except (asyncio.TimeoutError, Exception):
                     pass
             elif self.sandbox is not None:
                 try:
-                    await self.sandbox.kill()
-                except Exception:
+                    await asyncio.wait_for(self.sandbox.kill(), timeout=self.close_timeout)
+                except (asyncio.TimeoutError, Exception):
                     pass
         finally:
             self._closed = True
@@ -586,6 +603,10 @@ class E2BEnvBuilder(ContainerEnvBuilder):
         self.template_strip_prefix = conf.get("template_strip_prefix", "")
         self.template_replace_suffix = conf.get("template_replace_suffix", {})
         self.enable_build = bool(conf.get("enable_build", False))
+        self.runtime_timeout = float(conf.get("runtime_timeout", 1800.0))
+        self.close_timeout = float(conf.get("close_timeout", 30.0))
+        self.step_pause = bool(conf.get("step_pause", False))
+        self.repo_name = str(conf.get("repo_name", "testbed"))
 
     def _resolve_template(self, image_or_template: str) -> str:
         if image_or_template in self.template_map:
@@ -663,14 +684,15 @@ class E2BEnvBuilder(ContainerEnvBuilder):
             if sc:
                 resume_cwd = str(sc)
 
+        is_eval_pod = False
         if args is None:
             if runtime_meta is None:
                 raise ValueError("E2BEnvBuilder.start requires ContainerStartArgs or runtime_meta")
-            sample, _is_eval = _extract_sample_and_eval_flag(runtime_meta)
+            sample, is_eval_pod = _extract_sample_and_eval_flag(runtime_meta)
             image_name = _resolve_image_name(sample)
             args = ContainerStartArgs(
                 image=image_name,
-                cwd="/testbed",
+                cwd=f"/{self.repo_name}",
                 startup_timeout=float(self.config.get("startup_timeout", 1800.0)),
             )
 
@@ -755,6 +777,8 @@ class E2BEnvBuilder(ContainerEnvBuilder):
             request_timeout=self.request_timeout,
             resume_kwargs=self._connect_kwargs(),
             sandbox_timeout=self.timeout,
+            runtime_timeout=self.runtime_timeout,
+            close_timeout=self.close_timeout,
         )
 
         if skip_tool_install and not resume_cwd:
@@ -769,14 +793,16 @@ class E2BEnvBuilder(ContainerEnvBuilder):
 
         if not skip_tool_install:
             await env.execute(
-                "git config --global --add safe.directory /testbed",
+                f"git config --global --add safe.directory /{self.repo_name}",
                 check=False, timeout=30.0,
             )
 
         if args.cmd:
             await env.execute(args.cmd, cwd=args.cwd, env=args.env, forward_env=args.forward_env, timeout=120.0)
         if not skip_tool_install:
-            await _install_sweagent_tool_bundles(env, self.config)
+            # Tool bundles are installed by the agent layer (SiiToolHandler._install_commands)
+            # during agent.setup(), matching K8s behavior. Only install the lightweight
+            # adapter wrappers here if configured (these are NOT duplicated by agent layer).
             await _install_sweagent_tools_adapter(env, self.config)
 
         if runtime_meta is not None:
@@ -786,8 +812,18 @@ class E2BEnvBuilder(ContainerEnvBuilder):
 
         from .e2b_swe_shim import E2BRLContainerEnv
 
-        return E2BRLContainerEnv(
+        container_env = E2BRLContainerEnv(
             env,
             sample=sample,
             initial_cwd=resume_cwd if sandbox_id else None,
+            repo_name=self.repo_name,
+            use_persistent_session=not self.step_pause,
         )
+
+        # Reset repo to base_commit on first start (align with K8s adapter).
+        # Skip if: resuming partial rollout (sandbox_id set) or eval pod.
+        if not sandbox_id and not is_eval_pod:
+            await container_env._env.hard_reset()
+            logger.info(f"[E2BEnvBuilder] Repository reset to base_commit in /{self.repo_name}")
+
+        return container_env

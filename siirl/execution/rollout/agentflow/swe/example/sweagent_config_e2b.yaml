@@ -2,9 +2,12 @@
 "environment":
   "name": e2b
   "repo_name": "testbed"
+  "timeout": 3600
   "startup_timeout": 600.0
   "runtime_timeout": 1800.0
   "close_timeout": 30.0
+  "request_timeout": 600.0
+  "step_pause": false
   "install_sweagent_tools_adapter": true
   "install_sweagent_tools": true
   "sweagent_tools_host_path": "siirl/3rdparty/swe-agent/tools"

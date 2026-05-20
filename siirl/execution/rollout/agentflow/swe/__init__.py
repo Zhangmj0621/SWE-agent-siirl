@@ -407,7 +407,7 @@ class SWEAgentFlow(AgentFlow):
         aborted = False
         try:
             await m.runtime.bootstrap(env)  # idempotent — resume path is a no-op
-            if hasattr(env, "enable_step_pause"):
+            if getattr(self.env, "step_pause", False) and hasattr(env, "enable_step_pause"):
                 env.enable_step_pause()
             if partial:
                 await m.agent.resume(env, partial)

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shlex
+import time
 from pathlib import Path, PurePath
 from typing import Any, BinaryIO, Literal
 
@@ -48,6 +50,132 @@ from .e2b import E2BEnv
 
 _log = logging.getLogger(__name__)
 
+# Matches ANSI escape sequences (same pattern as K8s's _strip_control_chars in BashSession).
+_ANSI_ESCAPE_RE = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
+class E2BPersistentSession:
+    """Persistent bash session over E2B background process + stdin.
+
+    Analogous to SWE-ReX's BashSession (pexpect-based) used by K8s.
+    """
+
+    SENTINEL_PREFIX = "__E2B_DONE_"
+    SENTINEL_SUFFIX = "__"
+
+    def __init__(self, e2b_env: E2BEnv):
+        self._e2b = e2b_env
+        self._pid: int | None = None
+        self._buffer: list[str] = []
+        self._event = asyncio.Event()
+        self._lock = asyncio.Lock()
+        self._started = False
+        self._counter = 0
+
+    async def start(self, env_vars: dict[str, str] | None = None, cwd: str = "/") -> None:
+        """Start a persistent bash -l process."""
+        sandbox = self._e2b.sandbox
+        if sandbox is None:
+            raise RuntimeError("E2B sandbox is not available")
+
+        self._buffer.clear()
+        self._event.clear()
+
+        kwargs: dict[str, Any] = {
+            "background": True,
+            "on_stdout": self._on_data,
+            "on_stderr": self._on_data,
+            "cwd": cwd,
+            "envs": env_vars or {},
+            "user": "root",
+        }
+
+        handle = await sandbox.commands.run("bash -l", **kwargs)
+        self._pid = handle.pid
+
+        init_cmds = "export PS1='' PS2='' PS0=''; set +o history"
+        await self._raw_send(init_cmds)
+        await asyncio.sleep(0.2)
+        self._buffer.clear()
+        self._event.clear()
+        self._started = True
+        _log.info("[E2BPersistentSession] Started persistent bash (pid=%s, cwd=%s)", self._pid, cwd)
+
+    def _on_data(self, data: Any) -> None:
+        if isinstance(data, bytes):
+            data = data.decode("utf-8", errors="replace")
+        else:
+            data = str(data)
+        self._buffer.append(data)
+        self._event.set()
+
+    async def _raw_send(self, text: str) -> None:
+        if self._pid is None:
+            raise RuntimeError("Session not started")
+        await self._e2b.sandbox.commands.send_stdin(self._pid, text + "\n")
+
+    async def run(self, cmd: str, timeout: float = 180.0) -> tuple[str, int]:
+        """Execute command in the persistent session. Returns (output, exit_code)."""
+        async with self._lock:
+            return await self._run_locked(cmd, timeout)
+
+    async def _run_locked(self, cmd: str, timeout: float) -> tuple[str, int]:
+        self._counter += 1
+        sentinel = f"{self.SENTINEL_PREFIX}{self._counter}_{int(time.time() * 1000)}{self.SENTINEL_SUFFIX}"
+
+        self._buffer.clear()
+        self._event.clear()
+
+        payload = f"{cmd}\nprintf '\\n{sentinel}%d\\n' $?\n"
+        await self._e2b.sandbox.commands.send_stdin(self._pid, payload)
+
+        deadline = asyncio.get_event_loop().time() + timeout
+        while True:
+            combined = "".join(self._buffer)
+            sentinel_pos = combined.find(sentinel)
+            if sentinel_pos != -1:
+                output_part = combined[:sentinel_pos].rstrip("\n")
+                after = combined[sentinel_pos + len(sentinel):]
+                ec_str = ""
+                for ch in after:
+                    if ch.isdigit():
+                        ec_str += ch
+                    else:
+                        break
+                exit_code = int(ec_str) if ec_str else 0
+                return output_part, exit_code
+
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                partial = combined[:500]
+                raise TimeoutError(
+                    f"E2B persistent session: command timed out after {timeout}s. "
+                    f"Partial output: {partial}"
+                )
+            self._event.clear()
+            try:
+                await asyncio.wait_for(self._event.wait(), timeout=min(remaining, 5.0))
+            except asyncio.TimeoutError:
+                continue
+
+    async def close(self) -> None:
+        if self._pid is not None and self._e2b.sandbox is not None:
+            try:
+                await self._e2b.sandbox.commands.kill(self._pid)
+            except Exception:
+                pass
+            self._pid = None
+        self._started = False
+        _log.info("[E2BPersistentSession] Session closed")
+
+    @property
+    def alive(self) -> bool:
+        return self._started and self._pid is not None
+
 
 class _E2BRuntimeShim(AbstractRuntime):
     """Maps SWE-ReX ``AbstractRuntime`` calls onto ``E2BEnv`` (stateless shell + file APIs)."""
@@ -83,20 +211,27 @@ class _E2BRuntimeShim(AbstractRuntime):
         if not isinstance(action, BashAction):
             msg = f"Unsupported session action: {type(action).__name__}"
             raise TypeError(msg)
+
+        tout = float(action.timeout) if action.timeout is not None else self._env._e2b.runtime_timeout
+
+        # Persistent session path: all commands share the same bash process
+        if self._env._use_persistent_session:
+            return await self._run_in_persistent_session(action, tout)
+
+        # Stateless one-shot path (original behavior)
         if action.is_interactive_command or action.is_interactive_quit:
             out = await self._env.communicate(
                 action.command,
-                timeout=float(action.timeout or 1800.0),
+                timeout=tout,
                 check="ignore",
             )
             return BashObservation(output=out, exit_code=0, session_type="bash")
 
         inner = action.command
         script = self._env._bash_one_shot(inner)
-        tout = float(action.timeout) if action.timeout is not None else 1800.0
         r = await self._env._e2b.execute(script, check=False, timeout=tout)
         await self._env._sync_cwd()
-        text = r.output.decode("utf-8", errors="replace")
+        text = _strip_ansi(r.output.decode("utf-8", errors="replace"))
         if action.check == "ignore":
             return BashObservation(output=text, exit_code=None, session_type="bash")
         exit_code = int(r.returncode)
@@ -106,6 +241,23 @@ class _E2BRuntimeShim(AbstractRuntime):
                 msg = f"{action.error_msg}: {msg}"
             raise NonZeroExitCodeError(msg)
         return BashObservation(output=text, exit_code=exit_code, session_type="bash")
+
+    async def _run_in_persistent_session(self, action: BashAction, timeout: float) -> BashObservation:
+        """Route action through the persistent bash session."""
+        session = await self._env._ensure_session()
+        cmd = (action.command or "").strip()
+        if not cmd:
+            return BashObservation(output="", exit_code=0, session_type="bash")
+        output, exit_code = await session.run(cmd, timeout=timeout)
+        output = _strip_ansi(output)
+        if action.check == "ignore":
+            return BashObservation(output=output, exit_code=None, session_type="bash")
+        if action.check == "raise" and exit_code != 0:
+            msg = f"Command {cmd!r} failed with exit code {exit_code}. Output:\n{output!r}"
+            if action.error_msg:
+                msg = f"{action.error_msg}: {msg}"
+            raise NonZeroExitCodeError(msg)
+        return BashObservation(output=output, exit_code=exit_code, session_type="bash")
 
     async def close_session(self, request: CloseSessionRequest) -> CloseSessionResponse:
         del request
@@ -123,7 +275,7 @@ class _E2BRuntimeShim(AbstractRuntime):
         if command.env:
             exports = " && ".join(f"export {k}={shlex.quote(str(v))}" for k, v in command.env.items())
             script = f"{exports} && {script}"
-        tout = float(command.timeout) if command.timeout is not None else 1800.0
+        tout = float(command.timeout) if command.timeout is not None else self._env._e2b.runtime_timeout
         r = await self._env._e2b.execute(script, cwd=None, env={}, check=False, timeout=tout)
         text = r.output.decode("utf-8", errors="replace")
         if command.check and r.returncode != 0:
@@ -189,7 +341,8 @@ class _E2BDeploymentShim:
 class E2BSWEEnvShim:
     """Duck-typed subset of ``SWEEnv`` backed by ``E2BEnv``."""
 
-    def __init__(self, e2b: E2BEnv, *, repo: RepoConfig | None, initial_cwd: str = "/testbed"):
+    def __init__(self, e2b: E2BEnv, *, repo: RepoConfig | None, initial_cwd: str = "/testbed",
+                 use_persistent_session: bool = False):
         self._e2b = e2b
         self.repo = repo
         self.name = "main"
@@ -199,6 +352,8 @@ class E2BSWEEnvShim:
             self._exports["PATH"] = e2b.default_env["PATH"]
         self._step_pause_enabled = False
         self._resume_lock = asyncio.Lock()
+        self._use_persistent_session = use_persistent_session
+        self._session: E2BPersistentSession | None = None
         self.deployment = _E2BDeploymentShim(self)
 
     @property
@@ -256,6 +411,16 @@ class E2BSWEEnvShim:
         except Exception:
             pass
 
+    async def _ensure_session(self) -> E2BPersistentSession:
+        """Lazily start the persistent bash session."""
+        if self._session is None or not self._session.alive:
+            self._session = E2BPersistentSession(self._e2b)
+            env_vars = dict(self._exports)
+            if self._e2b.default_env:
+                env_vars.update(self._e2b.default_env)
+            await self._session.start(env_vars=env_vars, cwd=self._cwd)
+        return self._session
+
     async def communicate(
         self,
         input: str,
@@ -264,13 +429,18 @@ class E2BSWEEnvShim:
         check: Literal["warn", "ignore", "raise"] = "ignore",
         error_msg: str = "Command failed",
     ) -> str:
-        if input is not None and ("git log" in input or "git diff" in input or "git show" in input):
-            return "Illegal actions: `git log`, `git diff`, and `git show` are not allowed."
+        if self._use_persistent_session:
+            return await self._communicate_session(input, timeout, check=check, error_msg=error_msg)
+        return await self._communicate_stateless(input, timeout, check=check, error_msg=error_msg)
 
+    async def _communicate_stateless(
+        self, input: str, timeout: int | float, *, check: str, error_msg: str
+    ) -> str:
+        """Stateless one-shot path (step_pause: true)."""
         script = self._bash_one_shot(input)
         out = await self._e2b.execute(script, check=False, timeout=float(timeout))
         await self._sync_cwd()
-        text = out.output.decode("utf-8", errors="replace")
+        text = _strip_ansi(out.output.decode("utf-8", errors="replace"))
         if check != "ignore" and out.returncode != 0:
             _log.error("%s:\n%s", error_msg, text[:2000])
             msg = f"Command {input!r} failed (exit_code={out.returncode}): {error_msg}"
@@ -278,10 +448,32 @@ class E2BSWEEnvShim:
                 raise RuntimeError(msg)
         return text
 
+    async def _communicate_session(
+        self, input: str, timeout: int | float, *, check: str, error_msg: str
+    ) -> str:
+        """Persistent session path (step_pause: false) — analogous to K8s SWEEnv.communicate."""
+        session = await self._ensure_session()
+        cmd = (input or "").strip()
+        if not cmd:
+            return ""
+        output, exit_code = await session.run(cmd, timeout=float(timeout))
+        output = _strip_ansi(output)
+        if check != "ignore" and exit_code != 0:
+            _log.error("%s:\n%s", error_msg, output[:2000])
+            msg = f"Command {input!r} failed (exit_code={exit_code}): {error_msg}"
+            if check == "raise":
+                raise RuntimeError(msg)
+        return output
+
     async def set_env_variables(self, env_variables: dict[str, str]) -> None:
         if not env_variables:
             return
         self._exports.update({str(k): str(v) for k, v in env_variables.items()})
+        # Sync PATH/PYTHONPATH to E2BEnv.default_env so that calls bypassing the shim
+        # (e.g. E2BRLContainerEnv.execute → E2BEnv.execute) also see the latest values.
+        for key in ("PATH", "PYTHONPATH"):
+            if key in env_variables:
+                self._e2b.default_env[key] = str(env_variables[key])
 
     async def read_file(self, path: str | PurePath, encoding: str | None = None, errors: str | None = None) -> str:
         enc = encoding or "utf-8"
@@ -302,7 +494,7 @@ class E2BSWEEnvShim:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         forward_env: list[str] | None = None,
-        timeout: float = 180.0,
+        timeout: float = 900.0,
         check: bool = True,
     ) -> ContainerOutput:
         """One-shot command like ``E2BEnv.execute``; used by ``SiiToolHandler._is_command_available``."""
@@ -324,7 +516,7 @@ class E2BSWEEnvShim:
         if cwd:
             script = f"cd {shlex.quote(cwd)} && {inner}"
         script = self._bash_one_shot(script)
-        await self._e2b.execute(script, cwd=None, env=merged, check=check, timeout=1800.0)
+        await self._e2b.execute(script, cwd=None, env=merged, check=check, timeout=self._e2b.runtime_timeout)
 
     async def interrupt_session(self) -> None:
         _log.warning("[E2BSWEEnvShim] interrupt_session: no-op (E2B has no Rex-style session interrupt)")
@@ -347,26 +539,28 @@ class E2BSWEEnvShim:
 class E2BRLContainerEnv(ContainerEnv):
     """``ContainerEnv`` for eval/reward + ``_env`` shim for RLTokenAgent / swe-agent."""
 
-    def __init__(self, inner: E2BEnv, *, sample: dict, initial_cwd: str | None = None):
+    def __init__(self, inner: E2BEnv, *, sample: dict, initial_cwd: str | None = None,
+                 repo_name: str = "testbed", use_persistent_session: bool = False):
         self._inner = inner
         base_commit = str(sample.get("base_commit") or "HEAD")
         ds = (sample.get("data_source") or "").lower()
         skip_fetch = "swefactory" in ds
-        ic = initial_cwd if (initial_cwd and str(initial_cwd).strip()) else "/testbed"
+        ic = initial_cwd if (initial_cwd and str(initial_cwd).strip()) else f"/{repo_name}"
         self._shim = E2BSWEEnvShim(
             inner,
-            repo=PreExistingRepoConfig(repo_name="testbed", base_commit=base_commit, skip_fetch=skip_fetch),
+            repo=PreExistingRepoConfig(repo_name=repo_name, base_commit=base_commit, skip_fetch=skip_fetch),
             initial_cwd=ic,
+            use_persistent_session=use_persistent_session,
         )
 
     @property
     def _env(self) -> E2BSWEEnvShim:
         return self._shim
 
-    async def execute(self, cmd: str, stdin=None, cwd=None, env=None, forward_env=None, timeout=180.0, check=True):
+    async def execute(self, cmd: str, stdin=None, cwd=None, env=None, forward_env=None, timeout=900.0, check=True):
         return await self._inner.execute(cmd, stdin=stdin, cwd=cwd, env=env, forward_env=forward_env, timeout=timeout, check=check)
 
-    async def popen(self, cmd: str, cwd=None, env=None, forward_env=None, timeout=180.0):
+    async def popen(self, cmd: str, cwd=None, env=None, forward_env=None, timeout=900.0):
         return await self._inner.execute(cmd, cwd=cwd, env=env, forward_env=forward_env, timeout=timeout, check=False)
 
     async def read_file(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
@@ -388,9 +582,13 @@ class E2BRLContainerEnv(ContainerEnv):
         return out
 
     async def detach(self) -> None:
+        if self._shim._session:
+            await self._shim._session.close()
         await self._inner.detach()
 
     async def cleanup(self) -> None:
+        if self._shim._session:
+            await self._shim._session.close()
         await self._inner.cleanup()
 
     def enable_step_pause(self) -> None:
