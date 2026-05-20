@@ -826,7 +826,7 @@ class LiteLLMModel(AbstractModel):
         return outputs
 
     async def query(self, history: History, n: int = 1, temperature: float | None = None) -> list[dict] | dict:
-        messages = self._history_to_messages(history)
+        messages = await self._history_to_messages(history)
 
         def retry_warning(retry_state: RetryCallState):
             exception_info = ""
@@ -871,11 +871,13 @@ class LiteLLMModel(AbstractModel):
             return result[0]
         return result
 
-    def _history_to_messages(
+    async def _history_to_messages(
         self,
         history: History,
-    ) -> list[dict[str, str]]:
-        history = copy.deepcopy(history)
+    ) -> list[dict[str, Any]]:
+        # deepcopy of long histories runs in tens of milliseconds — offload
+        # so it doesn't pin the running event loop.
+        history = await asyncio.to_thread(copy.deepcopy, history)
 
         def get_role(history_item: HistoryItem) -> str:
             if history_item["role"] == "system":
