@@ -917,13 +917,18 @@ class DefaultAgent(AbstractAgent):
                 # Pre-fetch all modified files since read_file is now async.
                 # PatchFormatter calls read_method synchronously in its constructor,
                 # so we must provide a sync lambda backed by pre-fetched data.
-                parsed_patch = PatchSet(patch)
+                # PatchSet parsing is regex-heavy and scales with patch size;
+                # offload so the running event loop keeps driving other awaits.
+                parsed_patch = await asyncio.to_thread(PatchSet, patch)
                 prefetched: dict[str, str] = {}
                 for p in parsed_patch:
                     if p.is_modified_file:
                         file_path = PurePosixPath("/") / self._env.repo.repo_name / p.path
                         prefetched[p.path] = await self._env.read_file(file_path)
-                pf = PatchFormatter(
+                # PatchFormatter does heavy unidiff-aware formatting in its
+                # constructor; offload along with PatchSet.
+                pf = await asyncio.to_thread(
+                    PatchFormatter,
                     patch,
                     read_method=lambda path: prefetched.get(path, ""),
                 )
@@ -937,7 +942,11 @@ class DefaultAgent(AbstractAgent):
         for context_length in [30, 50, 70]:
             value = "Empty. No edited files found."
             if pf is not None:
-                value = pf.get_files_str(original=False, context_length=context_length)
+                # get_files_str walks the parsed patch and slices file
+                # contents; called 3x per step. Offload each call.
+                value = await asyncio.to_thread(
+                    pf.get_files_str, original=False, context_length=context_length
+                )
             out[f"edited_files{context_length}"] = value
         return out
 
