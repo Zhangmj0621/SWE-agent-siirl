@@ -593,6 +593,21 @@ class InstantEmptySubmitTestModel(AbstractModel):
         return {"message": action}
 
 
+def _strip_cache_control(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deep-copy ``messages`` and strip ``cache_control`` / ``thinking_blocks`` keys.
+
+    Workaround for litellm bug https://github.com/SWE-agent/SWE-agent/issues/1109.
+    Pulled out of ``LiteLLMModel._single_query`` so the deepcopy can run on
+    a worker thread via ``asyncio.to_thread`` — deepcopy of long histories
+    is the dominant CPU cost in this method.
+    """
+    out = copy.deepcopy(messages)
+    for message in out:
+        message.pop("cache_control", None)
+        message.pop("thinking_blocks", None)
+    return out
+
+
 class LiteLLMModel(AbstractModel):
     def __init__(self, args: GenericAPIModelConfig, tools: ToolConfig):
         """Model served by the `litellm` library."""
