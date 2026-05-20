@@ -1493,7 +1493,7 @@ class RLTokenAgent(DefaultAgent):
             raise _TotalExecutionTimeExceeded()
 
         step = StepOutput()
-        step.query = copy.deepcopy(self.input_ids)
+        step.query = await asyncio.to_thread(copy.deepcopy, self.input_ids)
         try:
             self._chook.on_model_query(messages=self.messages, agent=self.name)
             if self._action_sampler is not None:
@@ -1529,7 +1529,7 @@ class RLTokenAgent(DefaultAgent):
                 "output_logprobs": list(step.rollout_log_probs),
                 "history_len_at_query": output.get("history_len_at_query"),
             }
-            step.thought, step.action = self.tools.parse_actions(output)
+            step.thought, step.action = await asyncio.to_thread(self.tools.parse_actions, output)
             if output.get("tool_calls") is not None:
                 step.tool_call_ids = [call["id"] for call in output["tool_calls"]]
                 step.tool_calls = output["tool_calls"]
