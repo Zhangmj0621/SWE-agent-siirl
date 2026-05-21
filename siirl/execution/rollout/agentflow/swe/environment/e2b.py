@@ -817,7 +817,7 @@ class E2BEnvBuilder(ContainerEnvBuilder):
             sample=sample,
             initial_cwd=resume_cwd if sandbox_id else None,
             repo_name=self.repo_name,
-            use_persistent_session=not self.step_pause,
+            use_persistent_session=False,  # envd does not support PTY/stdin — stateless only
         )
 
         # Reset repo to base_commit on first start (align with K8s adapter).
