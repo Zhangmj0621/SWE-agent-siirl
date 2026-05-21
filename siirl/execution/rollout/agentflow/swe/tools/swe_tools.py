@@ -13,8 +13,6 @@ Goals:
 This is intentionally lightweight and avoids depending on SWE-agent's tool bundles.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -22,6 +20,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Dict
 
 WINDOW = int(os.environ.get("SWE_TOOL_WINDOW", "100"))
 MAX_OUTPUT = int(os.environ.get("SWE_TOOL_MAX_OUTPUT", "50000"))
@@ -30,47 +29,51 @@ STATE_PATH = Path(os.environ.get("SWE_TOOL_STATE_PATH", "/root/state.json"))
 UNDO_DIR = Path(os.environ.get("SWE_TOOL_UNDO_DIR", "/root/.swe-tool-undo"))
 
 
-def _load_state() -> dict:
+def _load_state():
+    # type: () -> Dict[str, str]
     if not STATE_PATH.exists():
-        return {"open_file": "n/a", "first_line": 0, "working_dir": os.getcwd()}
+        return {"open_file": "n/a", "first_line": "0", "working_dir": os.getcwd()}
     try:
         raw = STATE_PATH.read_text(encoding="utf-8", errors="replace").strip()
         if not raw:
-            return {"open_file": "n/a", "first_line": 0, "working_dir": os.getcwd()}
+            return {"open_file": "n/a", "first_line": "0", "working_dir": os.getcwd()}
         state = json.loads(raw)
         if not isinstance(state, dict):
             raise ValueError("state is not a dict")
         state.setdefault("open_file", "n/a")
-        state.setdefault("first_line", 0)
+        state.setdefault("first_line", "0")
         state.setdefault("working_dir", os.getcwd())
+        # Ensure all values are strings for upstream dict[str, str] compatibility
+        state = {k: str(v) for k, v in state.items()}
         return state
     except Exception:
-        return {"open_file": "n/a", "first_line": 0, "working_dir": os.getcwd()}
+        return {"open_file": "n/a", "first_line": "0", "working_dir": os.getcwd()}
 
 
-def _save_state(state: dict) -> None:
+def _save_state(state):
+    # type: (dict) -> None
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
 
-def _undo_key(path: Path) -> Path:
+def _undo_key(path):
     safe = str(path).replace("/", "__").replace("\\", "__")
     return UNDO_DIR / f"{safe}.bak"
 
 
-def _save_undo(path: Path, content: str) -> None:
+def _save_undo(path, content):
     UNDO_DIR.mkdir(parents=True, exist_ok=True)
     _undo_key(path).write_text(content, encoding="utf-8")
 
 
-def _load_undo(path: Path) -> str | None:
+def _load_undo(path):
     key = _undo_key(path)
     if not key.exists():
         return None
     return key.read_text(encoding="utf-8", errors="replace")
 
 
-def _resolve_path(p: str, state: dict) -> Path:
+def _resolve_path(p, state):
     path = Path(p)
     if path.is_absolute():
         return path
@@ -78,13 +81,13 @@ def _resolve_path(p: str, state: dict) -> Path:
     return (wd / path).resolve()
 
 
-def _clip(s: str) -> str:
+def _clip(s):
     if len(s) <= MAX_OUTPUT:
         return s
     return s[:MAX_OUTPUT] + "\n<response clipped>"
 
 
-def _format_obs(content: str, state: dict) -> str:
+def _format_obs(content, state):
     open_file = state.get("open_file", "n/a")
     working_dir = state.get("working_dir", os.getcwd())
     parts = [
@@ -96,13 +99,13 @@ def _format_obs(content: str, state: dict) -> str:
     return "\n".join(parts)
 
 
-def _numbered_window(lines: list[str], first_line: int) -> str:
+def _numbered_window(lines, first_line):
     end = min(first_line + WINDOW, len(lines))
     window = lines[first_line:end]
     return "\n".join(f"{i + first_line + 1:6d}  {ln}" for i, ln in enumerate(window))
 
 
-def cmd_open(args: argparse.Namespace) -> str:
+def cmd_open(args):
     state = _load_state()
     path = _resolve_path(args.path, state)
     if not path.exists() or not path.is_file():
@@ -113,14 +116,14 @@ def cmd_open(args: argparse.Namespace) -> str:
     if args.line_number is not None and 1 <= args.line_number <= len(lines):
         first_line = max(0, args.line_number - 1)
     state["open_file"] = str(path)
-    state["first_line"] = first_line
+    state["first_line"] = str(first_line)
     state["working_dir"] = str(Path.cwd())
     _save_state(state)
     out = _numbered_window(lines, first_line)
     return _format_obs(_clip(out), state)
 
 
-def cmd_goto(args: argparse.Namespace) -> str:
+def cmd_goto(args):
     state = _load_state()
     open_file = state.get("open_file", "n/a")
     if open_file == "n/a":
@@ -133,14 +136,14 @@ def cmd_goto(args: argparse.Namespace) -> str:
     if args.line_number < 1 or args.line_number > len(lines):
         return _format_obs(f"Error: line must be between 1 and {len(lines)}", state)
     first_line = max(0, args.line_number - 1)
-    state["first_line"] = first_line
+    state["first_line"] = str(first_line)
     state["working_dir"] = str(Path.cwd())
     _save_state(state)
     out = _numbered_window(lines, first_line)
     return _format_obs(_clip(out), state)
 
 
-def cmd_scroll(args: argparse.Namespace, direction: str) -> str:
+def cmd_scroll(args, direction):
     state = _load_state()
     open_file = state.get("open_file", "n/a")
     if open_file == "n/a":
@@ -155,14 +158,14 @@ def cmd_scroll(args: argparse.Namespace, direction: str) -> str:
         first_line = max(0, first_line - WINDOW)
     else:
         first_line = min(first_line + WINDOW, max(0, len(lines) - WINDOW))
-    state["first_line"] = first_line
+    state["first_line"] = str(first_line)
     state["working_dir"] = str(Path.cwd())
     _save_state(state)
     out = _numbered_window(lines, first_line)
     return _format_obs(_clip(out), state)
 
 
-def _run_capture(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
+def _run_capture(cmd, cwd=None):
     try:
         p = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
         return p.returncode, p.stdout or ""
@@ -170,7 +173,7 @@ def _run_capture(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
         return 127, f"Error: command not found: {cmd[0]}"
 
 
-def cmd_search_dir(args: argparse.Namespace) -> str:
+def cmd_search_dir(args):
     state = _load_state()
     base = _resolve_path(args.dir, state) if args.dir else Path(state.get("working_dir") or os.getcwd())
     if not base.exists():
@@ -186,7 +189,7 @@ def cmd_search_dir(args: argparse.Namespace) -> str:
     return _format_obs(_clip(out.strip()), state)
 
 
-def cmd_search_file(args: argparse.Namespace) -> str:
+def cmd_search_file(args):
     state = _load_state()
     target = args.file or state.get("open_file", "n/a")
     if target == "n/a":
@@ -209,13 +212,13 @@ def cmd_search_file(args: argparse.Namespace) -> str:
     return _format_obs(_clip(out), state)
 
 
-def cmd_find_file(args: argparse.Namespace) -> str:
+def cmd_find_file(args):
     state = _load_state()
     base = _resolve_path(args.dir, state) if args.dir else Path(state.get("working_dir") or os.getcwd())
     if not base.exists():
         return _format_obs(f"Error: dir not found: {str(base)}", state)
     name = args.file_name
-    results: list[str] = []
+    results = []
     for p in base.rglob(name):
         results.append(str(p))
         if len(results) >= 100:
@@ -226,20 +229,20 @@ def cmd_find_file(args: argparse.Namespace) -> str:
     return _format_obs(_clip(out), state)
 
 
-def cmd_create(args: argparse.Namespace) -> str:
+def cmd_create(args):
     state = _load_state()
     path = _resolve_path(args.filename, state)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text("", encoding="utf-8")
     state["open_file"] = str(path)
-    state["first_line"] = 0
+    state["first_line"] = "0"
     state["working_dir"] = str(Path.cwd())
     _save_state(state)
     return _format_obs("Created file.", state)
 
 
-def cmd_edit(args: argparse.Namespace) -> str:
+def cmd_edit(args):
     state = _load_state()
     open_file = state.get("open_file", "n/a")
     if open_file == "n/a":
@@ -264,7 +267,7 @@ def cmd_edit(args: argparse.Namespace) -> str:
     return _format_obs("Edit applied.", state)
 
 
-def cmd_insert(args: argparse.Namespace) -> str:
+def cmd_insert(args):
     state = _load_state()
     open_file = state.get("open_file", "n/a")
     if open_file == "n/a":
@@ -287,7 +290,7 @@ def cmd_insert(args: argparse.Namespace) -> str:
     return _format_obs("Insert applied.", state)
 
 
-def cmd_replace_in_window(args: argparse.Namespace) -> str:
+def cmd_replace_in_window(args):
     state = _load_state()
     open_file = state.get("open_file", "n/a")
     if open_file == "n/a":
@@ -319,7 +322,7 @@ def cmd_replace_in_window(args: argparse.Namespace) -> str:
     return _format_obs("Edit applied.", state)
 
 
-def cmd_str_replace_editor(args: argparse.Namespace) -> str:
+def cmd_str_replace_editor(args):
     state = _load_state()
     path = _resolve_path(args.path, state)
 
@@ -360,7 +363,7 @@ def cmd_str_replace_editor(args: argparse.Namespace) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args.file_text, encoding="utf-8")
         state["open_file"] = str(path)
-        state["first_line"] = 0
+        state["first_line"] = "0"
         state["working_dir"] = str(Path.cwd())
         _save_state(state)
         return _format_obs("File created.", state)
@@ -412,7 +415,7 @@ def cmd_str_replace_editor(args: argparse.Namespace) -> str:
     return _format_obs(f"Error: Unknown command {args.command}", state)
 
 
-def cmd_submit(args: argparse.Namespace) -> str:
+def cmd_submit(args):
     state = _load_state()
     wd = state.get("working_dir") or os.getcwd()
     # Prefer binary-safe diff similar to many SWE runs.
@@ -429,7 +432,7 @@ def cmd_submit(args: argparse.Namespace) -> str:
     return _format_obs(_clip(out.strip() or "No changes to submit."), state)
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser():
     p = argparse.ArgumentParser(prog="swe_tool")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -500,7 +503,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: list[str]) -> int:
+def main(argv):
     p = _build_parser()
     args = p.parse_args(argv)
     out = args._fn(args)
