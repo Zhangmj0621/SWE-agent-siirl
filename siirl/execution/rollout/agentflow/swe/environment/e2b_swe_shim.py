@@ -435,8 +435,17 @@ class E2BSWEEnvShim:
 
     def _bash_one_shot(self, inner: str) -> str:
         export_prefix = ""
+        parts: list[str] = []
+        # Re-export default_env (PATH, PYTHONPATH, etc.) inside the login shell,
+        # because bash -l reads /etc/profile which may reset PATH to system default.
+        if self._e2b.default_env:
+            parts.extend(
+                f"export {k}={shlex.quote(str(v))}"
+                for k, v in self._e2b.default_env.items()
+            )
         if self._exports:
-            parts = [f"export {k}={shlex.quote(str(v))}" for k, v in self._exports.items()]
+            parts.extend(f"export {k}={shlex.quote(str(v))}" for k, v in self._exports.items())
+        if parts:
             export_prefix = " && ".join(parts) + " && "
         # SWE-agent ToolHandler.reset uses communicate(" && ".join(_reset_commands)) which is
         # "" when there are no reset commands — must not emit "cd ... && ;" (bash syntax error).
