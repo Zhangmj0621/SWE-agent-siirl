@@ -110,7 +110,8 @@ class E2BPersistentSession:
             user="root",
             cwd=cwd,
             envs=envs,
-            timeout=0,
+            timeout=86400,
+            request_timeout=30,
         )
         self._handle = handle
         self._pid = handle.pid
