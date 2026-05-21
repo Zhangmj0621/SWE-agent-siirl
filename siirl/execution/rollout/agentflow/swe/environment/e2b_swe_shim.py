@@ -62,7 +62,11 @@ def _strip_ansi(text: str) -> str:
 
 
 class E2BPersistentSession:
-    """Persistent bash session over E2B background process + stdin.
+    """Persistent bash session over E2B PTY (pseudo-terminal).
+
+    Uses ``sandbox.pty.create()`` + ``sandbox.pty.send_stdin()`` which keeps
+    stdin open (unlike ``commands.run(background=True)`` which closes stdin
+    immediately causing the bash process to exit).
 
     Analogous to SWE-ReX's BashSession (pexpect-based) used by K8s.
     """
@@ -73,6 +77,7 @@ class E2BPersistentSession:
     def __init__(self, e2b_env: E2BEnv):
         self._e2b = e2b_env
         self._pid: int | None = None
+        self._handle: Any = None
         self._buffer: list[str] = []
         self._event = asyncio.Event()
         self._lock = asyncio.Lock()
@@ -82,49 +87,50 @@ class E2BPersistentSession:
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self, env_vars: dict[str, str] | None = None, cwd: str = "/") -> None:
-        """Start a persistent bash -l process."""
+        """Start a persistent bash via PTY."""
         sandbox = self._e2b.sandbox
         if sandbox is None:
             raise RuntimeError("E2B sandbox is not available")
 
-        # Capture the running loop so the SDK callback (which may fire from a
-        # non-asyncio thread) can wake the event loop safely.
+        from e2b.sandbox.commands.command_handle import PtySize
+
         self._loop = asyncio.get_running_loop()
         self._buffer.clear()
         self._event.clear()
         self._dead = False
 
-        kwargs: dict[str, Any] = {
-            "background": True,
-            "on_stdout": self._on_data,
-            "on_stderr": self._on_data,
-            "cwd": cwd,
-            "envs": env_vars or {},
-            "user": "root",
-        }
+        envs = dict(env_vars or {})
+        envs.setdefault("TERM", "dumb")
+        envs.setdefault("LANG", "C.UTF-8")
+        envs.setdefault("LC_ALL", "C.UTF-8")
 
-        # -i forces interactive mode so bash waits for stdin instead of exiting immediately.
-        handle = await sandbox.commands.run("bash -li", **kwargs)
+        handle = await sandbox.pty.create(
+            PtySize(cols=200, rows=50),
+            on_data=self._on_data,
+            user="root",
+            cwd=cwd,
+            envs=envs,
+            timeout=0,
+        )
+        self._handle = handle
         self._pid = handle.pid
 
-        # Wait for the shell to initialize before sending commands.
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
-        init_cmds = "export PS1='' PS2='' PS0=''; set +o history"
+        init_cmds = "export PS1='' PS2='' PS0=''; set +o history; stty -echo\n"
         await self._raw_send(init_cmds)
         await asyncio.sleep(0.3)
         self._buffer.clear()
         self._event.clear()
         self._started = True
-        _log.info("[E2BPersistentSession] Started persistent bash (pid=%s, cwd=%s)", self._pid, cwd)
+        _log.info("[E2BPersistentSession] Started PTY bash (pid=%s, cwd=%s)", self._pid, cwd)
 
     def _on_data(self, data: Any) -> None:
-        data = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
-        self._buffer.append(data)
+        text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+        self._buffer.append(text)
         loop = self._loop
         if loop is None or loop.is_closed():
             return
-        # Loop already shutting down — drop the wake, the consumer is gone.
         with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(self._event.set)
 
@@ -132,7 +138,7 @@ class E2BPersistentSession:
         if self._pid is None:
             raise RuntimeError("Session not started")
         try:
-            await self._e2b.sandbox.commands.send_stdin(self._pid, text + "\n")
+            await self._e2b.sandbox.pty.send_stdin(self._pid, text.encode("utf-8"))
         except Exception:
             self._dead = True
             raise
@@ -147,16 +153,14 @@ class E2BPersistentSession:
     async def _run_locked(self, cmd: str, timeout: float) -> tuple[str, int]:
         self._counter += 1
         sentinel = f"{self.SENTINEL_PREFIX}{self._counter}_{int(time.time() * 1000)}{self.SENTINEL_SUFFIX}"
-        # Anchor on the leading \n + sentinel + digits + trailing \n that printf emits.
-        # Plain substring search would mis-fire if user output contains the literal sentinel.
-        sentinel_re = re.compile(rf"\n{re.escape(sentinel)}(\d+)\n")
+        sentinel_re = re.compile(rf"{re.escape(sentinel)}(\d+)")
 
         self._buffer.clear()
         self._event.clear()
 
-        payload = f"{cmd}\nprintf '\\n{sentinel}%d\\n' $?\n"
+        payload = f"{cmd}\nprintf '{sentinel}%d\\n' $?\n"
         try:
-            await self._e2b.sandbox.commands.send_stdin(self._pid, payload)
+            await self._e2b.sandbox.pty.send_stdin(self._pid, payload.encode("utf-8"))
         except Exception as exc:
             self._dead = True
             raise RuntimeError(f"E2B persistent session stdin failed: {exc}") from exc
@@ -177,7 +181,7 @@ class E2BPersistentSession:
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 partial = combined[:500]
-                raise TimeoutError(f"E2B persistent session: command timed out after {timeout}s. " f"Partial output: {partial}")
+                raise TimeoutError(f"E2B persistent session: command timed out after {timeout}s. Partial output: {partial}")
             self._event.clear()
             try:
                 await asyncio.wait_for(self._event.wait(), timeout=min(remaining, 5.0))
@@ -185,12 +189,7 @@ class E2BPersistentSession:
                 continue
 
     async def export(self, env_vars: dict[str, str]) -> None:
-        """Inject env vars into the already-running session via `export`.
-
-        Needed because env passed at start() time is frozen on the bash process;
-        later calls to set_env_variables would otherwise be invisible inside the
-        persistent session.
-        """
+        """Inject env vars into the already-running session via `export`."""
         if not env_vars or not self.alive:
             return
         parts = [f"export {shlex.quote(str(k))}={shlex.quote(str(v))}" for k, v in env_vars.items()]
@@ -200,8 +199,9 @@ class E2BPersistentSession:
     async def close(self) -> None:
         if self._pid is not None and self._e2b.sandbox is not None:
             with contextlib.suppress(Exception):
-                await self._e2b.sandbox.commands.kill(self._pid)
+                await self._e2b.sandbox.pty.kill(self._pid)
             self._pid = None
+        self._handle = None
         self._started = False
         self._dead = True
         _log.info("[E2BPersistentSession] Session closed")
@@ -277,7 +277,7 @@ class _E2BRuntimeShim(AbstractRuntime):
         return BashObservation(output=text, exit_code=exit_code, session_type="bash")
 
     async def _run_in_persistent_session(self, action: BashAction, timeout: float) -> BashObservation:
-        """Route action through the persistent bash session."""
+        """Route action through the persistent PTY bash session."""
         session = await self._env._ensure_session()
         cmd = (action.command or "").strip()
         if not cmd:
@@ -445,13 +445,15 @@ class E2BSWEEnvShim:
             pass
 
     async def _ensure_session(self) -> E2BPersistentSession:
-        """Lazily start the persistent bash session."""
-        if self._session is None or not self._session.alive:
-            self._session = E2BPersistentSession(self._e2b)
-            env_vars = dict(self._exports)
-            if self._e2b.default_env:
-                env_vars.update(self._e2b.default_env)
-            await self._session.start(env_vars=env_vars, cwd=self._cwd)
+        """Lazily start the persistent PTY bash session."""
+        if self._session is not None and self._session.alive:
+            return self._session
+        session = E2BPersistentSession(self._e2b)
+        env_vars = dict(self._exports)
+        if self._e2b.default_env:
+            env_vars.update(self._e2b.default_env)
+        await session.start(env_vars=env_vars, cwd=self._cwd)
+        self._session = session
         return self._session
 
     async def communicate(
