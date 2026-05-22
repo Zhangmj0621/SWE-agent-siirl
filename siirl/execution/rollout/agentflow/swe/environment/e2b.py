@@ -35,8 +35,6 @@ def _e2b_template_alias_for_docker_image(image_name: str) -> str:
         .replace(":", "-")
         .lower()
     )
-    if len(alias) > 64:
-        alias = alias[:64]
     return alias
 
 
@@ -518,14 +516,22 @@ class E2BEnv(ContainerEnv):
 
     async def write_file(self, path: str, content: str) -> None:
         data = content.encode("utf-8")
-        b64 = base64.b64encode(data).decode("ascii")
         parent = str(Path(path).parent)
-        await self.execute(
-            f"mkdir -p {shlex.quote(parent)} && "
-            f"base64 -d <<'__E2B_WF__' > {shlex.quote(path)}\n{b64}\n__E2B_WF__",
-            check=True,
-            timeout=180.0,
-        )
+        await self.execute(f"mkdir -p {shlex.quote(parent)}", check=True, timeout=30.0)
+
+        # Split into chunks to avoid E2B RPC argument size limit.
+        # Each base64 chunk stays under ~512KB to be safe.
+        chunk_size = 384 * 1024  # 384KB raw → ~512KB base64
+        quoted_path = shlex.quote(path)
+        for i in range(0, len(data), chunk_size):
+            chunk = data[i:i + chunk_size]
+            b64 = base64.b64encode(chunk).decode("ascii")
+            op = ">" if i == 0 else ">>"
+            await self.execute(
+                f"base64 -d <<'__E2B_WF__' {op} {quoted_path}\n{b64}\n__E2B_WF__",
+                check=True,
+                timeout=180.0,
+            )
 
     async def copy(
         self,
