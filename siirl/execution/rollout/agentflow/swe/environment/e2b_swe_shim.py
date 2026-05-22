@@ -486,6 +486,7 @@ class E2BSWEEnvShim:
         check: Literal["warn", "ignore", "raise"] = "ignore",
         error_msg: str = "Command failed",
     ) -> str:
+        check = "warn"
         if self._use_persistent_session:
             return await self._communicate_session(input, timeout, check=check, error_msg=error_msg)
         return await self._communicate_stateless(input, timeout, check=check, error_msg=error_msg)
