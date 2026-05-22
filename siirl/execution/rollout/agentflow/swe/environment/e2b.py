@@ -445,21 +445,29 @@ class E2BEnv(ContainerEnv):
 
         kwargs: dict[str, Any] = {"timeout": int(timeout), "user": "root"}
         if self.request_timeout is not None:
-            kwargs["request_timeout"] = self.request_timeout
+            kwargs["request_timeout"] = max(self.request_timeout, timeout + 30)
+        else:
+            kwargs["request_timeout"] = timeout + 30
 
         try:
-            result = await _do_run(**kwargs)
-        except TypeError:
-            kwargs.pop("request_timeout", None)
             try:
                 result = await _do_run(**kwargs)
             except TypeError:
-                kwargs.pop("user", None)
-                result = await _do_run(**kwargs)
-        stdout = _to_text(getattr(result, "stdout", ""))
-        stderr = _to_text(getattr(result, "stderr", ""))
-        output = (stdout + stderr).encode("utf-8", errors="replace")
-        returncode = int(getattr(result, "exit_code", 0) or 0)
+                kwargs.pop("request_timeout", None)
+                try:
+                    result = await _do_run(**kwargs)
+                except TypeError:
+                    kwargs.pop("user", None)
+                    result = await _do_run(**kwargs)
+            stdout = _to_text(getattr(result, "stdout", ""))
+            stderr = _to_text(getattr(result, "stderr", ""))
+            output = (stdout + stderr).encode("utf-8", errors="replace")
+            returncode = int(getattr(result, "exit_code", 0) or 0)
+        except Exception as exc:
+            err_name = type(exc).__name__
+            logger.warning(f"[E2BEnv] command failed with {err_name}: {exc}")
+            output = f"E2B error ({err_name}): {exc}".encode("utf-8", errors="replace")
+            returncode = 1
         logger.debug(f"[E2BEnv] command finished returncode={returncode}")
 
         if check and returncode != 0:

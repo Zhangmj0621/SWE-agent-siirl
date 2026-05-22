@@ -492,31 +492,45 @@ class E2BSWEEnvShim:
 
     async def _communicate_stateless(self, input: str, timeout: int | float, *, check: str, error_msg: str) -> str:
         """Stateless one-shot path (step_pause: true)."""
-        script = self._bash_one_shot(input)
-        out = await self._e2b.execute(script, check=False, timeout=float(timeout))
-        await self._sync_cwd()
-        text = _strip_ansi(out.output.decode("utf-8", errors="replace"))
-        if check != "ignore" and out.returncode != 0:
-            _log.error("%s:\n%s", error_msg, text[:2000])
-            msg = f"Command {input!r} failed (exit_code={out.returncode}): {error_msg}"
+        try:
+            script = self._bash_one_shot(input)
+            out = await self._e2b.execute(script, check=False, timeout=float(timeout))
+            await self._sync_cwd()
+            text = _strip_ansi(out.output.decode("utf-8", errors="replace"))
+            if check != "ignore" and out.returncode != 0:
+                _log.error("%s:\n%s", error_msg, text[:2000])
+                msg = f"Command {input!r} failed (exit_code={out.returncode}): {error_msg}"
+                if check == "raise":
+                    raise RuntimeError(msg)
+            return text
+        except Exception as e:
             if check == "raise":
-                raise RuntimeError(msg)
-        return text
+                raise RuntimeError(f"{error_msg}: {e}") from e
+            if check == "warn":
+                _log.error("%s: %s", error_msg, e)
+            return str(e)
 
     async def _communicate_session(self, input: str, timeout: int | float, *, check: str, error_msg: str) -> str:
         """Persistent session path (step_pause: false) — analogous to K8s SWEEnv.communicate."""
-        session = await self._ensure_session()
-        cmd = (input or "").strip()
-        if not cmd:
-            return ""
-        output, exit_code = await session.run(cmd, timeout=float(timeout))
-        output = _strip_ansi(output)
-        if check != "ignore" and exit_code != 0:
-            _log.error("%s:\n%s", error_msg, output[:2000])
-            msg = f"Command {input!r} failed (exit_code={exit_code}): {error_msg}"
+        try:
+            session = await self._ensure_session()
+            cmd = (input or "").strip()
+            if not cmd:
+                return ""
+            output, exit_code = await session.run(cmd, timeout=float(timeout))
+            output = _strip_ansi(output)
+            if check != "ignore" and exit_code != 0:
+                _log.error("%s:\n%s", error_msg, output[:2000])
+                msg = f"Command {input!r} failed (exit_code={exit_code}): {error_msg}"
+                if check == "raise":
+                    raise RuntimeError(msg)
+            return output
+        except Exception as e:
             if check == "raise":
-                raise RuntimeError(msg)
-        return output
+                raise RuntimeError(f"{error_msg}: {e}") from e
+            if check == "warn":
+                _log.error("%s: %s", error_msg, e)
+            return str(e)
 
     async def set_env_variables(self, env_variables: dict[str, str]) -> None:
         if not env_variables:
