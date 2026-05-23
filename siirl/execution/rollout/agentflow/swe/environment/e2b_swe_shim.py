@@ -453,7 +453,9 @@ class E2BSWEEnvShim:
         if not body:
             body = ":"
         # Track cwd across calls (stateless E2B execute).
-        inner_wrapped = f"{export_prefix}cd {shlex.quote(self._cwd)} && {body}; __rc=$?; pwd > /tmp/.swe_e2b_pwd; exit $__rc"
+        # Use \n (not ;) to separate body from exit-code capture so that heredoc
+        # terminators at the end of body are recognized (they must be alone on a line).
+        inner_wrapped = f"{export_prefix}cd {shlex.quote(self._cwd)} && {body}\n__rc=$?; pwd > /tmp/.swe_e2b_pwd; exit $__rc"
         return f"bash -lc {shlex.quote(inner_wrapped)}"
 
     async def _sync_cwd(self) -> None:
@@ -486,7 +488,6 @@ class E2BSWEEnvShim:
         check: Literal["warn", "ignore", "raise"] = "ignore",
         error_msg: str = "Command failed",
     ) -> str:
-        check = "warn"
         if self._use_persistent_session:
             return await self._communicate_session(input, timeout, check=check, error_msg=error_msg)
         return await self._communicate_stateless(input, timeout, check=check, error_msg=error_msg)

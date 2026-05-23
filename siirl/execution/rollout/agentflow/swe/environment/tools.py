@@ -88,13 +88,11 @@ class SiiToolHandler(ToolHandler):
         for bundle in self.config.bundles:
             bin_path = f"/root/tools/{bundle.path.name}/bin"
 
-            # Build commands - use . instead of source for /bin/sh compatibility
             cmds = [
                 f"export PATH=/root/tools/{bundle.path.name}/bin:$PATH",
                 f"chmod +x /root/tools/{bundle.path.name}/bin/* 2>&1 || echo 'CHMOD_FAILED'",
             ]
             if (bundle.path / "install.sh").exists():
-                # Use . instead of source for /bin/sh compatibility
                 cmds.append(f"cd /root/tools/{bundle.path.name} && . ./install.sh")
             cmds.append(f"chmod +x /root/tools/{bundle.path.name}/bin/* 2>&1 || echo 'CHMOD_FAILED'")
             cmds.append(f"ls -la {bin_path} 2>&1 || echo 'LS_FAILED'")
@@ -111,11 +109,19 @@ class SiiToolHandler(ToolHandler):
                 self.logger.error(f"Commands FAILED for {bundle.path.name}: {e}")
                 raise
 
-            # Verify chmod succeeded - separate ls call to double-check
             await env.communicate(f"ls -la {bin_path} 2>&1 || echo 'DIRECTORY_NOT_FOUND'", check="warn", timeout=10.0)
         await env.communicate(f"cd {cwd}", check="raise")
-        path = (await env.communicate("echo $PATH", check="raise")).strip()
-        await self._check_available_commands(env, {"PATH": path})
+
+        # In stateless mode (E2B), each communicate() is an independent bash -lc
+        # process — PATH exports within one call don't persist to the next.
+        # Explicitly prepend all tool bin directories to the PATH.
+        base_path = (await env.communicate("echo $PATH", check="raise")).strip()
+        tool_bin_dirs = [f"/root/tools/{bundle.path.name}/bin" for bundle in self.config.bundles]
+        for d in tool_bin_dirs:
+            if d not in base_path:
+                base_path = f"{d}:{base_path}"
+        await env.set_env_variables({"PATH": base_path})
+        await self._check_available_commands(env, {"PATH": base_path})
 
     # Getting state
     # -------------
