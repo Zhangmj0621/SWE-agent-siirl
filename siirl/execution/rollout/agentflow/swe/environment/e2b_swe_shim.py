@@ -246,8 +246,8 @@ class _E2BRuntimeShim(AbstractRuntime):
             script = f"source {shlex.quote(str(src))} 2>/dev/null || true"
             inner = self._env._bash_one_shot(script)
             r = await self._env._e2b.execute(inner, check=False, timeout=max(5.0, tout))
-            out_parts.append(r.output.decode("utf-8", errors="replace"))
-            await self._env._sync_cwd()
+            raw = r.output.decode("utf-8", errors="replace")
+            out_parts.append(self._env._extract_cwd_from_output(raw))
         return CreateBashSessionResponse(output="".join(out_parts), session_type="bash")
 
     async def run_in_session(self, action: Action) -> Observation:
@@ -276,8 +276,8 @@ class _E2BRuntimeShim(AbstractRuntime):
         inner = action.command
         script = self._env._bash_one_shot(inner)
         r = await self._env._e2b.execute(script, check=False, timeout=tout)
-        await self._env._sync_cwd()
-        text = _strip_ansi(r.output.decode("utf-8", errors="replace"))
+        raw = r.output.decode("utf-8", errors="replace")
+        text = _strip_ansi(self._env._extract_cwd_from_output(raw))
         if action.check == "ignore":
             return BashObservation(output=text, exit_code=None, session_type="bash")
         exit_code = int(r.returncode)
@@ -433,11 +433,12 @@ class E2BSWEEnvShim:
                 await self._e2b.resume_sandbox()
                 _log.debug("[E2BSWEEnvShim] Sandbox resumed for execution")
 
+    # Sentinel used to separate command output from the trailing cwd line.
+    _CWD_SENTINEL = "__E2B_CWD__"
+
     def _bash_one_shot(self, inner: str) -> str:
         export_prefix = ""
         parts: list[str] = []
-        # Re-export default_env (PATH, PYTHONPATH, etc.) inside the login shell,
-        # because bash -l reads /etc/profile which may reset PATH to system default.
         if self._e2b.default_env:
             parts.extend(
                 f"export {k}={shlex.quote(str(v))}"
@@ -447,25 +448,31 @@ class E2BSWEEnvShim:
             parts.extend(f"export {k}={shlex.quote(str(v))}" for k, v in self._exports.items())
         if parts:
             export_prefix = " && ".join(parts) + " && "
-        # SWE-agent ToolHandler.reset uses communicate(" && ".join(_reset_commands)) which is
-        # "" when there are no reset commands — must not emit "cd ... && ;" (bash syntax error).
         body = (inner or "").strip() if isinstance(inner, str) else ""
         if not body:
             body = ":"
-        # Track cwd across calls (stateless E2B execute).
-        # Use \n (not ;) to separate body from exit-code capture so that heredoc
-        # terminators at the end of body are recognized (they must be alone on a line).
-        inner_wrapped = f"{export_prefix}cd {shlex.quote(self._cwd)} && {body}\n__rc=$?; pwd > /tmp/.swe_e2b_pwd; exit $__rc"
+        # Embed cwd into stdout via sentinel — eliminates the separate _sync_cwd HTTP call.
+        # Also write state.json inline — eliminates the _state_anthropic communicate() call.
+        # Use \n before trailer so heredoc terminators at end of body are recognized.
+        trailer = (
+            f'__rc=$?; __cwd=$(pwd); echo "{self._CWD_SENTINEL}$__cwd";'
+            f' printf \'{{\"working_dir\":\"%s\"}}\' "$__cwd" > /root/state.json;'
+            f" exit $__rc"
+        )
+        inner_wrapped = f"{export_prefix}cd {shlex.quote(self._cwd)} && {body}\n{trailer}"
         return f"bash -lc {shlex.quote(inner_wrapped)}"
 
-    async def _sync_cwd(self) -> None:
-        try:
-            out = await self._e2b.execute("cat /tmp/.swe_e2b_pwd 2>/dev/null || true", check=False, timeout=30.0)
-            p = out.output.decode("utf-8", errors="replace").strip()
-            if p:
-                self._cwd = p
-        except Exception:
-            pass
+    def _extract_cwd_from_output(self, raw: str) -> str:
+        """Strip the sentinel+cwd suffix from raw output, update self._cwd, return clean output."""
+        sentinel = self._CWD_SENTINEL
+        idx = raw.rfind(sentinel)
+        if idx == -1:
+            return raw
+        user_output = raw[:idx].rstrip("\n")
+        cwd_line = raw[idx + len(sentinel):].strip().split("\n", 1)[0].strip()
+        if cwd_line:
+            self._cwd = cwd_line
+        return user_output
 
     async def _ensure_session(self) -> E2BPersistentSession:
         """Lazily start the persistent PTY bash session."""
@@ -493,15 +500,66 @@ class E2BSWEEnvShim:
         return await self._communicate_stateless(input, timeout, check=check, error_msg=error_msg)
 
     async def _communicate_stateless(self, input: str, timeout: int | float, *, check: str, error_msg: str) -> str:
-        """Stateless one-shot path (step_pause: true)."""
+        """Stateless one-shot path — calls sandbox.commands.run() directly.
+
+        Previous implementation double-wrapped every command:
+          E2B bash → /bin/sh -c → bash -lc → actual command (3-4 process forks)
+        Now we pass the command directly with cwd + envs parameters:
+          E2B bash → actual command (1 fork, like nexau/K8s)
+        """
         try:
-            script = self._bash_one_shot(input)
-            out = await self._e2b.execute(script, check=False, timeout=float(timeout))
-            await self._sync_cwd()
-            text = _strip_ansi(out.output.decode("utf-8", errors="replace"))
-            if check != "ignore" and out.returncode != 0:
+            cmd = (input or "").strip() or ":"
+            trailer = (
+                f'__rc=$?; __cwd=$(pwd); echo "{self._CWD_SENTINEL}$__cwd";'
+                f' printf \'{{\"working_dir\":\"%s\"}}\' "$__cwd" > /root/state.json;'
+                f" exit $__rc"
+            )
+            # Do NOT wrap cmd in { ... } — that breaks heredocs inside cmd (e.g. submit script uses PYEOF).
+            # Use exec 2>&1 at the start to merge stderr, then cmd on its own line, then trailer.
+            script = f"exec 2>&1\n{cmd}\n{trailer}"
+
+            envs: dict[str, str] = {}
+            if self._e2b.default_env:
+                envs.update({str(k): str(v) for k, v in self._e2b.default_env.items()})
+            if self._exports:
+                envs.update({str(k): str(v) for k, v in self._exports.items()})
+
+            kwargs: dict[str, Any] = {
+                "timeout": int(timeout),
+                "user": "root",
+                "cwd": self._cwd,
+                "envs": envs,
+            }
+            if getattr(self._e2b, "request_timeout", None) is not None:
+                kwargs["request_timeout"] = max(self._e2b.request_timeout, timeout + 30)
+            else:
+                kwargs["request_timeout"] = timeout + 30
+
+            try:
+                result = await self._e2b.sandbox.commands.run(script, **kwargs)
+            except TypeError:
+                kwargs.pop("request_timeout", None)
+                try:
+                    result = await self._e2b.sandbox.commands.run(script, **kwargs)
+                except TypeError:
+                    kwargs.pop("envs", None)
+                    kwargs.pop("cwd", None)
+                    script = self._bash_one_shot(input)
+                    result = await self._e2b.sandbox.commands.run(script, **kwargs)
+
+            stdout = getattr(result, "stdout", "") or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            stderr = getattr(result, "stderr", "") or ""
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            raw = str(stdout) + str(stderr)
+            text = _strip_ansi(self._extract_cwd_from_output(raw))
+            exit_code = int(getattr(result, "exit_code", 0) or 0)
+
+            if check != "ignore" and exit_code != 0:
                 _log.error("%s:\n%s", error_msg, text[:2000])
-                msg = f"Command {input!r} failed (exit_code={out.returncode}): {error_msg}"
+                msg = f"Command {input!r} failed (exit_code={exit_code}): {error_msg}"
                 if check == "raise":
                     raise RuntimeError(msg)
             return text

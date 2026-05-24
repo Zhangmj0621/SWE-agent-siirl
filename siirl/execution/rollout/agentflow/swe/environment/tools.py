@@ -6,6 +6,8 @@ from sweagent.tools.tools import ToolConfig, ToolHandler
 
 from .base import ContainerEnv
 
+_PATH_SENTINEL = "__SII_PATH__"
+
 
 # patch ToolHandler, modify env call func
 class SiiToolHandler(ToolHandler):
@@ -13,7 +15,10 @@ class SiiToolHandler(ToolHandler):
         super().__init__(tools)
 
     async def install(self, env: ContainerEnv) -> None:
-        await self._install_commands(env)
+        try:
+            await self._install_commands(env)
+        except Exception as e:
+            self.logger.warning(f"Tools _install_commands failed (will try to continue): {e}")
         await self.reset(env)
 
     async def reset(self, env: ContainerEnv) -> None:
@@ -22,7 +27,11 @@ class SiiToolHandler(ToolHandler):
         await env.set_env_variables(env_variables)
         await env.write_file("/root/.swe-agent-env", json.dumps(self.config.registry_variables))
         await env.write_file("/root/state.json", "{}")
-        await env.communicate(" && ".join(self._reset_commands), check="raise", timeout=self.config.install_timeout)
+        if self._reset_commands:
+            try:
+                await env.communicate(" && ".join(self._reset_commands), check="raise", timeout=self.config.install_timeout)
+            except Exception as e:
+                self.logger.warning(f"Tools reset commands failed (will try to continue): {e}")
 
     async def _upload_bundles(self, env: ContainerEnv) -> None:
         await asyncio.gather(
@@ -32,96 +41,60 @@ class SiiToolHandler(ToolHandler):
             )
         )
 
-    async def _is_command_available(self, env: ContainerEnv, command: str, env_vars: dict[str, str]) -> None:
-        if command == "bash":
-            return
-        try:
-            # Use execute instead of communicate to match original SWE-agent behavior
-            # execute runs in a subprocess with env vars, not in the bash session
-            result = await env.execute(f"which {command}", env=env_vars, timeout=30.0, check=False)
-            if result.returncode != 0:
-                raise RuntimeError(f"Command which {command} failed with exit code {result.returncode}")
-
-        except Exception:
-            msg = f"Tool {command} is not available in the container."
-            raise RuntimeError(msg) from None
-
-    async def _check_available_commands(self, env: ContainerEnv, env_vars: dict[str, str]) -> None:
-        await asyncio.gather(*(self._is_command_available(env, command.name, env_vars) for command in self.config.commands))
-
     async def _install_commands(self, env: ContainerEnv) -> None:
-        """Make sure all commands are available in the container"""
+        """Install tools with minimal HTTP round-trips.
+
+        Combines all bundle install steps into ONE communicate call
+        instead of separate calls per bundle + verification + PATH check.
+        """
         await env.set_env_variables(self.config.env_variables)
-        cwd = (await env.communicate("pwd", check="raise")).strip()
 
-        # Test communicate method with simple commands (allow tools directory to not exist yet)
-        # test_pwd = await env.communicate(
-        #     "pwd && echo 'TEST_SUCCESS' && ls /root/tools || echo 'tools directory not created yet'",
-        #     check="raise",
-        #     timeout=10.0,
-        # )
-        # self.logger.info(f"pwd test result:\n{test_pwd}")
-
+        # Upload bundles (parallel HTTP calls — unavoidable)
         await self._upload_bundles(env)
 
-        # Verify upload succeeded - check if files exist in container
-        # self.logger.info("Checking if bundles were uploaded successfully...")
-        # for bundle in self.config.bundles:
-        #     target_path = f"/root/tools/{bundle.path.name}"
-        #     try:
-        #         # Check if directory exists
-        #         ls_result = await env.communicate(f"ls -la {target_path}", check="warn", timeout=10.0)
-        #         self.logger.info(f"ls -la {target_path}:\n{ls_result}")
-
-        #         # Check if bin directory exists
-        #         bin_path = f"{target_path}/bin"
-        #         bin_ls = await env.communicate(f"ls -la {bin_path} 2>&1", check="warn", timeout=10.0)
-        #         self.logger.info(f"ls -la {bin_path}:\n{bin_ls}")
-
-        #         # Check if str_replace_editor exists in this bundle
-        #         if bundle.path.name == "edit_anthropic":
-        #             str_replace_check = await env.communicate(f"ls -la {bin_path}/str_replace_editor 2>&1", check="warn", timeout=10.0)
-        #             self.logger.info(f"str_replace_editor check:\n{str_replace_check}")
-        #     except Exception as e:
-        #         self.logger.error(f"Failed to verify bundle {bundle.path.name}: {e}")
-
+        # Build a single script that does everything:
+        # chmod + install.sh for all bundles + print PATH at the end
+        parts = []
         for bundle in self.config.bundles:
             bin_path = f"/root/tools/{bundle.path.name}/bin"
-
-            cmds = [
-                f"export PATH=/root/tools/{bundle.path.name}/bin:$PATH",
-                f"chmod +x /root/tools/{bundle.path.name}/bin/* 2>&1 || echo 'CHMOD_FAILED'",
-            ]
+            parts.append(f"chmod +x {bin_path}/* 2>/dev/null")
             if (bundle.path / "install.sh").exists():
-                cmds.append(f"cd /root/tools/{bundle.path.name} && . ./install.sh")
-            cmds.append(f"chmod +x /root/tools/{bundle.path.name}/bin/* 2>&1 || echo 'CHMOD_FAILED'")
-            cmds.append(f"ls -la {bin_path} 2>&1 || echo 'LS_FAILED'")
+                parts.append(f"cd /root/tools/{bundle.path.name} && . ./install.sh")
+            parts.append(f"chmod +x {bin_path}/* 2>/dev/null")
+        parts.append(f"echo {_PATH_SENTINEL}$PATH")
 
-            cmd_str = " && ".join(cmds)
+        combined_script = " && ".join(parts)
 
+        try:
+            output = await env.communicate(combined_script, check="raise", timeout=self.config.install_timeout)
+        except Exception as e:
+            self.logger.warning(f"Tools install script failed (will try to continue): {e}")
+            output = ""
+
+        # Extract PATH from output and persist it
+        base_path = ""
+        if _PATH_SENTINEL in output:
+            base_path = output.split(_PATH_SENTINEL)[-1].strip().split("\n")[0]
+
+        if not base_path:
             try:
-                await env.communicate(
-                    cmd_str,
-                    check="raise",
-                    timeout=self.config.install_timeout,
-                )
-            except Exception as e:
-                self.logger.error(f"Commands FAILED for {bundle.path.name}: {e}")
-                raise
+                base_path = (await env.communicate("echo $PATH", check="raise")).strip()
+            except Exception:
+                base_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-            await env.communicate(f"ls -la {bin_path} 2>&1 || echo 'DIRECTORY_NOT_FOUND'", check="warn", timeout=10.0)
-        await env.communicate(f"cd {cwd}", check="raise")
-
-        # In stateless mode (E2B), each communicate() is an independent bash -lc
-        # process — PATH exports within one call don't persist to the next.
-        # Explicitly prepend all tool bin directories to the PATH.
-        base_path = (await env.communicate("echo $PATH", check="raise")).strip()
         tool_bin_dirs = [f"/root/tools/{bundle.path.name}/bin" for bundle in self.config.bundles]
         for d in tool_bin_dirs:
             if d not in base_path:
                 base_path = f"{d}:{base_path}"
+        # In E2B stateless mode, the adapter at /usr/local/bin/submit handles
+        # submission correctly (emits <<SWE_AGENT_SUBMISSION>> + writes model.patch).
+        # Ensure it takes PATH priority over bundle scripts which depend on
+        # EnvRegistry (ROOT variable) that may not be set up in E2B.
+        if hasattr(env, "_cwd") and "/usr/local/bin" in base_path:
+            parts = base_path.split(":")
+            parts = [p for p in parts if p != "/usr/local/bin"]
+            base_path = "/usr/local/bin:" + ":".join(parts)
         await env.set_env_variables({"PATH": base_path})
-        await self._check_available_commands(env, {"PATH": base_path})
 
     # Getting state
     # -------------
@@ -148,10 +121,17 @@ class SiiToolHandler(ToolHandler):
 
     async def get_state(self, env: ContainerEnv) -> dict[str, str]:
         """Execute state commands from all bundles and combine their results.
-        This can be used to extract environment variables etc. from the environment.
+
+        Optimization: in stateless E2B mode, _bash_one_shot already writes
+        state.json on every command execution and tracks cwd in-memory.
+        Skip the extra communicate + read_file round-trips (saves 3 HTTP calls/step).
         """
         if self.mock_state is not None:
             return self.mock_state
+
+        # Fast path: E2B shim tracks cwd in-memory, state.json already written by _bash_one_shot
+        if hasattr(env, "_cwd"):
+            return {"working_dir": env._cwd}
 
         for _, state_command in enumerate(self.config.state_commands):
             await env.communicate(state_command, check="warn")

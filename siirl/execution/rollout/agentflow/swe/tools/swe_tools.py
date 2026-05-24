@@ -417,18 +417,34 @@ def cmd_str_replace_editor(args: argparse.Namespace) -> str:
 def cmd_submit(args: argparse.Namespace) -> str:
     state = _load_state()
     wd = state.get("working_dir") or os.getcwd()
-    # Prefer binary-safe diff similar to many SWE runs.
+    # Always find the git repo root — agent may have cd'd to a non-repo directory.
+    # Try wd first, then common locations, then fall back to /testbed.
+    repo_root = None
+    for candidate in [wd, "/testbed", os.getcwd()]:
+        rc_check, root_out = _run_capture(["git", "-C", candidate, "rev-parse", "--show-toplevel"])
+        if rc_check == 0 and root_out.strip():
+            repo_root = root_out.strip()
+            break
+    if not repo_root:
+        repo_root = "/testbed"
     cmd = [
         "bash",
         "-lc",
-        f'cd "{wd}" && git add -N . >/dev/null 2>&1 || true; git -c core.fileMode=false diff --binary --no-color',
+        f'cd "{repo_root}" && git add -A >/dev/null 2>&1 || true; git -c core.fileMode=false diff --cached --binary --no-color',
     ]
     rc, out = _run_capture(cmd)
-    if rc != 0 and not out.strip():
-        out = "No changes to submit."
+    patch = out.strip() if rc == 0 else ""
     state["working_dir"] = str(Path.cwd())
     _save_state(state)
-    return _format_obs(_clip(out.strip() or "No changes to submit."), state)
+    if not patch:
+        return _format_obs("No changes to submit. Please make code changes before submitting.", state)
+    # Write patch to /root/model.patch (same as review_on_submit_m bundle)
+    try:
+        Path("/root/model.patch").write_text(patch, encoding="utf-8")
+    except OSError:
+        pass
+    # Emit the submission sentinel so the agent detects the submission and stops
+    return f"<<SWE_AGENT_SUBMISSION>>\n{_clip(patch)}"
 
 
 def _build_parser() -> argparse.ArgumentParser:

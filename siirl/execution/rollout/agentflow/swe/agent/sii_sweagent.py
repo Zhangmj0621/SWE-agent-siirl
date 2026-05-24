@@ -131,12 +131,7 @@ class RLTokenAgentWrapper(AbstractAgent):
         else:
             raise ValueError(f"Model {type(model).__name__} must have 'tokenizer' attribute for RLTokenAgent")
 
-        # Create original RLTokenAgent with state
-        # Note: original RLTokenAgent uses ToolHandler, not SiiToolHandler
-        # We need to convert ToolHandler config to ToolHandler
-        from sweagent.tools.tools import ToolHandler
-
-        tool_handler = ToolHandler(tools.config)
+        tool_handler = tools
 
         # ``model`` is a ``SweSglangModel`` — a faithful async port of the
         # pre-6564c63 ``query_for_swe`` wrapper. Upstream ``RLTokenAgent``
@@ -421,7 +416,7 @@ class RLTokenAgentBuilder(AgentBuilder):
         # Use original RLTokenAgent via wrapper
         return RLTokenAgentWrapper(
             templates=self.config.templates,
-            tools=ToolHandler(self.config.tools),
+            tools=SiiToolHandler(self.config.tools),
             history_processors=self.config.history_processors,
             model=sample.model,
             max_requeries=self.config.max_requeries,
@@ -1585,11 +1580,9 @@ class DefaultAgentWrapper(AbstractAgent):
         self.problem_statement = problem_statement
         self.sample = sample
 
-        # Convert ToolConfig to ToolHandler if needed
+        # Convert ToolConfig to SiiToolHandler for E2B compatibility
         if isinstance(tools, ToolConfig):
-            from sweagent.tools.tools import ToolHandler
-
-            tool_handler = ToolHandler(tools)
+            tool_handler = SiiToolHandler(tools)
         else:
             tool_handler = tools
 
