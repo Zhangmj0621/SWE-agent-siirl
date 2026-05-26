@@ -177,13 +177,13 @@ async def _install_sweagent_tool_bundles(env: "E2BEnv", conf: dict) -> None:
         cmds: list[str] = [f"chmod +x {shlex.quote(container_bundle_dir)}/bin/* 2>/dev/null || true"]
         if (host_bundle_dir / "install.sh").exists():
             cmds.append(f"cd {shlex.quote(container_bundle_dir)} && bash -lc 'source install.sh'")
-        await env.execute(" && ".join(cmds), timeout=300.0, check=False)
+        await env.execute(" && ".join(cmds), timeout=1800.0, check=False)
 
         bin_prefixes.append(f"{container_bundle_dir}/bin")
 
-    await env.execute("bash -lc 'mkdir -p /root && printf \"%s\" \"{}\" > /root/state.json'", timeout=60.0, check=True)
+    await env.execute("bash -lc 'mkdir -p /root && printf \"%s\" \"{}\" > /root/state.json'", timeout=1800.0, check=True)
     await env.execute(
-        "bash -lc 'mkdir -p /root && printf \"%s\" \"{}\" > /root/.swe-agent-env'", timeout=60.0, check=True
+        "bash -lc 'mkdir -p /root && printf \"%s\" \"{}\" > /root/.swe-agent-env'", timeout=1800.0, check=True
     )
 
     env.default_env["PATH"] = ":".join(bin_prefixes + [base_path])
@@ -213,7 +213,7 @@ async def _install_sweagent_tools_adapter(env: "E2BEnv", conf: dict) -> None:
         raise FileNotFoundError(f"swe_tools adapter script not found on host: {adapter_host}")
 
     adapter_container = str(conf.get("sweagent_tools_adapter_path", "/root/swe_tools.py"))
-    await env.copy(str(adapter_host), adapter_container, upload=True, timeout=180.0)
+    await env.copy(str(adapter_host), adapter_container, upload=True, timeout=1800.0)
     await env.execute(f"chmod +x {shlex.quote(adapter_container)}", timeout=60.0, check=True)
 
     bin_dir = str(conf.get("sweagent_tools_adapter_bin_dir", "/usr/local/bin"))
@@ -386,7 +386,7 @@ class E2BEnv(ContainerEnv):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         forward_env: list[str] | None = None,
-        timeout: float = 900.0,
+        timeout: float = 1800.0,
     ) -> ContainerOutput:
         raise NotImplementedError
 
@@ -397,7 +397,7 @@ class E2BEnv(ContainerEnv):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         forward_env: list[str] | None = None,
-        timeout: float = 900.0,
+        timeout: float = 1800.0,
         check: bool = True,
     ) -> ContainerOutput:
         if self._closed:
@@ -443,29 +443,21 @@ class E2BEnv(ContainerEnv):
 
         kwargs: dict[str, Any] = {"timeout": int(timeout), "user": "root"}
         if self.request_timeout is not None:
-            kwargs["request_timeout"] = max(self.request_timeout, timeout + 30)
-        else:
-            kwargs["request_timeout"] = timeout + 30
+            kwargs["request_timeout"] = self.request_timeout
 
         try:
+            result = await _do_run(**kwargs)
+        except TypeError:
+            kwargs.pop("request_timeout", None)
             try:
                 result = await _do_run(**kwargs)
             except TypeError:
-                kwargs.pop("request_timeout", None)
-                try:
-                    result = await _do_run(**kwargs)
-                except TypeError:
-                    kwargs.pop("user", None)
-                    result = await _do_run(**kwargs)
-            stdout = _to_text(getattr(result, "stdout", ""))
-            stderr = _to_text(getattr(result, "stderr", ""))
-            output = (stdout + stderr).encode("utf-8", errors="replace")
-            returncode = int(getattr(result, "exit_code", 0) or 0)
-        except Exception as exc:
-            err_name = type(exc).__name__
-            logger.warning(f"[E2BEnv] command failed with {err_name}: {exc}")
-            output = f"E2B error ({err_name}): {exc}".encode("utf-8", errors="replace")
-            returncode = 1
+                kwargs.pop("user", None)
+                result = await _do_run(**kwargs)
+        stdout = _to_text(getattr(result, "stdout", ""))
+        stderr = _to_text(getattr(result, "stderr", ""))
+        output = (stdout + stderr).encode("utf-8", errors="replace")
+        returncode = int(getattr(result, "exit_code", 0) or 0)
         logger.debug(f"[E2BEnv] command finished returncode={returncode}")
 
         if check and returncode != 0:
@@ -511,7 +503,7 @@ class E2BEnv(ContainerEnv):
                 await sb.kill()
 
     async def read_file(self, path: str, encoding: str = "utf-8", errors: str = "strict") -> str:
-        out = await self.execute(f"cat {shlex.quote(path)}", check=True, timeout=120.0)
+        out = await self.execute(f"cat {shlex.quote(path)}", check=True, timeout=30.0)
         return out.output.decode(encoding, errors=errors)
 
     async def write_file(self, path: str, content: str) -> None:
@@ -539,7 +531,7 @@ class E2BEnv(ContainerEnv):
         dst: str,
         upload: bool = True,
         cwd: str | None = None,
-        timeout: float = 180.0,
+        timeout: float = 1800.0,
     ):
         if self._closed:
             raise RuntimeError("E2B sandbox is closed")
@@ -797,7 +789,7 @@ class E2BEnvBuilder(ContainerEnvBuilder):
 
         if skip_tool_install and not resume_cwd:
             try:
-                ro = await env.execute("bash -lc 'pwd'", check=False, timeout=30.0)
+                ro = await env.execute("bash -lc 'pwd'", check=False, timeout=300.0)
                 lines = ro.output.decode("utf-8", errors="replace").strip().splitlines()
                 candidate = lines[-1] if lines else ""
                 if candidate.startswith("/"):
@@ -808,7 +800,7 @@ class E2BEnvBuilder(ContainerEnvBuilder):
         if not skip_tool_install:
             await env.execute(
                 f"git config --global --add safe.directory /{self.repo_name}",
-                check=False, timeout=30.0,
+                check=False, timeout=300.0,
             )
 
         if args.cmd:
