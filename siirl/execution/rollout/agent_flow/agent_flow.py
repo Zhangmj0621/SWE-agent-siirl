@@ -13,12 +13,7 @@ from siirl.data_coordinator.sample import Sample
 from siirl.engine.rollout.sglang_engine import SglangEngine
 
 from ..agentflow import AgentFlow, ModelResponse, load_agentflow
-from ..utils import (
-    ContextWindowExceededError,
-    EnvCreateError,
-    RolloutGenerationAborted,
-    SglangGenerationAborted,
-)
+from ..utils import ContextWindowExceededError, EnvCreateError, RolloutGenerationAborted, SglangGenerationAborted
 
 LLMEngine = Any  # siirl.engine.rollout.sglang_engine.SglangEngine
 
@@ -612,17 +607,22 @@ class AgentFlowCallable:
         sample_data = dict(sample.extra_info) if isinstance(sample.extra_info, dict) else {}
         if getattr(sample, "partial_agent_data", None):
             sample_data["partial_agent_data"] = sample.partial_agent_data
-        s = await self.flow.preprocess(sample_data, model=model, is_validate=is_validate)
 
-        # Rebind the model's _current_sample to the SWESample so
-        # SweSglangModel._pop_sample_partial can see
-        # ``partial_response_ids`` / ``partial_rollout_log_prob`` /
-        # ``partial_loss_mask`` (which live on SWESample, not the siirl
-        # Pydantic Sample). Seed / rid already captured on the earlier
-        # set_sample call above, so this rebind is safe.
-        if hasattr(model, "_current_sample"):
-            model._current_sample = s
+        # preprocess is async but contains blocking operations, so run it in executor
+        # We need to run it in a new event loop in the executor thread
+        import asyncio
 
+        def run_preprocess_in_thread():
+            """Run the async preprocess in a new event loop in executor thread."""
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(self.flow.preprocess(sample_data, model=model, is_validate=is_validate))
+            finally:
+                loop.close()
+
+        loop = asyncio.get_running_loop()
+        s = await loop.run_in_executor(None, run_preprocess_in_thread)
         try:
             await self.flow.generate(s)
             await self.flow.reward(s)
@@ -633,19 +633,14 @@ class AgentFlowCallable:
         except SglangGenerationAborted:
             # SWEAgentFlow writes partial_agent_data onto ``s.m.rollout``;
             # move it onto the siirl Sample before handing off.
-            partial = (
-                getattr(getattr(s, "m", None), "rollout", None)
-                and getattr(s.m.rollout, "partial_agent_data", None)
-            )
+            partial = getattr(getattr(s, "m", None), "rollout", None) and getattr(s.m.rollout, "partial_agent_data", None)
             if partial:
                 sample.partial_agent_data = partial
-                raise RolloutGenerationAborted(sample)
+                raise RolloutGenerationAborted(sample) from None
             # No usable partial (env detach failed, or abort hit before we
             # got a snapshot). Fall through to the generic fail path so the
             # sample still makes it into the batch with reward=0.
-            logger.warning(
-                "[AgentFlowCallable] Abort without partial; falling through to fail"
-            )
+            logger.warning("[AgentFlowCallable] Abort without partial; falling through to fail")
             s.reward = 0.0
         except EnvCreateError as e:
             logger.warning(f"Create Env Failed, set sample to default None {e}", exc_info=True)
@@ -674,7 +669,24 @@ class AgentFlowCallable:
             if not s.reward:
                 s.reward = 0.0
                 s.status = s.Status.FAILED
-                logger.warning("[AgentFlowCallable] No tokens generated for sample, skipping")
+                uid = getattr(sample, "uid", "?")
+                # Was this sample resumed from a partial? preprocess stashes
+                # the inbound partial on m.rollout.partial_state; the
+                # outbound partial_agent_data on the pydantic Sample is
+                # cleared only on success (above `else:` branch), so its
+                # presence here also implies resume.
+                rollout_meta = getattr(getattr(s, "m", None), "rollout", None)
+                was_resume = (
+                    getattr(rollout_meta, "partial_state", None) is not None or getattr(sample, "partial_agent_data", None) is not None
+                )
+                exit_status = getattr(rollout_meta, "exit_status", None)
+                logger.warning(
+                    "[AgentFlowCallable] EMPTY-ROLLOUT-FALLBACK uid=%s " "was_resume=%s exit_status=%s prompts_len=%s tokens_len=0",
+                    uid,
+                    was_resume,
+                    exit_status,
+                    len(s.prompts),
+                )
             # Return minimal valid data to avoid TransformerEngine crash
             # Use pad_token_id if available, otherwise use 0
             pad_token_id = getattr(s.model.tokenizer, "pad_token_id", 0)
