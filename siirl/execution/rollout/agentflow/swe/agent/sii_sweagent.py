@@ -957,7 +957,25 @@ class RLTokenAgent(AbstractAgent):
 
         self.logger.warning(f"{error_template}")
         # self.logger.debug(f"**kwargs: {kwargs}")
+        output_tokens = kwargs.get("output_tokens")
+        if output_tokens is None or not isinstance(output_tokens, list):
+            output_tokens = []
         input_ids = copy.deepcopy(self.input_ids)
+        # TODO: 改为返回 Token
+        assistant_content_token_ids = self.generate_prompt_suffix + output_tokens + [198]  # '\n'
+        input_ids.extend(assistant_content_token_ids)
+        # self.loss_mask.extend([0]*len(self.generate_prompt_suffix) + [1]*(len(content_token_ids)-len(self.generate_prompt_suffix)))
+
+        user_content_token_ids = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": error_template}],
+            add_generation_prompt=True,
+            tokenize=True,
+        )
+        user_content_token_ids = user_content_token_ids[len(self.system_prompt_prefix) :]
+        input_ids.extend(user_content_token_ids)
+        # self.loss_mask.extend([0]*len(content_token_ids))
+        # self.logger.debug("get_model_requery_history -> input_ids: %s", input_ids)
+
         return input_ids
 
     async def attempt_autosubmission_after_error(self, step: StepOutput) -> StepOutput:

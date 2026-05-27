@@ -13,7 +13,12 @@ from siirl.data_coordinator.sample import Sample
 from siirl.engine.rollout.sglang_engine import SglangEngine
 
 from ..agentflow import AgentFlow, ModelResponse, load_agentflow
-from ..utils import ContextWindowExceededError, EnvCreateError, RolloutGenerationAborted, SglangGenerationAborted
+from ..utils import (
+    ContextWindowExceededError,
+    EnvCreateError,
+    RolloutGenerationAborted,
+    SglangGenerationAborted,
+)
 
 LLMEngine = Any  # siirl.engine.rollout.sglang_engine.SglangEngine
 
@@ -130,10 +135,15 @@ class SglangModel:
         if self.config.max_input_tokens and self.config.max_output_tokens:
             self.total_context_window = self.config.max_input_tokens + self.config.max_output_tokens
 
+        self._priority_is_high: bool = True
+
     def reset_stats(self):
         """Reset statistics (e.g., for new sample)."""
         self.stats = InstanceStats()
         self.last_query_time = 0.0
+
+    def set_priority(self, is_high: bool) -> None:
+        self._priority_is_high = bool(is_high)
 
     def set_sample(self, sample):
         """Set the current sample for seed extraction.
@@ -413,6 +423,7 @@ class SglangModel:
             is_validate=is_validate,
             sampling_params=self.sampling_params,
             request_seed=final_request_seed,
+            priority=self.engine.priority_for(self._priority_is_high),
         )
         if timeout is None:
             logger.debug("[SglangModel.query] Waiting for response...")
@@ -607,22 +618,17 @@ class AgentFlowCallable:
         sample_data = dict(sample.extra_info) if isinstance(sample.extra_info, dict) else {}
         if getattr(sample, "partial_agent_data", None):
             sample_data["partial_agent_data"] = sample.partial_agent_data
+        s = await self.flow.preprocess(sample_data, model=model, is_validate=is_validate)
 
-        # preprocess is async but contains blocking operations, so run it in executor
-        # We need to run it in a new event loop in the executor thread
-        import asyncio
+        # Rebind the model's _current_sample to the SWESample so
+        # SweSglangModel._pop_sample_partial can see
+        # ``partial_response_ids`` / ``partial_rollout_log_prob`` /
+        # ``partial_loss_mask`` (which live on SWESample, not the siirl
+        # Pydantic Sample). Seed / rid already captured on the earlier
+        # set_sample call above, so this rebind is safe.
+        if hasattr(model, "_current_sample"):
+            model._current_sample = s
 
-        def run_preprocess_in_thread():
-            """Run the async preprocess in a new event loop in executor thread."""
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(self.flow.preprocess(sample_data, model=model, is_validate=is_validate))
-            finally:
-                loop.close()
-
-        loop = asyncio.get_running_loop()
-        s = await loop.run_in_executor(None, run_preprocess_in_thread)
         try:
             await self.flow.generate(s)
             await self.flow.reward(s)
@@ -631,16 +637,26 @@ class AgentFlowCallable:
             # put_partial the sample.
             raise
         except SglangGenerationAborted:
-            # SWEAgentFlow writes partial_agent_data onto ``s.m.rollout``;
-            # move it onto the siirl Sample before handing off.
-            partial = getattr(getattr(s, "m", None), "rollout", None) and getattr(s.m.rollout, "partial_agent_data", None)
+            # Both SWEAgentFlow and ActionLevelSWEAgentFlow write the abort
+            # snapshot onto the top-level ``s.partial_agent_data`` (Sample's
+            # pydantic field). Move it onto the siirl Sample (different object)
+            # before handing off to NaiveExecutor.
+            partial = getattr(s, "partial_agent_data", None)
+            # Backward-compat fallback: any flow that still writes to
+            # ``m.rollout.partial_agent_data`` will be picked up here too.
+            if not partial:
+                rollout_meta = getattr(getattr(s, "m", None), "rollout", None)
+                if rollout_meta is not None:
+                    partial = getattr(rollout_meta, "partial_agent_data", None)
             if partial:
                 sample.partial_agent_data = partial
-                raise RolloutGenerationAborted(sample) from None
+                raise RolloutGenerationAborted(sample)
             # No usable partial (env detach failed, or abort hit before we
             # got a snapshot). Fall through to the generic fail path so the
             # sample still makes it into the batch with reward=0.
-            logger.warning("[AgentFlowCallable] Abort without partial; falling through to fail")
+            logger.warning(
+                "[AgentFlowCallable] Abort without partial; falling through to fail"
+            )
             s.reward = 0.0
         except EnvCreateError as e:
             logger.warning(f"Create Env Failed, set sample to default None {e}", exc_info=True)
@@ -677,15 +693,14 @@ class AgentFlowCallable:
                 # presence here also implies resume.
                 rollout_meta = getattr(getattr(s, "m", None), "rollout", None)
                 was_resume = (
-                    getattr(rollout_meta, "partial_state", None) is not None or getattr(sample, "partial_agent_data", None) is not None
+                    getattr(rollout_meta, "partial_state", None) is not None
+                    or getattr(sample, "partial_agent_data", None) is not None
                 )
                 exit_status = getattr(rollout_meta, "exit_status", None)
                 logger.warning(
-                    "[AgentFlowCallable] EMPTY-ROLLOUT-FALLBACK uid=%s " "was_resume=%s exit_status=%s prompts_len=%s tokens_len=0",
-                    uid,
-                    was_resume,
-                    exit_status,
-                    len(s.prompts),
+                    "[AgentFlowCallable] EMPTY-ROLLOUT-FALLBACK uid=%s "
+                    "was_resume=%s exit_status=%s prompts_len=%s tokens_len=0",
+                    uid, was_resume, exit_status, len(s.prompts),
                 )
             # Return minimal valid data to avoid TransformerEngine crash
             # Use pad_token_id if available, otherwise use 0
@@ -697,6 +712,11 @@ class AgentFlowCallable:
             sample.rollout_log_prob = np.array([0.0], dtype=np.float32)
             sample.response_mask = np.array([0], dtype=np.int64)
             sample.rewards = cast(float, s.reward)
+            _rid = getattr(model, "_rid", None)
+            if _rid:
+                if sample.partial_agent_data is None:
+                    sample.partial_agent_data = {}
+                sample.partial_agent_data["rid"] = _rid
             return sample
 
         # TODO: 对齐 sample；暂时只赋值 naive_flow 里的那些
@@ -742,6 +762,13 @@ class AgentFlowCallable:
         if sample.timing_info is None:
             sample.timing_info = {}
         sample.timing_info["multiturn_turns"] = model.stats.api_calls
+
+        # Stash rid so NaiveExecutor can release the engine ref on return.
+        _rid = getattr(model, "_rid", None)
+        if _rid:
+            if sample.partial_agent_data is None:
+                sample.partial_agent_data = {}
+            sample.partial_agent_data["rid"] = _rid
 
         return sample
 
