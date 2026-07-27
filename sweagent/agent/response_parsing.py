@@ -9,6 +9,27 @@ from sweagent.utils.log import get_logger
 logger = get_logger("swea-parser", emoji="🧩")
 
 
+GLM47_REASONING_PARSER = "glm47"
+GLM47_THINK_END_TOKEN = "</think>"
+
+
+def split_glm47_reasoning(text: str) -> tuple[str | None, str]:
+    """Split a GLM-4.7 reply into (reasoning, content).
+
+    GLM-4.7 opens its reasoning with no <think> tag and only closes it with
+    </think>, and sglang registers "glm47" as a *tool-call* parser only -- its
+    reasoning detector map has no such entry, so ReasoningParser("glm47") raises.
+    Everything before </think> is the reasoning; the content keeps the FULL text.
+    Keeping the think block in the content is deliberate: the token-in RL path
+    replays the assistant turn verbatim, so a stripped content would desync from
+    the emitted tokens.
+    """
+    end = text.find(GLM47_THINK_END_TOKEN)
+    if end == -1:
+        return None, text
+    return (text[:end].strip() or None), text
+
+
 def _detect_think_and_return_ori_think(
     text: str,
     think_start_token: str,
@@ -42,24 +63,27 @@ def parse_tool_calls_with_sglang(
     if not isinstance(text, str) or not text:
         return {"message": "", "tool_calls": None, "reasoning_content": None}
 
-    reasoning_parser_p = ReasoningParser(reasoning_parser)
-    think_start_token = reasoning_parser_p.detector.think_start_token
-    think_end_token = reasoning_parser_p.detector.think_end_token
-
-    reasoning_content, content_text = _detect_think_and_return_ori_think(
-        text,
-        think_start_token,
-        think_end_token,
-    )
-
-    if reasoning_content:
-        if think_start_token:
-            reasoning_content = reasoning_content.replace(think_start_token, "", 1)
-        if reasoning_content.endswith(think_end_token):
-            reasoning_content = reasoning_content[: -len(think_end_token)]
-        reasoning_content = reasoning_content.strip() or None
+    if reasoning_parser == GLM47_REASONING_PARSER:
+        reasoning_content, content_text = split_glm47_reasoning(text)
     else:
-        reasoning_content = None
+        reasoning_parser_p = ReasoningParser(reasoning_parser)
+        think_start_token = reasoning_parser_p.detector.think_start_token
+        think_end_token = reasoning_parser_p.detector.think_end_token
+
+        reasoning_content, content_text = _detect_think_and_return_ori_think(
+            text,
+            think_start_token,
+            think_end_token,
+        )
+
+        if reasoning_content:
+            if think_start_token:
+                reasoning_content = reasoning_content.replace(think_start_token, "", 1)
+            if reasoning_content.endswith(think_end_token):
+                reasoning_content = reasoning_content[: -len(think_end_token)]
+            reasoning_content = reasoning_content.strip() or None
+        else:
+            reasoning_content = None
 
     if not tools or not content_text:
         return {
