@@ -94,6 +94,22 @@ class GenericAPIModelConfig(PydanticBaseModel):
     stop: list[str] = []
     """Custom stop sequences"""
 
+    stop_token_ids: list[int] = []
+    """Stop token ids (e.g. the chat turn terminator <|im_end|>) for servers whose
+    eos_token_id / generation_config omits it. siirl injects this from the served
+    tokenizer and it is passed through via extra_body. Empty = no override."""
+
+    completion_api: bool = False
+    """If True, render the prompt client-side with the model's own chat template and call
+    the /v1/completions endpoint (litellm text_completion) instead of /v1/chat/completions,
+    parsing tool calls client-side. Needed for VL models (the whole Qwen3.5 family) whose
+    sglang chat endpoint drops the text prompt -- prompt_tokens collapses to ~15 and the
+    model degenerates. Requires an hf tokenizer on the model (LiteLLMModel.hf_tokenizer)."""
+
+    tool_call_parser: str = "qwen3_coder"
+    """Tool-call parser used to extract tool calls from the raw completion text when
+    completion_api is True (sglang FunctionCallParser name)."""
+
     completion_kwargs: dict[str, Any] = {}
     """Additional kwargs to pass to `litellm.completion`"""
 
@@ -656,6 +672,9 @@ class LiteLLMModel(AbstractModel):
         self.custom_tokenizer = None
         if self.config.custom_tokenizer is not None:
             self.custom_tokenizer = litellm.utils.create_pretrained_tokenizer(**self.config.custom_tokenizer)
+        # HF tokenizer for client-side chat-template rendering when config.completion_api
+        # is True; injected by the caller (see LiteLLMAgentBuilder.build).
+        self.hf_tokenizer = None
 
     @property
     def instance_cost_limit(self) -> float:
@@ -709,9 +728,178 @@ class LiteLLMModel(AbstractModel):
         async with GLOBAL_STATS_LOCK:
             GLOBAL_STATS.last_query_timestamp = time.time()
 
+    @staticmethod
+    def _flatten_message_content(messages: list[dict]) -> list[dict]:
+        """Prepare messages for HF apply_chat_template: collapse OpenAI multimodal 'parts'
+        content back to a plain string (the inverse of _history_to_messages' _as_parts), and
+        convert each tool_call's function.arguments from the OpenAI-style JSON string to a
+        dict -- the Qwen chat template iterates the arguments with the jinja `|items` filter,
+        which requires a mapping."""
+        flat = []
+        for m in messages:
+            m = dict(m)
+            c = m.get("content")
+            if isinstance(c, list):
+                m["content"] = "".join(
+                    p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text"
+                )
+            tool_calls = m.get("tool_calls")
+            if tool_calls:
+                new_tcs = []
+                for tc in tool_calls:
+                    tc = dict(tc)
+                    fn = dict(tc.get("function") or {})
+                    args = fn.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            fn["arguments"] = json.loads(args) if args.strip() else {}
+                        except Exception:
+                            fn["arguments"] = {}
+                    tc["function"] = fn
+                    new_tcs.append(tc)
+                m["tool_calls"] = new_tcs
+            flat.append(m)
+        return flat
+
+    def _parse_completion_text(self, text: str) -> tuple[str, str | None, list[dict]]:
+        """Parse raw /v1/completions output into (content, reasoning_content, tool_calls).
+
+        The prompt ends with the assistant header plus an open '<think>', so the generated
+        text starts *inside* the think block: '<reasoning></think>\\n\\n<content><tool_call>...'
+        -- there is no opening tag to look for, only the closing one. Tool calls are then
+        extracted with sglang's FunctionCallParser, mirroring what the chat endpoint would
+        have done server-side.
+        """
+        import uuid as _uuid
+
+        reasoning = None
+        rest = text
+        close = text.find("</think>")
+        if close != -1:
+            reasoning = text[:close].strip() or None
+            rest = text[close + len("</think>") :]
+
+        tool_calls: list[dict] = []
+        normal_text = rest
+        if self.tools.use_function_calling and self.tools.tools:
+            try:
+                from sglang.srt.entrypoints.openai.protocol import Function as _SGLFunction
+                from sglang.srt.entrypoints.openai.protocol import Tool as _SGLTool
+                from sglang.srt.function_call.function_call_parser import FunctionCallParser
+
+                tools_list = [
+                    _SGLTool(type=t.get("type", "function"), function=_SGLFunction(**t["function"]))
+                    for t in self.tools.tools
+                ]
+                parser = FunctionCallParser(tools_list, self.config.tool_call_parser)
+                normal_text, calls = parser.parse_non_stream(rest.lstrip())
+                for c in calls:
+                    d = c.model_dump() if hasattr(c, "model_dump") else (c.dict() if hasattr(c, "dict") else c)
+                    fn = d.get("function") if isinstance(d.get("function"), dict) else {}
+                    name = fn.get("name") or d.get("name")
+                    if not isinstance(name, str) or not name:
+                        continue
+                    args = None
+                    for src in (fn, d):
+                        if "arguments" in src:
+                            args = src["arguments"]
+                            break
+                        if "parameters" in src:
+                            args = src["parameters"]
+                            break
+                    if args is None:
+                        args = "{}"
+                    if isinstance(args, dict):
+                        args = json.dumps(args, ensure_ascii=False)
+                    tool_calls.append(
+                        {
+                            "id": f"call_{_uuid.uuid4().hex[:24]}",
+                            "type": "function",
+                            "function": {"name": name, "arguments": str(args)},
+                        }
+                    )
+            except Exception as e:
+                self.logger.warning(f"[completion_api] tool-call parse failed: {e}")
+                normal_text = rest
+        return (normal_text or "").strip(), reasoning, tool_calls
+
+    async def _completions_query(
+        self, messages: list[dict[str, str]], n: int | None = None, temperature: float | None = None
+    ) -> list[dict]:
+        """Render the prompt with the model's official chat template (client-side) and hit
+        /v1/completions instead of /v1/chat/completions. Avoids sglang's VL multimodal chat
+        preprocessing, which silently drops the text prompt for these models."""
+        await self._sleep()
+        tools = self.tools.tools if self.tools.use_function_calling else None
+        flat = self._flatten_message_content(messages)
+        # Template rendering and encoding are pure CPU; hoist them off the event loop so
+        # other in-flight samples on the shared worker loop keep progressing.
+        prompt = await asyncio.to_thread(
+            self.hf_tokenizer.apply_chat_template,
+            flat,
+            tools=tools,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        input_tokens = len(await asyncio.to_thread(self.hf_tokenizer.encode, prompt))
+        if self.model_max_input_tokens is not None and 0 < self.model_max_input_tokens < input_tokens:
+            raise ContextWindowExceededError(
+                f"Input tokens {input_tokens} exceed max tokens {self.model_max_input_tokens}"
+            )
+
+        completion_kwargs = dict(self.config.completion_kwargs)
+        completion_kwargs.pop("custom_llm_provider", None)  # force the text-completion provider below
+        extra_body = dict(completion_kwargs.pop("extra_body", {}) or {})
+        if self.config.stop_token_ids:
+            extra_body.setdefault("stop_token_ids", list(self.config.stop_token_ids))
+        call_kwargs: dict[str, Any] = {
+            "model": f"text-completion-openai/{self.config.name}",
+            "prompt": prompt,
+            "temperature": self.config.temperature if temperature is None else temperature,
+            "top_p": self.config.top_p,
+            "api_key": self.config.choose_api_key(),
+            "max_tokens": self.model_max_output_tokens,
+            "n": n if n is not None else 1,
+            "custom_llm_provider": "text-completion-openai",
+            "fallbacks": self.config.fallbacks,
+            "extra_body": extra_body,
+            **completion_kwargs,
+        }
+        if self.config.api_base:
+            call_kwargs["api_base"] = self.config.api_base
+
+        _atext = getattr(litellm, "atext_completion", None)
+        if _atext is not None:
+            response = await _atext(**call_kwargs)
+        else:
+            response = await asyncio.to_thread(litellm.text_completion, **call_kwargs)
+
+        try:
+            cost = litellm.cost_calculator.completion_cost(response, model=self.config.name)
+        except Exception as e:
+            self.logger.debug(f"Error calculating cost: {e}, setting cost to 0.")
+            cost = 0
+        outputs = []
+        output_tokens = 0
+        for choice in response.choices:
+            text = choice.text or ""
+            if text:
+                output_tokens += len(await asyncio.to_thread(self.hf_tokenizer.encode, text))
+            content, reasoning, tool_calls = self._parse_completion_text(text)
+            output_dict: dict = {"message": content}
+            if self.tools.use_function_calling:
+                output_dict["tool_calls"] = tool_calls
+            if reasoning:
+                output_dict["reasoning_content"] = reasoning
+            outputs.append(output_dict)
+        await self._update_stats(input_tokens=input_tokens, output_tokens=output_tokens, cost=cost)
+        return outputs
+
     async def _single_query(
         self, messages: list[dict[str, str]], n: int | None = None, temperature: float | None = None
     ) -> list[dict]:
+        if self.config.completion_api and self.hf_tokenizer is not None:
+            return await self._completions_query(messages, n=n, temperature=temperature)
         await self._sleep()
         # deepcopy + cache_control strip is the dominant CPU cost on long
         # histories; offload to the loop's CPU pool so other in-flight
@@ -884,22 +1072,34 @@ class LiteLLMModel(AbstractModel):
                 return "user" if self.config.convert_system_to_user else "system"
             return history_item["role"]
 
+        def _as_parts(content):
+            # VL chat endpoints (e.g. Qwen3.5-VL served by SGLang) require the
+            # OpenAI multimodal "parts" content format; a bare string makes the
+            # chat template render empty and the server returns 400
+            # ("texts cannot be empty"). Wrap a non-empty string as one text part;
+            # leave None (e.g. an assistant message that only carries tool_calls)
+            # and any already-structured (list) content untouched. The parts format
+            # is also accepted by text-only OpenAI-compatible servers, so it's safe.
+            if isinstance(content, str) and content:
+                return [{"type": "text", "text": content}]
+            return content
+
         messages = []
         for history_item in history:
             role = get_role(history_item)
             if role == "tool":
                 message = {
                     "role": role,
-                    "content": history_item["content"],
+                    "content": _as_parts(history_item["content"]),
                     # Only one tool call per observations
                     "tool_call_id": history_item["tool_call_ids"][0],  # type: ignore
                 }
             elif (tool_calls := history_item.get("tool_calls")) is not None:
-                message = {"role": role, "content": history_item["content"], "tool_calls": tool_calls}
+                message = {"role": role, "content": _as_parts(history_item["content"]), "tool_calls": tool_calls}
                 if thinking_blocks := history_item.get("thinking_blocks"):
                     message["thinking_blocks"] = thinking_blocks
             else:
-                message = {"role": role, "content": history_item["content"]}
+                message = {"role": role, "content": _as_parts(history_item["content"])}
             if "cache_control" in history_item:
                 message["cache_control"] = history_item["cache_control"]
             messages.append(message)
